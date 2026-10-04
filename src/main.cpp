@@ -639,9 +639,10 @@ struct Game {
             {"BONDS", &Game::buildBondTest, "WAX AND SHEAR-PIN BONDS"},
             {"PRIMER", &Game::buildPrimerTest, "A FIRING PIN STRIKES A PRIMER"},
             {"FANS", &Game::buildFanTest, "BLOWERS, A CLOSED DUCT AND A VACUUM FAN"},
+            {"JET ENGINE", &Game::buildJetEngine, "FAN, FUEL, SPARK PLUG AND NOZZLE ON A TEST STAND"},
             {"ROAD + FOCUS", &Game::buildRoadTest, "A FAN-DRIVEN CAR AND THE FOLLOWING CAMERA"},
         };
-        const int n = 12, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
+        const int n = 13, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
         int cw = cols * bw + (cols + 1) * gapx, ch = 70 + ((n + cols - 1) / cols) * (bh + gapy) + 16;
         SDL_Rect card{(SIM_W - cw) / 2, (SIM_H - ch) / 2, cw, ch};
         PItem bg; bg.kind = 5; bg.r = card; modal.push_back(bg);
@@ -1715,6 +1716,30 @@ struct Game {
         int f4 = phys.addBox(Vec2(367, 80), Vec2(2, 17.5f), 0, M_STEEL, true);
         phys.bodies[f4].fan.strength = 90.f; phys.bodies[f4].fan.vacuum = 1;
         label(312, 48, "VACUUM FAN DRAWS THE CHAMBER EMPTY");
+        phys.stampBodies();
+    }
+    // Turbojet test stand: a fan compresses air into a combustor, fuel burns, the hot gas leaves through a nozzle.
+    void buildJetEngine() {
+        resetWorld();
+        rect(0, 200, World::W - 1, 203, M_WALL);
+        // casing (steel walls, open at both ends) with a pinched nozzle at the back
+        rect(60, 86, 190, 88, M_STEEL); rect(60, 112, 190, 114, M_STEEL);
+        for (int i = 0; i < 12; ++i) {   // converging nozzle
+            rect(150 + i * 3, 89, 152 + i * 3, 89 + i / 2, M_STEEL);
+            rect(150 + i * 3, 111 - i / 2, 152 + i * 3, 111, M_STEEL);
+        }
+        // compressor: a blower filling the inlet
+        int comp = phys.addBox(Vec2(70, 100), Vec2(1.5f, 11.5f), 0, M_STEEL, true);
+        phys.bodies[comp].fan.strength = 120.f;
+        // fuel: an emitter feeding propane gas just behind the compressor, spark plug in the combustor
+        int fuel = phys.addBox(Vec2(80, 100), Vec2(1.5f, 1.5f), 0, M_STEEL, true);
+        phys.bodies[fuel].src = Emitter{true, M_PROPANE, 400.f, 0.f, 0};
+        rect(104, 89, 104, 92, M_IGNITER);
+        sparkIdx = 5; world.sparkPeriod = SPARK_RATES[sparkIdx];
+        label(58, 70, "COMPRESSOR FAN");
+        label(70, 78, "FUEL EMITTER (PROPANE)");
+        label(98, 124, "SPARK PLUG");
+        label(150, 124, "NOZZLE");
         phys.stampBodies();
     }
     void buildRoadTest() {
@@ -3194,6 +3219,7 @@ int main(int argc, char** argv) {
             case 17: g.buildElectricTest(); break;
             case 22: g.buildFanTest(); break;
             case 23: g.buildRoadTest(); break;
+            case 26: g.buildJetEngine(); break;
             case 24: {   // camera controls through real SDL events
                 g.buildRoadTest();
                 g.focusBody = -1;
