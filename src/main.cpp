@@ -198,12 +198,21 @@ struct Game {
     int bondType = 0;
     float bondT = 55.f, bondG = 10.f;
     // ---- camera: the window shows VIEW_W cells of the wider world
-    float camXf = 0.f;
-    int camX = 0;
+    float camXf = 0.f, camYf = 0.f;   // top-left of the view, in cells
+    int camX = 0, camY = 0;
+    float zoom = 1.f;                 // 1 = the whole height of the world fits; higher shows fewer, bigger cells
+    bool gridOn = true;               // reference grid and rulers
+    float sc() const { return 3.f * zoom; }                 // screen pixels per cell
+    float viewW() const { return SIM_W / sc(); }            // cells visible across / down
+    float viewH() const { return SIM_H / sc(); }
+    static constexpr float ZOOMS[7] = {1.f, 1.5f, 2.f, 3.f, 4.f, 6.f, 8.f};
+    int scrX(float x) const { return SIM_X + (int)std::lround((x - camXf) * sc()); }   // world -> window pixels
+    int scrY(float y) const { return SIM_Y + (int)std::lround((y - camYf) * sc()); }
     int focusBody = -1;        // the camera follows this body when >= 0
     bool panning = false, scrubbing = false;
-    int panStartPx = 0;
-    float panStartCam = 0.f;
+    int panStartPx = 0, panStartPy = 0;
+    float panStartCam = 0.f, panStartCamY = 0.f;
+    bool scrubbingV = false;
     bool fanVacuumDefault = false;
     bool elecView = false, pressureView = false;
     float fanPhase = 0.f;
@@ -361,6 +370,10 @@ struct Game {
         top(lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 14;
         top(lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH (P)", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
         top(lit("ELECTRIC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
+        top(lit("GRID"), "A REFERENCE GRID WITH RULERS (CELL NUMBERS) AND A SCALE BAR (K)", [this] { gridOn = !gridOn; }, [this] { return gridOn; }).gap = 14;
+        { Button& b = top(lit("-"), "ZOOM OUT (CTRL+WHEEL OR CTRL + MINUS)", [this] { zoomCentre(-1); }, nullptr); b.enabled = [this] { return zoom > 1.01f; }; b.minW = 30; }
+        top([this] { return fmt(zoom) + "X"; }, "THE ZOOM. CLICK TO RESET TO 1X (CTRL+0). MIDDLE-DRAG PANS", [this] { zoomReset(); }, [this] { return zoom > 1.01f; });
+        { Button& b = top(lit("+"), "ZOOM IN TO WORK ON SMALL STRUCTURES (CTRL+WHEEL OR CTRL + PLUS)", [this] { zoomCentre(1); }, nullptr); b.enabled = [this] { return zoom < 7.9f; }; b.minW = 30; }
         top(lit("FOCUS"), "CAMERA FOLLOWS THE SELECTED BODY (F): SELECT A VEHICLE, PRESS FOCUS, PLAY. MIDDLE-DRAG OR THE STRIP AT THE BOTTOM OF THE VIEW PANS",
             [this] { toggleFocus(); }, [this] { return focusBody >= 0; }).gap = 14;
         top(lit("SCENES"), "READY-MADE MACHINES AND TESTS", [this] { scenesOpen = !scenesOpen; }, [this] { return scenesOpen; });
@@ -1950,7 +1963,7 @@ struct Game {
 
     // ---------------------------------------------------------------- input
     // window pixel -> world cell
-    Vec2 toWorld(int mx, int my) const { return Vec2((float)(mx - SIM_X) / S + (float)camX, (float)(my - SIM_Y) / S); }
+    Vec2 toWorld(int mx, int my) const { return Vec2((float)(mx - SIM_X) / sc() + camXf, (float)(my - SIM_Y) / sc() + camYf); }
     static bool inSimPx(int x, int y) { return x >= SIM_X && x < SIM_X + SIM_W && y >= SIM_Y && y < SIM_Y + SIM_H; }
 
     // ---------------------------------------------------------------- undo / redo
@@ -2059,7 +2072,7 @@ struct Game {
     void pasteClipboard() {
         if (clip.bodies.empty()) { notify("NOTHING COPIED YET (SELECT, THEN CTRL+C)"); return; }
         pushUndo();
-        Vec2 target = inSim ? snap(mouse) : Vec2((float)camX + VIEW_W * 0.5f, World::H * 0.4f);
+        Vec2 target = inSim ? snap(mouse) : Vec2(camXf + viewW() * 0.5f, camYf + viewH() * 0.4f);
         Vec2 delta = target - clip.center;
         std::vector<int> ids;
         std::vector<std::pair<int, int>> groupMap, bondMap;
@@ -2159,10 +2172,26 @@ struct Game {
     }
 
     // ---------------------------------------------------------------- camera
-    void setCam(float x) {
-        camXf = std::clamp(x, 0.f, (float)(World::W - VIEW_W));
-        camX = (int)std::lround(camXf);
+    void setCam(float x, float y = -1e9f) {
+        camXf = std::clamp(x, 0.f, std::max(0.f, (float)World::W - viewW()));
+        if (y > -1e8f) camYf = y;
+        camYf = std::clamp(camYf, 0.f, std::max(0.f, (float)World::H - viewH()));
+        camX = (int)std::lround(camXf); camY = (int)std::lround(camYf);
     }
+    // change the zoom one step, keeping the world point under (px, py) (window pixels) where it is
+    void zoomStep(int dir, int px, int py) {
+        int idx = 0;
+        for (int i = 0; i < 7; ++i) if (std::fabs(ZOOMS[i] - zoom) < 0.01f) idx = i;
+        int ni = std::clamp(idx + dir, 0, 6);
+        if (ni == idx) { notify(dir > 0 ? "MAXIMUM ZOOM" : "ALREADY SHOWING THE WHOLE HEIGHT"); return; }
+        Vec2 anchor = toWorld(px, py);
+        float fx = (float)(px - SIM_X) / SIM_W, fy = (float)(py - SIM_Y) / SIM_H;
+        zoom = ZOOMS[ni];
+        setCam(anchor.x - fx * viewW(), anchor.y - fy * viewH());
+        notify("ZOOM " + fmt(zoom) + "X  (CTRL+WHEEL, OR CTRL + PLUS / MINUS; CTRL+0 RESETS)");
+    }
+    void zoomCentre(int dir) { zoomStep(dir, SIM_X + SIM_W / 2, SIM_Y + SIM_H / 2); }
+    void zoomReset() { zoom = 1.f; setCam(camXf, 0.f); }
     Vec2 focusPoint(bool& ok) const {
         ok = false;
         if (focusBody < 0 || focusBody >= (int)phys.bodies.size() || !phys.bodies[focusBody].alive) return Vec2();
@@ -2178,8 +2207,8 @@ struct Game {
         Vec2 f = focusPoint(ok);
         if (focusBody >= 0 && !ok) { focusBody = -1; notify("FOCUS LOST (THE BODY IS GONE)"); }
         if (!ok || panning || scrubbing) return;
-        float target = f.x - VIEW_W * 0.5f;
-        setCam(snap ? target : camXf + (target - camXf) * 0.14f);
+        float target = f.x - viewW() * 0.5f, targetY = f.y - viewH() * 0.5f;
+        setCam(snap ? target : camXf + (target - camXf) * 0.14f, snap ? targetY : camYf + (targetY - camYf) * 0.14f);
     }
     void toggleFocus() {
         if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF: THE CAMERA STAYS PUT (MIDDLE-DRAG OR THE STRIP BELOW PANS)"); return; }
@@ -2190,7 +2219,9 @@ struct Game {
         notify("FOCUS ON: THE CAMERA FOLLOWS THIS BODY. PRESS Z AGAIN TO RELEASE");
     }
     bool inScrollStrip(int localY) const { return localY >= SIM_H - 12 && localY < SIM_H; }
-    void scrubTo(int mx) { setCam((float)mx / SIM_W * World::W - VIEW_W * 0.5f); }
+    void scrubTo(int mx) { setCam((float)mx / SIM_W * World::W - viewW() * 0.5f); }
+    void scrubToY(int my) { setCam(camXf, (float)my / SIM_H * World::H - viewH() * 0.5f); }
+    bool inVStrip(int localX) const { return zoom > 1.01f && localX >= SIM_W - 12; }
 
     void createCircle(Vec2 c, float r, bool wheel) {
         int id = phys.addCircle(c, r, wheel && bodyMat == M_STEEL ? (uint8_t)M_RUBBER : bodyMat, anchored, wheel);
@@ -2454,8 +2485,9 @@ struct Game {
                     mousePx = e.motion.x; mousePy = e.motion.y;
                     mouse = toWorld(e.motion.x, e.motion.y);
                     inSim = inSimPx(e.motion.x, e.motion.y);
-                    if (panning) setCam(panStartCam - (float)(e.motion.x - panStartPx) / S);
+                    if (panning) setCam(panStartCam - (float)(e.motion.x - panStartPx) / sc(), panStartCamY - (float)(e.motion.y - panStartPy) / sc());
                     if (scrubbing) scrubTo(e.motion.x - SIM_X);
+                    if (scrubbingV) scrubToY(e.motion.y - SIM_Y);
                     break;
                 case SDL_MOUSEBUTTONDOWN: {
                     mousePx = e.button.x; mousePy = e.button.y;
@@ -2474,8 +2506,13 @@ struct Game {
                     if (left && inS && formClick(lx, ly)) break;
                     if (inS) {
                         if (e.button.button == SDL_BUTTON_MIDDLE) {
-                            panning = true; panStartPx = e.button.x; panStartCam = camXf;
+                            panning = true; panStartPx = e.button.x; panStartPy = e.button.y; panStartCam = camXf; panStartCamY = camYf;
                             if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU PANNED THE CAMERA)"); }
+                            break;
+                        }
+                        if (left && inVStrip(lx) && !helpOn && formKind == FK_NONE) {
+                            scrubbingV = true; scrubToY(ly);
+                            if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU MOVED THE CAMERA)"); }
                             break;
                         }
                         if (left && inScrollStrip(ly) && !helpOn && formKind == FK_NONE) {
@@ -2494,11 +2531,12 @@ struct Game {
                 case SDL_MOUSEBUTTONUP:
                     mouse = toWorld(e.button.x, e.button.y);
                     if (e.button.button == SDL_BUTTON_MIDDLE) { panning = false; break; }
-                    if (e.button.button == SDL_BUTTON_LEFT && scrubbing) { scrubbing = false; break; }
+                    if (e.button.button == SDL_BUTTON_LEFT && (scrubbing || scrubbingV)) { scrubbing = false; scrubbingV = false; break; }
                     if (lmb || e.button.button == SDL_BUTTON_RIGHT) handleSimUp(e.button.button);
                     break;
                 case SDL_MOUSEWHEEL:
                     if (!inSimPx(mousePx, mousePy)) break;
+                    if (SDL_GetModState() & KMOD_CTRL) { zoomStep(e.wheel.y > 0 ? 1 : -1, mousePx, mousePy); break; }
                     if (tool == T_PIPE || tool == T_HOSE) {
                         pipeD = std::clamp(pipeD + (e.wheel.y > 0 ? 1.f : -1.f), 3.f, 60.f);
                         pipeWall = std::min(pipeWall, pipeD * 0.5f);
@@ -2542,6 +2580,9 @@ struct Game {
                 case SDLK_n: newFile(); break;
                 case SDLK_g: groupSelection(); break;
                 case SDLK_u: ungroupSelection(); break;
+                case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: zoomCentre(1); break;
+                case SDLK_MINUS: case SDLK_KP_MINUS: zoomCentre(-1); break;
+                case SDLK_0: case SDLK_KP_0: zoomReset(); break;
                 default: break;
             }
             return;
@@ -2553,8 +2594,8 @@ struct Game {
             case SDLK_m: toggleFanMode(); break;
             case SDLK_HOME: if (focusBody >= 0) focusBody = -1; setCam(0); break;
             case SDLK_END: if (focusBody >= 0) focusBody = -1; setCam((float)World::W); break;
-            case SDLK_PAGEUP: if (focusBody >= 0) focusBody = -1; setCam(camXf - VIEW_W * 0.5f); break;
-            case SDLK_PAGEDOWN: if (focusBody >= 0) focusBody = -1; setCam(camXf + VIEW_W * 0.5f); break;
+            case SDLK_PAGEUP: if (focusBody >= 0) focusBody = -1; setCam(camXf - viewW() * 0.5f); break;
+            case SDLK_PAGEDOWN: if (focusBody >= 0) focusBody = -1; setCam(camXf + viewW() * 0.5f); break;
             case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: adjustFan(10.f); break;
             case SDLK_MINUS: case SDLK_KP_MINUS: adjustFan(-10.f); break;
             case SDLK_BACKSLASH: flipFan(); break;
@@ -2568,6 +2609,7 @@ struct Game {
             case SDLK_t: setFixed(!anchored); break;
             case SDLK_g: phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; notify(phys.gravity.y > 0 ? "GRAVITY DOWN" : "GRAVITY UP"); break;
             case SDLK_h: heatView = !heatView; break;
+            case SDLK_k: gridOn = !gridOn; break;
             case SDLK_p: pressureView = !pressureView; break;
             case SDLK_COMMA: sparkIdx = (sparkIdx + 6) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
             case SDLK_PERIOD: sparkIdx = (sparkIdx + 1) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
@@ -2656,11 +2698,13 @@ struct Game {
 
     void renderParticles() {
         const uint32_t bg = 0xFF000000u | MATS[M_EMPTY].color;
-        const int x0 = camX, x1 = camX + VIEW_W;   // only the visible columns are coloured
-        for (int y = 0; y < World::H; ++y)
+        // only the visible cells are coloured (one extra row and column, so a fractional camera still covers the edge)
+        const int x0 = std::clamp((int)std::floor(camXf), 0, World::W - 1), x1 = std::min(World::W, x0 + (int)std::ceil(viewW()) + 2);
+        const int y0 = std::clamp((int)std::floor(camYf), 0, World::H - 1), y1 = std::min(World::H, y0 + (int)std::ceil(viewH()) + 2);
+        for (int y = y0; y < y1; ++y)
             for (int x = x0; x < x1; ++x) { int i = y * World::W + x; pixels[i] = cellColor(world.cells[i], bg); }
         if (pressureView) {
-            for (int y = 0; y < World::H; ++y)
+            for (int y = y0; y < y1; ++y)
                 for (int x = x0; x < x1; ++x) {
                     int i = y * World::W + x;
                     const Cell& c = world.cells[i];
@@ -2676,7 +2720,7 @@ struct Game {
                 }
         }
         if (elecView && (int)world.volt.size() == World::W * World::H) {
-            for (int y = 0; y < World::H; ++y)
+            for (int y = y0; y < y1; ++y)
                 for (int x = x0; x < x1; ++x) {
                     int i = y * World::W + x;
                     int b = world.bodyMask[i];
@@ -2688,13 +2732,13 @@ struct Game {
                     pixels[i] = mix(col, 0xff9040, cur * 0.6f);
                 }
         }
-        SDL_Rect area{x0, 0, VIEW_W, World::H};
-        SDL_UpdateTexture(tex, &area, pixels.data() + x0, World::W * 4);
-        SDL_Rect dst{0, 0, SIM_W, SIM_H};
+        SDL_Rect area{x0, y0, x1 - x0, y1 - y0};
+        SDL_UpdateTexture(tex, &area, pixels.data() + (size_t)y0 * World::W + x0, World::W * 4);
+        SDL_Rect dst{(int)std::lround((x0 - camXf) * sc()), (int)std::lround((y0 - camYf) * sc()), (int)std::lround((x1 - x0) * sc()), (int)std::lround((y1 - y0) * sc())};
         SDL_RenderCopy(ren, tex, &area, &dst);
     }
 
-    SDL_FPoint sp(Vec2 p) const { return SDL_FPoint{(p.x - (float)camX) * S, p.y * S}; }
+    SDL_FPoint sp(Vec2 p) const { return SDL_FPoint{(p.x - camXf) * sc(), (p.y - camYf) * sc()}; }
 
     void fillPoly(const std::vector<Vec2>& pts, uint32_t color) { fillPolyC(pts, rgb(color)); }
     void fillPolyC(const std::vector<Vec2>& pts, SDL_Color c) {
@@ -2771,7 +2815,7 @@ struct Game {
         }
         std::string lab = std::string(b.fan.vacuum ? "VAC " : "") + fmt(mag);
         Vec2 lp = b.toWorld(Vec2(0.f, -b.half.y)) - Vec2(0.f, 7.f);
-        font::draw(ren, lab, (int)((lp.x - camX) * S) - font::textWidth(lab, 1) / 2, (int)(lp.y * S), 1, SDL_Color{255, 235, 120, 255});
+        font::draw(ren, lab, (int)sp(lp).x - font::textWidth(lab, 1) / 2, (int)sp(lp).y, 1, SDL_Color{255, 235, 120, 255});
     }
 
     void renderBodies() {
@@ -2955,6 +2999,79 @@ struct Game {
         }
     }
 
+    // ---- a frame of reference: grid lines in the world, rulers along the top and left, a scale bar, the world's edges
+    static int niceStep(float cells) {   // the smallest of 1, 2, 5, 10, 20, 50... that is at least `cells`
+        static const int steps[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000};
+        for (int s : steps) if ((float)s >= cells) return s;
+        return 1000;
+    }
+    void renderGrid() {
+        if (!gridOn) return;
+        const float s = sc();
+        const int minor = niceStep(14.f / s), label = std::max(minor, niceStep(64.f / s));
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        const int xa = (int)std::floor(camXf / minor) * minor, xb = (int)std::ceil(camXf + viewW());
+        for (int x = std::max(0, xa); x <= std::min(World::W, xb); x += minor) {
+            bool major = x % label == 0;
+            SDL_SetRenderDrawColor(ren, 150, 175, 220, major ? 46 : 18);
+            int px = (int)std::lround((x - camXf) * s);
+            SDL_RenderDrawLine(ren, px, 0, px, SIM_H);
+        }
+        const int ya = (int)std::floor(camYf / minor) * minor, yb = (int)std::ceil(camYf + viewH());
+        for (int y = std::max(0, ya); y <= std::min(World::H, yb); y += minor) {
+            bool major = y % label == 0;
+            SDL_SetRenderDrawColor(ren, 150, 175, 220, major ? 46 : 18);
+            int py = (int)std::lround((y - camYf) * s);
+            SDL_RenderDrawLine(ren, 0, py, SIM_W, py);
+        }
+    }
+    void renderRulers() {
+        const float s = sc();
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        // the edges of the world
+        SDL_SetRenderDrawColor(ren, 255, 150, 60, 200);
+        for (int ex : {0, World::W}) { int px = (int)std::lround((ex - camXf) * s); if (px >= 0 && px < SIM_W) SDL_RenderDrawLine(ren, px, 0, px, SIM_H); }
+        for (int ey : {0, World::H}) { int py = (int)std::lround((ey - camYf) * s); if (py >= 0 && py < SIM_H) SDL_RenderDrawLine(ren, 0, py, SIM_W, py); }
+        if (!gridOn) return;
+        const int minor = niceStep(14.f / s), label = std::max(minor, niceStep(64.f / s));
+        const int RW = 30, RH = 13;
+        SDL_SetRenderDrawColor(ren, 8, 11, 18, 205);
+        SDL_Rect top{0, 0, SIM_W, RH}, left{0, RH, RW, SIM_H - RH};
+        SDL_RenderFillRect(ren, &top); SDL_RenderFillRect(ren, &left);
+        SDL_SetRenderDrawColor(ren, 80, 95, 130, 255);
+        SDL_RenderDrawLine(ren, 0, RH, SIM_W, RH); SDL_RenderDrawLine(ren, RW, RH, RW, SIM_H);
+        const SDL_Color txt{170, 190, 225, 255};
+        for (int x = std::max(0, (int)std::floor(camXf / label) * label); x <= std::min(World::W, (int)std::ceil(camXf + viewW())); x += label) {
+            int px = (int)std::lround((x - camXf) * s);
+            if (px < RW) continue;
+            SDL_SetRenderDrawColor(ren, 150, 170, 210, 255); SDL_RenderDrawLine(ren, px, RH - 5, px, RH);
+            font::draw(ren, std::to_string(x), px + 3, 2, 1, txt);
+        }
+        for (int y = std::max(0, (int)std::floor(camYf / label) * label); y <= std::min(World::H, (int)std::ceil(camYf + viewH())); y += label) {
+            int py = (int)std::lround((y - camYf) * s);
+            if (py < RH + 2) continue;
+            SDL_SetRenderDrawColor(ren, 150, 170, 210, 255); SDL_RenderDrawLine(ren, RW - 5, py, RW, py);
+            font::draw(ren, std::to_string(y), 2, py + 2, 1, txt);
+        }
+        if (inSim) {   // where the pointer is, on both rulers
+            int px = (int)std::lround((mouse.x - camXf) * s), py = (int)std::lround((mouse.y - camYf) * s);
+            SDL_SetRenderDrawColor(ren, 255, 220, 100, 255);
+            if (px > RW) SDL_RenderDrawLine(ren, px, 0, px, RH - 1);
+            if (py > RH) SDL_RenderDrawLine(ren, 0, py, RW - 1, py);
+        }
+        // a scale bar: a round number of cells, 50 to 200 pixels long
+        int bar = niceStep(60.f / s);
+        if (bar * s > 220.f) bar = std::max(1, bar / 2 == 0 ? 1 : (bar == 10 ? 5 : bar == 100 ? 50 : bar / 2));
+        int bx = RW + 14, by = SIM_H - 50, bw = (int)std::lround(bar * s);
+        SDL_SetRenderDrawColor(ren, 8, 11, 18, 190);
+        SDL_Rect bg{bx - 6, by - 16, bw + 12 + 70, 28};
+        SDL_RenderFillRect(ren, &bg);
+        SDL_SetRenderDrawColor(ren, 235, 240, 250, 255);
+        SDL_RenderDrawLine(ren, bx, by, bx + bw, by);
+        SDL_RenderDrawLine(ren, bx, by - 4, bx, by + 4); SDL_RenderDrawLine(ren, bx + bw, by - 4, bx + bw, by + 4);
+        font::draw(ren, std::to_string(bar) + " CELLS", bx, by - 14, 1, SDL_Color{235, 240, 250, 255});
+    }
+
     // a strip along the bottom of the view: the whole world, the visible part, and where the moving bodies are
     void renderScrollStrip() {
         const float k = (float)SIM_W / World::W;
@@ -2967,7 +3084,7 @@ struct Game {
                 SDL_SetRenderDrawColor(ren, 170, 185, 215, 255);
                 SDL_RenderFillRect(ren, &t);
             }
-        SDL_Rect thumb{(int)(camX * k), SIM_H - 8, std::max(6, (int)(VIEW_W * k)), 8};
+        SDL_Rect thumb{(int)(camXf * k), SIM_H - 8, std::max(6, (int)(viewW() * k)), 8};
         SDL_SetRenderDrawColor(ren, 70, 100, 160, 110);
         SDL_RenderFillRect(ren, &thumb);
         SDL_SetRenderDrawColor(ren, 140, 175, 240, 255);
@@ -2979,14 +3096,25 @@ struct Game {
             SDL_SetRenderDrawColor(ren, 255, 214, 90, 255);
             SDL_RenderFillRect(ren, &t);
         }
+        if (zoom > 1.01f) {   // zoomed in: a vertical strip on the right edge shows and moves the view up and down
+            const float ky = (float)(SIM_H - 12) / World::H;
+            SDL_Rect vt{SIM_W - 8, 0, 8, SIM_H - 12};
+            SDL_SetRenderDrawColor(ren, 8, 12, 20, 210);
+            SDL_RenderFillRect(ren, &vt);
+            SDL_Rect vth{SIM_W - 8, (int)(camYf * ky), 8, std::max(6, (int)(viewH() * ky))};
+            SDL_SetRenderDrawColor(ren, 70, 100, 160, 110);
+            SDL_RenderFillRect(ren, &vth);
+            SDL_SetRenderDrawColor(ren, 140, 175, 240, 255);
+            SDL_RenderDrawRect(ren, &vth);
+        }
     }
 
     void renderLabels() {
-        for (auto& l : labels) font::draw(ren, l.s, (int)((l.p.x - camX) * S), (int)(l.p.y * S), 1, SDL_Color{200, 210, 230, 200});
+        for (auto& l : labels) font::draw(ren, l.s, (int)sp(l.p).x, (int)sp(l.p).y, 1, SDL_Color{200, 210, 230, 200});
     }
 
     void ghostLabel(Vec2 at, const std::string& t) {
-        font::draw(ren, t, (int)((at.x - camX) * S) + 8, (int)(at.y * S) - 14, 2, SDL_Color{255, 240, 150, 255});
+        font::draw(ren, t, (int)sp(at).x + 8, (int)sp(at).y - 14, 2, SDL_Color{255, 240, 150, 255});
     }
 
     void renderGhost() {
@@ -3269,7 +3397,8 @@ struct Game {
         line("CTRL+Z UNDO    CTRL+Y REDO    CTRL+C COPY    CTRL+V PASTE    CTRL+A SELECT ALL    CTRL+S SAVE    CTRL+O OPEN    CTRL+N NEW");
         line("CTRL+G GROUP    CTRL+U UNGROUP    T FIXED IN PLACE    H HEAT VIEW    P PRESSURE VIEW    G FLIP GRAVITY    [ ] BRUSH SIZE");
         line("FAN SELECTED: + / - STRENGTH    BACKSLASH FLIPS    M BLOW / VACUUM       E HOLD = SPARK PLUG    , . SPARK PLUG PERIOD");
-        line("ARROWS OR A / D DRIVE MOTORS    UP OR W FIRE ROCKETS       MIDDLE-DRAG, THE STRIP UNDER THE VIEW, HOME / END / PAGE UP / PAGE DOWN SCROLL");
+        line("ARROWS OR A / D DRIVE MOTORS    UP OR W FIRE ROCKETS       MIDDLE-DRAG, THE STRIPS AT THE VIEW EDGES, HOME / END / PAGE UP / PAGE DOWN SCROLL");
+        line("ZOOM: CTRL+WHEEL, CTRL + PLUS / MINUS, OR THE - AND + BUTTONS (CTRL+0 RESETS).    K OR THE GRID BUTTON: REFERENCE GRID, RULERS (CELL NUMBERS) AND A SCALE BAR.");
     }
 
     // things drawn over the simulation view (the viewport is already the view): messages, mode, readouts
@@ -3388,6 +3517,7 @@ struct Game {
         SDL_Rect simRect{SIM_X, SIM_Y, SIM_W, SIM_H};
         SDL_RenderSetViewport(ren, &simRect);      // from here on (0,0) is the corner of the view, and drawing is clipped to it
         renderParticles();
+        renderGrid();
         renderBodies();
         renderJoints();
         renderArcs();
@@ -3397,6 +3527,7 @@ struct Game {
         renderGhost();
         renderScrollStrip();
         renderForm();
+        renderRulers();
         renderSimOverlays();
         if (helpOn) renderHelp();
         renderModal();
@@ -3430,7 +3561,7 @@ int main(int argc, char** argv) {
     int shotFrames = 300, scene = 0;
     bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false;
     int camFlag = -1;
-    bool scenesFlag = false;
+    bool scenesFlag = false; bool timeFlag = false; float zoomFlag = 1.f, camYFlag = 0.f;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
@@ -3446,6 +3577,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc) camFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--tool") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--scenes")) scenesFlag = true;
+        else if (!std::strcmp(argv[i], "--time")) timeFlag = true;
+        else if (!std::strcmp(argv[i], "--zoom") && i + 1 < argc) zoomFlag = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--camy") && i + 1 < argc) camYFlag = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--jet") && i + 1 < argc) {   // --jet key=value,key=value
             std::string kv = argv[++i];
             size_t p = 0;
@@ -3500,7 +3634,7 @@ int main(int argc, char** argv) {
                 std::printf("middle-drag 300px left: camera at %d (expected 100)\n", g.camX);
                 e = SDL_Event{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + 900; e.button.y = SIM_Y + SIM_H - 4; push(e);
                 e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + 900; e.button.y = SIM_Y + SIM_H - 4; push(e);
-                std::printf("scroll strip click at 900px: camera at %d (expected %d)\n", g.camX, (int)std::lround(900.f / SIM_W * World::W - VIEW_W * 0.5f));
+                std::printf("scroll strip click at 900px: camera at %d (expected %d)\n", g.camX, (int)std::lround(900.f / SIM_W * World::W - g.viewW() * 0.5f));
                 e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_HOME; push(e);
                 std::printf("Home: camera at %d\n", g.camX);
                 g.selectBody(g.phys.bodies.size() > 0 ? 0 : -1, false, false);
@@ -3509,7 +3643,7 @@ int main(int argc, char** argv) {
                 g.play();
                 for (int i = 0; i < 600; ++i) g.update();
                 bool ok; Vec2 f = g.focusPoint(ok);
-                std::printf("after 600 frames the car is at x=%.0f and the camera at %d (view centre %d)\n", f.x, g.camX, g.camX + VIEW_W / 2);
+                std::printf("after 600 frames the car is at x=%.0f and the camera at %d (view centre %d)\n", f.x, g.camX, g.camX + (int)(g.viewW() / 2));
                 e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_f; push(e);
                 std::printf("F again: focus body %d\n", g.focusBody);
                 break;
@@ -3518,8 +3652,8 @@ int main(int argc, char** argv) {
                 g.resetWorld();
                 g.undoStack.clear();
                 auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
-                auto px = [&](float x) { return SIM_X + (int)std::lround((x - g.camX) * S); };
-                auto py = [&](float y) { return SIM_Y + (int)std::lround(y * S); };
+                auto px = [&](float x) { return g.scrX(x); };
+                auto py = [&](float y) { return g.scrY(y); };
                 auto mouseTo = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = px(x); e.motion.y = py(y); push(e); };
                 auto down = [&](float x, float y) { mouseTo(x, y); SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
                 auto up = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
@@ -3612,8 +3746,8 @@ int main(int argc, char** argv) {
                 g.resetWorld();
                 g.undoStack.clear();
                 auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
-                auto px = [&](float x) { return SIM_X + (int)std::lround((x - g.camX) * S); };
-                auto py = [&](float y) { return SIM_Y + (int)std::lround(y * S); };
+                auto px = [&](float x) { return g.scrX(x); };
+                auto py = [&](float y) { return g.scrY(y); };
                 auto mouseTo = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = px(x); e.motion.y = py(y); push(e); };
                 auto down = [&](float x, float y) { mouseTo(x, y); SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
                 auto up = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
@@ -3697,6 +3831,38 @@ int main(int argc, char** argv) {
                 g.tool = T_SELECT; g.selectJoint(sj);
                 break;
             }
+            case 35: {   // zoom: the mouse still lands on the right cell, Ctrl+wheel zooms about the pointer, drawing works zoomed in
+                g.resetWorld();
+                g.undoStack.clear();
+                auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
+                auto mouseTo = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = g.scrX(x); e.motion.y = g.scrY(y); push(e); };
+                auto down = [&](float x, float y) { mouseTo(x, y); SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = g.scrX(x); e.button.y = g.scrY(y); push(e); };
+                auto up = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = g.scrX(x); e.button.y = g.scrY(y); push(e); };
+                g.setCam(300.f, 60.f);
+                int px = SIM_X + 540, py = SIM_Y + 300;
+                mouseTo(0, 0);
+                { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = px; e.motion.y = py; push(e); }
+                Vec2 before = g.toWorld(px, py);
+                SDL_SetModState(KMOD_CTRL);
+                for (int i = 0; i < 4; ++i) { SDL_Event e{}; e.type = SDL_MOUSEWHEEL; e.wheel.y = 1; push(e); }
+                SDL_SetModState(KMOD_NONE);
+                Vec2 after = g.toWorld(px, py);
+                std::printf("Ctrl+wheel x4: zoom %.1fx; the cell under the pointer was (%.1f, %.1f) and is (%.1f, %.1f)\n", g.zoom, before.x, before.y, after.x, after.y);
+                g.setCam(300.f, 60.f);
+                g.tool = T_BOX; g.anchored = true;
+                down(320, 90); { mouseTo(335, 98); g.update(); mouseTo(340, 100); g.update(); } up(340, 100);
+                int made = -1; for (auto& b : g.phys.bodies) if (b.alive) made = b.id;
+                if (made >= 0) std::printf("a box dragged from (320,90) to (340,100) at %.1fx zoom: centre (%.1f, %.1f), size %.1f x %.1f (expected 330, 95, 20 x 10)\n", g.zoom, g.phys.bodies[made].pos.x, g.phys.bodies[made].pos.y, g.phys.bodies[made].half.x * 2, g.phys.bodies[made].half.y * 2);
+                else std::printf("no box was made\n");
+                // the vertical strip moves the view up and down
+                float cy0 = g.camYf;
+                { SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + SIM_W - 5; e.button.y = SIM_Y + 40; push(e); e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + SIM_W - 5; e.button.y = SIM_Y + 40; push(e); }
+                std::printf("click near the top of the vertical strip: view top moved from y=%.0f to y=%.0f\n", cy0, g.camYf);
+                g.zoomReset();
+                std::printf("reset: zoom %.1f, view top y=%.0f\n", g.zoom, g.camYf);
+                g.zoom = 4.f; g.setCam(300.f, 60.f);
+                break;
+            }
             case 34: {
                 g.resetWorld();
                 int e = g.phys.addBox(Vec2(100, 100), Vec2(6, 6), 0, M_STEEL, true);
@@ -3743,16 +3909,22 @@ int main(int argc, char** argv) {
         if (elecFlag) g.elecView = true;
         if (helpFlag) g.helpOn = true;
         if (pressureFlag) g.pressureView = true;
-        if (camFlag >= 0) g.setCam((float)camFlag);
+        g.zoom = zoomFlag;
+        if (camFlag >= 0) g.setCam((float)camFlag, camYFlag); else g.setCam(g.camXf, camYFlag);
         if (tabFlag >= 0) g.tool = (Tool)tabFlag;
         if (scenesFlag) g.scenesOpen = true;
         if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; }
         if (g0) g.phys.gravity = Vec2(0, 0);
+        double tPhys = 0, tWorld = 0;
+        auto nowS = [] { return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); };
         for (int f = 0; f < shotFrames; ++f) {
             g.phys.motorInput = (scene == 0 && f > 40) ? 1.f : 0.f;
             if (scene == 1 || scene == 2) g.phys.thrustOn = scene == 2;
+            double t0 = nowS();
             g.phys.step(1.f / 60.f);
+            double t1 = nowS();
             g.world.step();
+            tPhys += t1 - t0; tWorld += nowS() - t1;
             g.updateCamera(f == 0);
             if (!scene && f == 120) g.world.explode(352, 210, 24.f, 260.f);
             if (trace && f % (std::getenv("TRACE_EVERY") ? std::atoi(std::getenv("TRACE_EVERY")) : 120) == 0) {
@@ -3768,6 +3940,7 @@ int main(int argc, char** argv) {
                 std::printf("\n");
             }
         }
+        if (timeFlag) { double r0 = nowS(); g.render(); double r1 = nowS(); int n = 0; for (auto& c : g.world.cells) n += c.t != M_EMPTY; std::printf("   grid split ms: electricity %.2f, heat %.2f, cell updates %.2f, gas flow %.2f, liquid pressure %.2f\n", g.world.prof[0] / 1000 / g.world.profN, g.world.prof[1] / 1000 / g.world.profN, g.world.prof[2] / 1000 / g.world.profN, g.world.prof[3] / 1000 / g.world.profN, g.world.prof[4] / 1000 / g.world.profN); std::printf("TIME per frame: bodies+emitters+fans %.2f ms, grid %.2f ms, render %.2f ms; %d non-empty cells\n", 1000 * tPhys / shotFrames, 1000 * tWorld / shotFrames, 1000 * (r1 - r0), n); }
         std::printf("burn events: %ld\n", g.world.burnEvents);
         std::printf("elec: vMax=%.4g iSource=%.3g arcs=%ld\n", g.world.vMax, g.world.iSource, g.world.arcCount);
         for (auto& b : g.phys.bodies) if (b.alive && b.shape == SHAPE_CIRCLE) std::printf("wheel w=%.2f angle=%.1f\n", b.w, b.angle);
@@ -3786,7 +3959,7 @@ int main(int argc, char** argv) {
         double frame = (double)(now - last) / (double)SDL_GetPerformanceFrequency();
         last = now;
         if (frame > 0) g.fps = g.fps * 0.95f + (float)(1.0 / frame) * 0.05f;
-        acc = std::min(acc + frame, 0.1);
+        acc = std::min(acc + frame, 2.2 * dt);   // never more than two steps behind: a slow machine runs in slow motion instead of spiralling
         while (acc >= dt) { g.update(); acc -= dt; }
         g.render();
         SDL_RenderPresent(g.ren);

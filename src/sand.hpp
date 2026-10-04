@@ -87,6 +87,7 @@ public:
     void displace(int x, int y);
 
     uint32_t rnd();
+    double prof[5] = {0, 0, 0, 0, 0}; long profN = 0;   // dev: microseconds spent per frame in electricity, heat, cell updates, gas flow, liquid pressure
     int rint(int n) { return (int)(rnd() % (uint32_t)n); }
     bool chance(float p) { return (rnd() & 0xFFFF) < p * 65536.f; }
 

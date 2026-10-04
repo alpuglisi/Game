@@ -1,5 +1,7 @@
 #include "sand.hpp"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cmath>
 
 namespace {
@@ -142,8 +144,12 @@ void World::step() {
     ++sparkTimer;
     sparkNow = sparkHeld || (sparkPeriod > 0 && (int)(sparkTimer % (uint32_t)sparkPeriod) < 2);
 
+    auto tn = [] { return (double)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    double t0 = tn();
     electricity();
+    double t1 = tn();
     thermalPass();
+    double t2 = tn();
 
     bool ltr = tick & 1;
     for (int y = H - 1; y >= 0; --y) {
@@ -156,8 +162,12 @@ void World::step() {
         }
     }
 
+    double t3 = tn();
     gasFlux();
+    double t4 = tn();
     liquidPressure();
+    double t5 = tn();
+    prof[0] += t1 - t0; prof[1] += t2 - t1; prof[2] += t3 - t2; prof[3] += t4 - t3; prof[4] += t5 - t4; ++profN;
 }
 
 void World::thermalPass() {
@@ -682,30 +692,37 @@ void World::sourceCell(int x, int y) {
 // Gas moves from high to low pressure (amt * absolute temperature). Several relaxation passes per frame
 // let pressure waves outrun slow-moving pistons.
 void World::gasFlux() {
-    static std::vector<int> active;
-    active.clear();
+    static std::vector<int> cur, next;
+    static std::vector<uint32_t> mark;
+    static std::vector<uint32_t> inList;   // which pass's list a cell is in (a running counter, so stale entries never match)
+    static uint32_t listId = 0;
+    static uint32_t gen = 0;
+    if (mark.size() != (size_t)W * H) { mark.assign((size_t)W * H, 0); inList.assign((size_t)W * H, 0); }
+    cur.clear();
     for (int i = 0; i < W * H; ++i)
-        if (MATS[cells[i].t].kind == K_GAS && cells[i].t != M_FIRE) active.push_back(i);
-    if (active.empty()) return;
+        if (MATS[cells[i].t].kind == K_GAS && cells[i].t != M_FIRE) cur.push_back(i);
+    if (cur.empty()) return;
 
-    // Moves gas between cells ia (a gas cell) and ib. Returns the index of a newly created cell, or -1.
-    auto flux = [&](int ia, int ib) -> int {
-        if (bodyMask[ia] >= 0 || bodyMask[ib] >= 0) return -1;
+    // Moves gas between cells ia (a gas cell) and ib. Returns true when a worthwhile amount moved; *made gets a newly created cell, or -1.
+    auto flux = [&](int ia, int ib, int& made) -> bool {
+        made = -1;
+        if (bodyMask[ia] >= 0 || bodyMask[ib] >= 0) return false;
         Cell& a = cells[ia];
         Cell& b = cells[ib];
         bool gb = MATS[b.t].kind == K_GAS && b.t != M_FIRE;
         if (gb && !sameFluid(a, b)) {
             if (rint(16) == 0) std::swap(a, b);  // different gases slowly mix
-            return -1;
+            return false;
         }
         if (b.t == M_EMPTY) {
             float f = a.amt * 0.4f;
-            if (f < 0.005f) return -1;
+            if (f < 0.005f) return false;
             Cell n;
             n.t = a.t; n.clock = clk; n.life = a.t == M_VAPOR ? a.life : (uint8_t)0; n.var = a.var; n.temp = a.temp; n.amt = f;
             b = n;
             a.amt -= f;
-            return ib;
+            made = ib;
+            return true;
         }
         if (gb) {
             float ta = a.temp + 273.f, tb = b.temp + 273.f;
@@ -714,19 +731,28 @@ void World::gasFlux() {
             Cell& lo = psiA > psiB ? b : a;
             float f = 0.8f * std::fabs(psiA - psiB) / (ta + tb);
             f = std::min(f, hi.amt * 0.9f);
-            if (f <= 0.f) return -1;
+            if (f <= 0.f) return false;
             float nb = lo.amt + f;
             lo.temp = (lo.temp * lo.amt + hi.temp * f) / nb;
             lo.amt = nb;
             hi.amt -= f;
+            return f > 0.0012f;
         }
-        return -1;
+        return false;
     };
+    // Pressure waves travel up to 24 cells a frame, but only where something is still changing: after the first pass
+    // a cell takes part only if it or a neighbour moved a noticeable amount of gas in the pass before. A large still
+    // cloud (the air round a fan) therefore costs one pass, not twenty-four.
     for (int pass = 0; pass < 24; ++pass) {
-        size_t n = active.size();
+        next.clear();
+        ++gen;
+        ++listId;
+        for (int i : cur) inList[i] = listId;
+        auto touch = [&](int i) { if (mark[i] != gen) { mark[i] = gen; next.push_back(i); } };
+        size_t n = cur.size();
         bool rev = (tick + pass) & 1;
         for (size_t k = 0; k < n; ++k) {
-            int i = active[rev ? n - 1 - k : k];
+            int i = cur[rev ? n - 1 - k : k];
             Cell& a = cells[i];
             if (MATS[a.t].kind != K_GAS || a.t == M_FIRE) continue;
             int x = i % W, y = i / W;
@@ -735,15 +761,44 @@ void World::gasFlux() {
                 int j = nbs[d];
                 if (j < 0) continue;
                 // gas-gas pairs are visited from both ends: handle each once
-                if (MATS[cells[j].t].kind == K_GAS && cells[j].t != M_FIRE && j < i) continue;
+                bool gj = MATS[cells[j].t].kind == K_GAS && cells[j].t != M_FIRE;
+                if (gj && j < i && inList[j] == listId) continue;   // that end is in this pass's list and handles the pair itself
                 if (cells[i].t == M_EMPTY || MATS[cells[i].t].kind != K_GAS) break;
-                int made = flux(i, j);
-                if (made >= 0) active.push_back(made);
+                int made;
+                bool moved = flux(i, j, made);
+                if (moved) {
+                    touch(i);
+                    touch(j);
+                    // the neighbours of both ends must be in the next pass too: they now see a different pressure
+                    for (int e : {i, j}) {
+                        int ex = e % W, ey = e / W;
+                        if (ex + 1 < W && MATS[cells[e + 1].t].kind == K_GAS) touch(e + 1);
+                        if (ex > 0 && MATS[cells[e - 1].t].kind == K_GAS) touch(e - 1);
+                        if (ey + 1 < H && MATS[cells[e + W].t].kind == K_GAS) touch(e + W);
+                        if (ey > 0 && MATS[cells[e - W].t].kind == K_GAS) touch(e - W);
+                    }
+                }
             }
         }
+        // cells that thinned out or became empty stay harmlessly in the list: they are skipped when visited
+        if (next.empty()) break;
+        cur.swap(next);
+        // gas cells created this pass are in 'next' already via touch(j)
     }
-    for (int i : active)
-        if (MATS[cells[i].t].kind == K_GAS && cells[i].amt < 0.004f) cells[i].t = M_EMPTY;
+    // the open air: gas does not pile up against the edge of the world or hang on at the fringes of a cloud
+    for (int x = 0; x < W; ++x) { for (int y : {0, H - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
+    for (int y = 0; y < H; ++y) { for (int x : {0, W - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
+    for (int i = 0; i < W * H; ++i) {
+        Cell& c = cells[i];
+        if (MATS[c.t].kind != K_GAS || c.t == M_FIRE) continue;
+        if (c.amt < 0.004f) { c.t = M_EMPTY; continue; }
+        if (c.amt < 0.03f && bodyMask[i] < 0) {   // thin gas bordering open void disperses
+            int x = i % W, y = i / W;
+            bool open = (x + 1 < W && cells[i + 1].t == M_EMPTY && bodyMask[i + 1] < 0) || (x > 0 && cells[i - 1].t == M_EMPTY && bodyMask[i - 1] < 0) ||
+                        (y + 1 < H && cells[i + W].t == M_EMPTY && bodyMask[i + W] < 0) || (y > 0 && cells[i - W].t == M_EMPTY && bodyMask[i - W] < 0);
+            if (open) { c.amt *= 0.9f; if (c.amt < 0.008f) c.t = M_EMPTY; }
+        }
+    }
 }
 
 // Liquids are incompressible but may be squeezed (amt > 1) when a rigid body displaces them in a sealed
