@@ -45,6 +45,7 @@ void World::clear() {
     bodyMask.assign(W * H, -1);
     gasVX.assign((size_t)W * H, 0.f); gasVY.assign((size_t)W * H, 0.f);
     blasts.clear();
+    sourceAmt = 1.f;
 }
 
 void World::save(Writer& w) const {
@@ -66,6 +67,7 @@ bool World::load(Reader& r) {
     battV = r.pod<float>(); battA = r.pod<float>(); sparkPeriod = r.pod<int>(); burnEvents = (long)r.pod<int64_t>();
     bodyMask.assign(W * H, -1);
     gasVX.assign((size_t)W * H, 0.f); gasVY.assign((size_t)W * H, 0.f);   // (the flow field is not saved: a loaded world starts still)
+    sourceAmt = 1.f;   // a painting setting, not part of the file: a loaded world paints sources at the default again
     blasts.clear(); arcs.clear();
     volt.clear(); curr.clear(); elecCool.clear(); hadElec = false; vMax = iSource = 0.f; arcCount = 0;
     return r.ok;

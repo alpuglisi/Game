@@ -872,6 +872,24 @@ void buoyancyArea() {
                       (int)stamped, n, mx, n ? sum / n : 0.f);
         check(stamped && n >= 50 && mx < 0.8f && sum / std::max(1, n) > 0.6f, "a painted source takes the source density setting and fills its chamber to it", d);
     }
+    {   // liquid that wets a side but holds nothing up: a puddle against one side of a plate lying on dry ground, and a tap running down
+        // its sides, must not lift it (the clipped area only counts where there is liquid under the body, and a surface must be a pool's)
+        float lift[2], maxSub[2];
+        for (int tap = 0; tap < 2; ++tap) {
+            Rig r;
+            r.world.fillRect(40, 150, 200, 153, M_WALL);                                            // the floor
+            if (tap) { r.world.fillRect(70, 149, 89, 149, M_VOID); r.world.fillRect(111, 149, 130, 149, M_VOID); }   // drains, so the runoff does not pool
+            int id = r.phys.addBox(Vec2(100, 146), Vec2(10, 4), 0, M_WOOD, false);                 // a 20 x 8 wood plate resting on the floor
+            r.phys.stampBodies();
+            if (tap) r.world.fillRect(98, 100, 102, 100, M_SOURCE, M_WATER);                       // a tap 40 cells above it
+            else { r.world.fillRect(116, 140, 117, 149, M_WALL); r.world.fillRect(111, 146, 115, 149, M_WATER); }   // a kerb and a puddle 4 deep against its right side
+            float y0 = r.phys.bodies[id].pos.y, minY = y0; maxSub[tap] = 0.f;
+            for (int i = 0; i < 300; ++i) { r.step(1); maxSub[tap] = std::max(maxSub[tap], r.phys.bodies[id].subFrac); minY = std::min(minY, r.phys.bodies[id].pos.y); }
+            lift[tap] = y0 - minY;
+        }
+        char d[128]; std::snprintf(d, sizeof d, "puddle on one side: lifted %.2f cells, submerged fraction up to %.2f | tap: lifted %.2f, up to %.2f", lift[0], maxSub[0], lift[1], maxSub[1]);
+        check(lift[0] < 0.3f && maxSub[0] < 0.4f && lift[1] < 0.3f && maxSub[1] < 0.4f, "a plate on dry ground is not lifted by a puddle against its side or by a tap running down it", d);
+    }
 }
 
 // fixes from the second review of the rigid-body engine

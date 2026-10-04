@@ -872,12 +872,22 @@ void Physics::sampleFluids() {
             }
         if (wetW <= 0.f) return 0;
         if (airW <= 0.f) return wetW >= blockedW ? 1 : 3;   // sunk to the floor: submerged; a piston at the end of its bore: mostly wall, not a pool
+        // The clipped area only stands for displaced liquid when there is liquid under the body. A puddle against one side of a
+        // plate lying on dry ground, or a stream running down it, wets its side but holds nothing up.
+        float underWet = 0.f;
+        for (int id : ids) {
+            const float cs = dot(bodies[id].pos, g);
+            for (int i = own[id].s0; i < own[id].s1; ++i) { const Sample& sm = smp[i]; if (!sm.side && sm.kind == 1 && sm.s > cs) underWet += sm.w; }
+        }
+        if (underWet <= 0.f) return 3;
         // Read the level off the grid at the sides: up from the wet side samples nearest the waterline until the liquid ends,
         // down from the air side samples just above them until liquid starts, then bisect for the cell edge. The top and bottom
         // faces do not count: a pocket of air left under a rising plate, or a stream falling on top, says nothing about where
-        // the pool's surface is. A wall or a body in the way spoils a walk.
-        float sum = 0; int cnt = 0;
-        auto walk = [&](Vec2 from, int have) {
+        // the pool's surface is. A wall or a body in the way spoils a walk, and so does a boundary that is not a pool's: the
+        // liquid must go on sideways, away from the body, or it is the top of a stream running down the body's side.
+        float sum = 0, lvMin = 1e9f, lvMax = -1e9f; int cnt = 0;
+        const Vec2 pg(-g.y, g.x);   // across gravity
+        auto walk = [&](Vec2 from, int have, Vec2 centre) {
             Vec2 step = g * (have ? -0.5f : 0.5f);
             Vec2 q = from;
             for (int i = 0; i < 12; ++i) {
@@ -886,7 +896,11 @@ void Physics::sampleFluids() {
                 if (k == have) { q = nq; continue; }
                 if (k != 1 - have) return;
                 for (int it = 0; it < 3; ++it) { Vec2 mid = (q + nq) * 0.5f; if (cellKind(mid) == have) q = mid; else nq = mid; }
-                sum += dot((q + nq) * 0.5f, g); ++cnt;
+                const Vec2 liq = have ? q : nq;
+                const float away = dot(from - centre, pg) >= 0.f ? 1.f : -1.f;
+                if (cellKind(liq + pg * (2.f * away)) != 1 || cellKind(liq + pg * (3.f * away)) != 1) return;
+                const float lv = dot((q + nq) * 0.5f, g);
+                sum += lv; ++cnt; lvMin = std::min(lvMin, lv); lvMax = std::max(lvMax, lv);
                 return;
             }
         };
@@ -894,10 +908,10 @@ void Physics::sampleFluids() {
             for (int i = own[id].s0; i < own[id].s1; ++i) {
                 const Sample& sm = smp[i];
                 if (!sm.side) continue;
-                if (sm.kind == 1 && sm.s < sMinWet + 3.5f) walk(sm.p, 1);
-                else if (sm.kind == 0 && sm.s <= sMinWet + 0.5f && sm.s > sMinWet - 7.5f) walk(sm.p, 0);
+                if (sm.kind == 1 && sm.s < sMinWet + 3.5f) walk(sm.p, 1, bodies[id].pos);
+                else if (sm.kind == 0 && sm.s <= sMinWet + 0.5f && sm.s > sMinWet - 7.5f) walk(sm.p, 0, bodies[id].pos);
             }
-        if (cnt == 0) return 3;
+        if (cnt == 0 || lvMax - lvMin > 2.f) return 3;   // readings that disagree by more than two cells are not one surface
         level = sum / cnt;
         // the samples that disagree with that surface (liquid above it, air below it) must be a small minority: an air pocket
         // or a splash, not liquid against one face of a piston or a wave washing over the body
