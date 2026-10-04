@@ -172,7 +172,7 @@ void World::electricity() {
             if (!isD[a] || cells[cellOf[a]].t != M_BATT_POS) continue;
             for (int k = 0; k < 4; ++k) {
                 int q = nb[4 * a + k];
-                if (q < 0 || isD[q]) continue;
+                if (q < 0 || (isD[q] && cells[cellOf[q]].t != M_BATT_NEG)) continue;   // (a + cell touching a - cell is a dead short, and counts)
                 float cur = g[4 * a + k] * (x[a] - x[q]);
                 if (cur > 0) compI[comp[a]] += cur;
             }
@@ -188,6 +188,7 @@ void World::electricity() {
     // ---- publish potentials, currents, heating
     std::fill(volt.begin(), volt.end(), 0.f);
     std::fill(curr.begin(), curr.end(), 0.f);
+    bodyHeat.assign(bodySigma.size(), 0.f);
     vMax = 0.f;
     for (int a = 0; a < n; ++a) {
         float v = x[a] * sag[comp[a]];
@@ -208,7 +209,12 @@ void World::electricity() {
             if (P < 1e-4f) continue;
             for (int end = 0; end < 2; ++end) {
                 int ci = end ? cellOf[q] : i;
-                if (bodyMask[ci] >= 0 || cells[ci].t == M_BATT_POS || cells[ci].t == M_BATT_NEG) continue;
+                if (bodyMask[ci] >= 0) {   // a conducting body heats too: the energy goes to the body, which spreads it over its whole volume
+                    int bi = bodyMask[ci];
+                    if (bi < (int)bodyHeat.size()) bodyHeat[bi] += HEAT_K * P * 0.5f / 60.f;
+                    continue;
+                }
+                if (cells[ci].t == M_BATT_POS || cells[ci].t == M_BATT_NEG) continue;
                 Cell& c = cells[ci];
                 c.temp += HEAT_K * P * 0.5f / 60.f / cellCap(c);
             }

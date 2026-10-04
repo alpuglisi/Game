@@ -1,6 +1,7 @@
 #include "sand.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cmath>
 
@@ -41,18 +42,22 @@ void World::clear() {
 }
 
 void World::save(Writer& w) const {
-    w.vec(cells);
+    static_assert(offsetof(Cell, temp) == 8, "Cell layout");
+    std::vector<Cell> tmp = cells;
+    for (Cell& c : tmp) { unsigned char* p = reinterpret_cast<unsigned char*>(&c); p[6] = 0; p[7] = 0; }   // the padding bytes: identical worlds save identical bytes
+    w.vec(tmp);
     w.pod(clk); w.pod(tick); w.pod(sparkTimer); w.pod(rng);
-    w.pod(battV); w.pod(battA); w.pod(sparkPeriod); w.pod(burnEvents);
+    w.pod(battV); w.pod(battA); w.pod(sparkPeriod); w.pod((int64_t)burnEvents);
 }
 
 bool World::load(Reader& r) {
     std::vector<Cell> c;
     r.vec(c, (size_t)W * H);
     if (!r.ok || (int)c.size() != W * H) return false;
+    for (const Cell& cc : c) if (cc.t >= M_COUNT) return false;   // a cell of a material that does not exist would index past the table
     cells = c;
     clk = r.pod<uint8_t>(); tick = r.pod<uint32_t>(); sparkTimer = r.pod<uint32_t>(); rng = r.pod<uint32_t>();
-    battV = r.pod<float>(); battA = r.pod<float>(); sparkPeriod = r.pod<int>(); burnEvents = r.pod<long>();
+    battV = r.pod<float>(); battA = r.pod<float>(); sparkPeriod = r.pod<int>(); burnEvents = (long)r.pod<int64_t>();
     bodyMask.assign(W * H, -1);
     blasts.clear(); arcs.clear();
     volt.clear(); curr.clear(); elecCool.clear(); hadElec = false; vMax = iSource = 0.f; arcCount = 0;
@@ -171,8 +176,12 @@ void World::step() {
 }
 
 void World::thermalPass() {
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
+    const bool rev = tick & 1;   // alternate the sweep direction so heat does not creep one way
+    const int sd = rev ? -1 : 1;
+    for (int yy = 0; yy < H; ++yy) {
+        const int y = rev ? H - 1 - yy : yy;
+        for (int xx = 0; xx < W; ++xx) {
+            const int x = rev ? W - 1 - xx : xx;
             int i = y * W + x;
             Cell& a = cells[i];
             uint8_t t = a.t;
@@ -186,8 +195,8 @@ void World::thermalPass() {
                 }
             }
 
-            if (x + 1 < W && cells[i + 1].t != M_EMPTY) exchange(a, cells[i + 1]);
-            if (y + 1 < H && cells[i + W].t != M_EMPTY) exchange(a, cells[i + W]);
+            if (x + sd >= 0 && x + sd < W && cells[i + sd].t != M_EMPTY) exchange(a, cells[i + sd]);
+            if (y + sd >= 0 && y + sd < H && cells[i + sd * W].t != M_EMPTY) exchange(a, cells[i + sd * W]);
 
             // exposure to the (infinite, ambient) outside
             int e = 0;
@@ -217,7 +226,7 @@ void World::updateCell(int x, int y) {
     if (phase(x, y)) return;
     Cell& c = at(x, y);
     const MatInfo& m = MATS[c.t];
-    if (c.burn > 0 && m.kind != K_GAS) burnTick(x, y);
+    if (c.burn > 0 && m.kind != K_GAS) { const uint8_t before = c.t; burnTick(x, y); if (c.t != before) return; }   // (it may have burned away: `m` would be stale)
     if (c.t == M_EMPTY) return;
     if (m.burstP > 0.f && m.kind == K_SOLID) { uint8_t t0 = c.t; burstCheck(x, y); if (c.t != t0) return; }
     if ((m.ignT > 0 || c.t == M_VAPOR) && c.burn == 0 && tryIgnite(x, y)) return;
@@ -282,7 +291,7 @@ bool World::phase(int x, int y) {
     uint8_t to = up ? m.hiTo : m.loTo;
     float edge = up ? m.hiT : m.loT;
     if (m.latent > 0.f) {
-        float add = std::fabs(c.temp - edge) * cellCap(c) * 0.5f;
+        float add = std::fabs(c.temp - edge) * cellCap(c);   // all the heat beyond the transition goes into the latent heat, none is lost
         int p = c.life + (int)std::ceil(add);
         c.temp = edge;
         if (p < (int)m.latent) { c.life = (uint8_t)std::min(p, 255); return false; }
@@ -348,13 +357,13 @@ bool World::tryIgnite(int x, int y) {
         int nx = x + DX4[k], ny = y + DY4[k];
         if (!inb(nx, ny)) continue;
         const Cell& nc = cells[ny * W + nx];
-        if (MATS[nc.t].kind != K_GAS && nc.t != M_EMPTY && nc.t != M_FIRE && nc.temp >= m->ignT + 120.f) hot = true;
+        if (MATS[nc.t].kind != K_GAS && nc.t != M_EMPTY && nc.t != M_FIRE && nc.burn == 0 && nc.temp >= m->ignT + 120.f) hot = true;   // (a burning neighbour spreads fire at the fuel's own burn speed, below)
     }
     bool flame = false;
     if (!hot && c.temp >= m->flashT) {
         for (int k = 0; k < 4 && !flame; ++k) {
             int nx = x + DX4[k], ny = y + DY4[k];
-            if (inb(nx, ny) && cells[ny * W + nx].t == M_FIRE) flame = true;
+            if (inb(nx, ny) && (cells[ny * W + nx].t == M_FIRE || cells[ny * W + nx].burn > 0)) flame = true;
         }
     }
     if (hot || (flame && chance(m->burnSpeed))) {
@@ -371,7 +380,6 @@ void World::burn(int x, int y, const MatInfo& m) {
         if (c.life == 0) c.life = (uint8_t)(2 + rint(5));
         return;
     }
-    if (m.blastR > 0.f) explode(x, y, m.blastR, m.blastP);
     Cell& cc = at(x, y);
     if (MATS[cc.t].kind == K_GAS) {  // gas-phase combustion: the whole mixture becomes flame
         cc.var = 0;
@@ -392,7 +400,7 @@ void World::burnTick(int x, int y) {
     // water puts fires out
     for (int k = 0; k < 4; ++k) {
         int nx = x + DX4[k], ny = y + DY4[k];
-        if (inb(nx, ny) && cells[ny * W + nx].t == M_WATER) { c.burn = 0; return; }
+        if (inb(nx, ny) && cells[ny * W + nx].t == M_WATER) { c.burn = 0; c.temp = std::min(c.temp, std::max(AMBIENT_T, m.ignT - 20.f)); return; }   // doused: cooled below ignition, or it would relight next frame
     }
     c.temp = std::max(c.temp, m.burnT * 0.8f);
     if (chance(0.5f)) {
@@ -466,7 +474,9 @@ void World::liquid(int x, int y, int disp) {
             const Cell& n = cells[py * W + px];
             return MATS[n.t].kind == K_GAS ? n.amt * (n.temp + 273.f) / 293.f : 0.f;
         };
-        for (int k = 0; k < 4; ++k) {
+        const int k0 = (int)(rnd() & 3u);
+        for (int kk = 0; kk < 4; ++kk) {
+            const int k = (kk + k0) & 3;
             int fx = x + DX4[k], fy = y + DY4[k];
             if (!inb(fx, fy) || bodyMask[fy * W + fx] >= 0) continue;
             const Cell& f = cells[fy * W + fx];
@@ -505,7 +515,7 @@ void World::gasMove(int x, int y) {
     int dy = p > 0 ? -1 : 1;
     if (!chance(std::min(std::fabs(p), 0.9f))) return;
     int dir = (rnd() & 1) ? 1 : -1;
-    if (canRise(x, y + dy) && (isFree(x, y + dy) || rint(2))) { moveTo(x, y, x, y + dy); return; }
+    if ((dy < 0 ? canRise(x, y + dy) : isFree(x, y + dy)) && (isFree(x, y + dy) || rint(2))) { moveTo(x, y, x, y + dy); return; }   // gas bubbles up through liquid but never sinks into it
     if (isFree(x + dir, y + dy)) { moveTo(x, y, x + dir, y + dy); return; }
     if (isFree(x - dir, y + dy)) { moveTo(x, y, x - dir, y + dy); return; }
 }
@@ -711,7 +721,11 @@ void World::gasFlux() {
         Cell& b = cells[ib];
         bool gb = MATS[b.t].kind == K_GAS && b.t != M_FIRE;
         if (gb && !sameFluid(a, b)) {
-            if (rint(16) == 0) std::swap(a, b);  // different gases slowly mix
+            // different gases cannot share a cell, so pressure crosses the boundary by swapping whole cells: rarely when the
+            // pressures match, often when they differ
+            float pa = a.amt * (a.temp + 273.f), pb = b.amt * (b.temp + 273.f);
+            float dp = std::fabs(pa - pb) / (pa + pb + 1e-3f);
+            if (chance(dp < 0.12f ? 0.0625f : std::min(0.9f, dp * 0.9f))) { std::swap(a, b); return false; }
             return false;
         }
         if (b.t == M_EMPTY) {
@@ -736,7 +750,7 @@ void World::gasFlux() {
             lo.temp = (lo.temp * lo.amt + hi.temp * f) / nb;
             lo.amt = nb;
             hi.amt -= f;
-            return f > 0.0012f;
+            return f > 0.003f;
         }
         return false;
     };
@@ -757,8 +771,9 @@ void World::gasFlux() {
             if (MATS[a.t].kind != K_GAS || a.t == M_FIRE) continue;
             int x = i % W, y = i / W;
             int nbs[4] = {x + 1 < W ? i + 1 : -1, x > 0 ? i - 1 : -1, y + 1 < H ? i + W : -1, y > 0 ? i - W : -1};
-            for (int d = 0; d < 4; ++d) {
-                int j = nbs[d];
+            const int off = (int)(rnd() & 3u);   // a random starting side, so gas does not lean one way
+            for (int dd = 0; dd < 4; ++dd) {
+                int j = nbs[(dd + off) & 3];
                 if (j < 0) continue;
                 // gas-gas pairs are visited from both ends: handle each once
                 bool gj = MATS[cells[j].t].kind == K_GAS && cells[j].t != M_FIRE;
@@ -788,11 +803,29 @@ void World::gasFlux() {
     // the open air: gas does not pile up against the edge of the world or hang on at the fringes of a cloud
     for (int x = 0; x < W; ++x) { for (int y : {0, H - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
     for (int y = 0; y < H; ++y) { for (int x : {0, W - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
+    // which empty and gas cells are open air (connected to the edge of the world); inside a sealed machine the empty cells are vacuum
+    if (outside.size() != (size_t)W * H || tick - outsideTick >= 20u || outsideTick > tick) {
+        outside.assign((size_t)W * H, 0);
+        outsideTick = tick;
+        std::vector<int> st;
+        auto open_ = [&](int i) { return bodyMask[i] < 0 && (cells[i].t == M_EMPTY || MATS[cells[i].t].kind == K_GAS); };
+        auto seed = [&](int i) { if (!outside[i] && open_(i)) { outside[i] = 1; st.push_back(i); } };
+        for (int x = 0; x < W; ++x) { seed(x); seed((H - 1) * W + x); }
+        for (int y = 0; y < H; ++y) { seed(y * W); seed(y * W + W - 1); }
+        while (!st.empty()) {
+            int p = st.back(); st.pop_back();
+            int px = p % W, py = p / W;
+            if (px + 1 < W) seed(p + 1);
+            if (px > 0) seed(p - 1);
+            if (py + 1 < H) seed(p + W);
+            if (py > 0) seed(p - W);
+        }
+    }
     for (int i = 0; i < W * H; ++i) {
         Cell& c = cells[i];
         if (MATS[c.t].kind != K_GAS || c.t == M_FIRE) continue;
         if (c.amt < 0.004f) { c.t = M_EMPTY; continue; }
-        if (c.amt < 0.03f && bodyMask[i] < 0) {   // thin gas bordering open void disperses
+        if (c.amt < 0.03f && bodyMask[i] < 0 && outside[i]) {   // thin gas bordering open void disperses
             int x = i % W, y = i / W;
             bool open = (x + 1 < W && cells[i + 1].t == M_EMPTY && bodyMask[i + 1] < 0) || (x > 0 && cells[i - 1].t == M_EMPTY && bodyMask[i - 1] < 0) ||
                         (y + 1 < H && cells[i + W].t == M_EMPTY && bodyMask[i + W] < 0) || (y > 0 && cells[i - W].t == M_EMPTY && bodyMask[i - W] < 0);
@@ -845,7 +878,15 @@ void World::liquidPressure() {
         for (int n = 0; n < spill; ++n) {
             int vi = voids[rint((int)voids.size())];
             if (cells[vi].t != M_EMPTY) continue;
-            Cell nc = cells[members[rint((int)members.size())]];
+            // the new cell is a copy of a liquid cell that borders the gap (so a mixed body keeps its mix), never a burning one
+            int src = -1, cnt = 0;
+            for (int d = 0; d < 4; ++d) {
+                int nx = vi % W + DX4[d], ny = vi / W + DY4[d];
+                if (!inb(nx, ny) || bodyMask[ny * W + nx] >= 0 || MATS[cells[ny * W + nx].t].kind != K_LIQUID) continue;
+                if (rint(++cnt) == 0) src = ny * W + nx;
+            }
+            Cell nc = cells[src >= 0 ? src : members[rint((int)members.size())]];
+            nc.burn = 0;
             nc.amt = 1.f;
             nc.clock = clk;
             cells[vi] = nc;
@@ -982,6 +1023,7 @@ void World::explode(int cx, int cy, float r, float power) {
             cells[th.to] = src;
             cells[th.to].clock = clk;
         }
+        else if (th.to >= 0) continue;   // the landing place is taken: the material stays where it was
         if (th.to >= 0 || chance(0.5f)) src.t = M_EMPTY;
     }
     blasts.push_back({(float)cx, (float)cy, r, power});

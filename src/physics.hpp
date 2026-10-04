@@ -38,6 +38,7 @@ struct Body {
     float area = 0, mass = 0, invMass = 0, invI = 0, bound = 0;
     bool isStatic = false, isWheel = false, isRocket = false;
     bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
+    int sleepT = 0;                           // substeps spent (nearly) still while touching something
     Emitter src;
     Fan fan;
     bool spent = false;  // a fired primer
@@ -146,7 +147,7 @@ public:
     // editor helpers: clone a body / joint (clipboard), move bodies keeping the joints that reach outside intact
     int addBodyCopy(const Body& src);
     int addJointCopy(const Joint& src);
-    int newGroupId() { return groupCounter++; }
+    int newGroupId();   // the lowest id no body or weld is using
     int newBondId() { return bondCounter++; }
     void translateBodies(const std::vector<int>& ids, Vec2 delta);
     void applyFans(float dt);   // directed airflow, suction/stall, thrust and wind on bodies

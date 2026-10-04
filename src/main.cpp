@@ -1446,19 +1446,28 @@ struct Game {
         w.pod(STATE_MAGIC);
         w.pod((uint32_t)sizeof(Cell)); w.pod((uint32_t)sizeof(Body)); w.pod((uint32_t)sizeof(Joint));
         w.pod((uint32_t)World::W); w.pod((uint32_t)World::H);
+        w.pod((uint32_t)M_COUNT);   // the material table: adding or reordering materials changes what every saved cell means
         world.save(w);
         phys.save(w);
         w.pod((uint32_t)labels.size());
         for (auto& l : labels) { w.pod(l.p); w.str(l.s); }
         w.pod(bodyMat);
     }
+    bool inRestore = false;
     bool restoreState(const std::vector<uint8_t>& buf) {
         selJoint = -1;
         Reader r(buf);
         if (r.pod<uint32_t>() != STATE_MAGIC || r.pod<uint32_t>() != sizeof(Cell) || r.pod<uint32_t>() != sizeof(Body) ||
-            r.pod<uint32_t>() != sizeof(Joint) || r.pod<uint32_t>() != (uint32_t)World::W || r.pod<uint32_t>() != (uint32_t)World::H || !r.ok)
+            r.pod<uint32_t>() != sizeof(Joint) || r.pod<uint32_t>() != (uint32_t)World::W || r.pod<uint32_t>() != (uint32_t)World::H ||
+            r.pod<uint32_t>() != (uint32_t)M_COUNT || !r.ok)
             return false;
-        if (!world.load(r) || !phys.load(r)) return false;
+        // loading is all or nothing: keep a copy of the current state and put it back if the file turns out to be damaged
+        std::vector<uint8_t> backup;
+        if (!inRestore) captureState(backup);
+        if (!world.load(r) || !phys.load(r)) {
+            if (!backup.empty()) { inRestore = true; restoreState(backup); inRestore = false; }
+            return false;
+        }
         uint32_t n = r.pod<uint32_t>();
         std::vector<Label> ls;
         for (uint32_t i = 0; i < n && r.ok && i < 1000; ++i) { Label l; l.p = r.pod<Vec2>(); l.s = r.str(); ls.push_back(l); }

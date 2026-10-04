@@ -679,6 +679,194 @@ void emitters() {
     }
 }
 
+// robustness fixes from the adversarial review of the rigid-body engine
+void rigidReview() {
+    std::printf("rigid-body review fixes\n");
+    {   // a perfectly aligned stack of boxes stands
+        Rig r;
+        r.world.fillRect(0, 200, 400, 203, M_WALL);
+        for (int i = 0; i < 8; ++i) r.phys.addBox(Vec2(300, 195.f - 10.f * i), Vec2(5, 5), 0, M_STEEL, false);
+        r.phys.stampBodies();
+        r.step(600);
+        float dx = 0; for (auto& b : r.phys.bodies) if (b.alive) dx = std::max(dx, std::fabs(b.pos.x - 300.f));
+        char d[96]; std::snprintf(d, sizeof d, "largest sideways drift %.1f cells after 10 s", dx);
+        check(dx < 6.f, "a stack of eight steel boxes stays standing", d);
+    }
+    {   // static friction is the friction coefficient, not that plus a sleep threshold
+        Rig r;
+        const float ang = std::atan(0.25f);   // a slope steeper than steel's friction (0.12)
+        r.phys.addBox(Vec2(300, 150), Vec2(80, 3), ang, M_STEEL, true);
+        Vec2 up(-std::sin(ang), -std::cos(ang));
+        int b = r.phys.addBox(Vec2(300, 150) + up * 8.f, Vec2(5, 5), ang, M_STEEL, false);
+        r.phys.stampBodies();
+        Vec2 p0 = r.phys.bodies[b].pos;
+        r.step(120);
+        float moved = length(r.phys.bodies[b].pos - p0);
+        char d[96]; std::snprintf(d, sizeof d, "moved %.1f cells in 2 s", moved);
+        check(moved > 30.f, "a steel box slides down a slope steeper than its friction", d);
+    }
+    {   // a box embedded in the floor is eased out, not flung
+        Rig r;
+        r.world.fillRect(0, 200, 400, 210, M_WALL);
+        int b = r.phys.addBox(Vec2(300, 195.f + 4.f), Vec2(5, 5), 0, M_WOOD, false);
+        r.phys.stampBodies();
+        float top = 1e9f;
+        for (int i = 0; i < 120; ++i) { r.step(1); top = std::min(top, r.phys.bodies[b].pos.y); }
+        char d[96]; std::snprintf(d, sizeof d, "rose to y=%.1f from 199 (resting height 195)", top);
+        check(top > 190.f, "overlap with the floor is corrected without launching the body", d);
+    }
+    {   // a fan jammed against a wall, or with nothing to move, does not push
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        r.world.fillRect(308, 80, 330, 120, M_WALL);
+        int f = r.phys.addBox(Vec2(300, 100), Vec2(4, 6), 0, M_STEEL, false);
+        r.phys.bodies[f].fan.strength = 300.f;
+        r.phys.stampBodies();
+        r.step(60);
+        char d[96]; std::snprintf(d, sizeof d, "velocity %.1f cells/s", r.phys.bodies[f].vel.x);
+        check(std::fabs(r.phys.bodies[f].vel.x) < 12.f, "a fan whose exhaust is walled off does not accelerate", d);
+    }
+    {   // moving a body does not change a spring's natural length
+        Rig r;
+        int c = r.phys.addBox(Vec2(100, 60), Vec2(5, 5), 0, M_STEEL, true);
+        int a = r.phys.addBox(Vec2(100, 100), Vec2(5, 5), 0, M_STEEL, false);
+        int j = r.phys.addDistance(c, Vec2(100, 60), a, Vec2(100, 100), 2.f);
+        float len0 = r.phys.joints[j].length;
+        r.phys.translateBodies({a}, Vec2(0, 3));
+        r.phys.translateBodies({a}, Vec2(0, 3));
+        char d[96]; std::snprintf(d, sizeof d, "rest length %.2f -> %.2f", len0, r.phys.joints[j].length);
+        check(std::fabs(r.phys.joints[j].length - len0) < 1e-4f, "dragging a spring's end leaves its rest length alone", d);
+    }
+    {   // emitters can exceed 180 cells a second
+        Rig r;
+        r.world.fillRect(0, 200, 400, 203, M_WALL);
+        int e = r.phys.addBox(Vec2(300, 150), Vec2(2, 2), 0, M_STEEL, true);
+        r.phys.bodies[e].src = Emitter{true, M_SAND, 600.f, 0.f, 0};
+        r.phys.stampBodies();
+        r.step(60);
+        int sand = 0; for (auto& c : r.world.cells) sand += c.t == M_SAND;
+        char d[96]; std::snprintf(d, sizeof d, "%d grains in a second at a rate of 600", sand);
+        check(sand > 330, "an emitter set to 600 cells a second delivers about that", d);
+    }
+    {   // a bond is both pins or neither; a zero-size body is not NaN; a damaged save does not crash
+        Rig r;
+        int a = r.phys.addBox(Vec2(100, 100), Vec2(10, 5), 0, M_STEEL, true);
+        int b = r.phys.addBox(Vec2(100, 110), Vec2(10, 5), 0, M_STEEL, false);
+        r.phys.addBond(Vec2(100, 105), a, b, 55.f, 0.f, 10.f);
+        int alive0 = 0; for (auto& j : r.phys.joints) alive0 += j.alive;
+        r.phys.removeJoint(0);
+        int alive1 = 0; for (auto& j : r.phys.joints) alive1 += j.alive;
+        int z = r.phys.addBox(Vec2(100, 130), Vec2(0, 0), 0, M_STEEL, false);
+        r.phys.stampBodies();
+        r.step(10);
+        bool finite = r.phys.bodies[z].alive && std::isfinite(r.phys.bodies[z].pos.y) && std::isfinite(r.phys.bodies[b].pos.y);
+        r.phys.joints[0].alive = true; r.phys.joints[0].a = 99;   // a joint pointing at a body that is not there
+        std::vector<uint8_t> buf; Writer w{buf}; r.phys.save(w);
+        Rig q; Reader rd(buf);
+        bool ok = q.phys.load(rd);
+        q.step(5);   // would have crashed
+        char d[110]; std::snprintf(d, sizeof d, "bond pins %d -> %d after erasing one; zero-size body finite: %d; damaged save loaded: %d and ran", alive0, alive1, (int)finite, (int)ok);
+        check(alive0 == 2 && alive1 == 0 && finite && ok, "bond erase, zero-size body and damaged save are all handled", d);
+    }
+}
+
+// fixes from the adversarial review of the grid engine
+void gridReview() {
+    std::printf("grid review fixes\n");
+    {   // fire spreads at the fuel's burn speed, not through a whole structure in a frame
+        Rig r;
+        for (int x = 100; x < 300; ++x) r.world.setCell(x, 100, M_WOOD);
+        r.world.flashAt(200, 100);
+        r.step(5);
+        int burning = 0; for (int x = 100; x < 300; ++x) burning += r.world.at(x, 100).burn > 0 || r.world.at(x, 100).t != M_WOOD;
+        char d[96]; std::snprintf(d, sizeof d, "%d of 200 cells alight after 5 frames", burning);
+        check(burning < 25, "a burning plank does not light end to end in a few frames", d);
+    }
+    {   // fuel doused by water stops burning and is not endlessly relit
+        Rig r;
+        r.world.setCell(200, 100, M_WOOD);
+        for (int d = 0; d < 4; ++d) { static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1}; if (d != 3) r.world.setCell(200 + dx[d], 100 + dy[d], M_WATER); }
+        r.world.flashAt(200, 100);
+        long ev0 = r.world.burnEvents;
+        r.step(600);
+        long ev = r.world.burnEvents - ev0;
+        char d[96]; std::snprintf(d, sizeof d, "%ld ignitions in 600 frames; the wood cell is now material %d with burn %d", ev, (int)r.world.at(200, 100).t, (int)r.world.at(200, 100).burn);
+        check(ev < 20, "wood beside water is put out, not relit every other frame", d);
+    }
+    {   // thin gas inside a sealed chamber is kept
+        Rig r;
+        for (int x = 100; x <= 160; ++x) for (int y = 100; y <= 130; ++y) if (x == 100 || x == 160 || y == 100 || y == 130) r.world.setCell(x, y, M_WALL);
+        r.world.setCell(130, 115, M_PROPANE); r.world.at(130, 115).amt = 20.f;
+        r.step(300);
+        double tot = 0; for (int y = 101; y < 130; ++y) for (int x = 101; x < 160; ++x) if (MATS[r.world.at(x, y).t].kind == K_GAS) tot += r.world.at(x, y).amt;
+        char d[96]; std::snprintf(d, sizeof d, "%.1f of 20 left after 5 s", tot);
+        check(tot > 17.f, "a thin gas leak into a sealed room does not evaporate", d);
+    }
+    {   // pressure crosses the boundary between two different gases
+        Rig r;
+        for (int x = 100; x <= 160; ++x) for (int y = 100; y <= 110; ++y) if (x == 100 || x == 160 || y == 100 || y == 110) r.world.setCell(x, y, M_WALL);
+        r.gas(101, 101, 130, 109, M_EXHAUST, 3.0f, 20.f);
+        r.gas(131, 101, 159, 109, M_SMOKE, 0.3f, 20.f);
+        auto mass = [&](int x0, int x1) { double m = 0; for (int y = 101; y < 110; ++y) for (int x = x0; x <= x1; ++x) m += r.world.at(x, y).amt; return m; };
+        double l0 = mass(101, 130), r0 = mass(131, 159);
+        r.step(400);
+        double l1 = mass(101, 130), r1 = mass(131, 159);
+        char d[110]; std::snprintf(d, sizeof d, "left/right mass %.0f/%.0f -> %.0f/%.0f (even would be about %.0f/%.0f)", l0, r0, l1, r1, (l0 + r0) * 0.5, (l0 + r0) * 0.5);
+        check(l1 - r1 < 0.55 * (l0 - r0), "two different gases in a sealed box come to the same pressure", d);
+    }
+    {   // a heavy gas does not sink into water
+        Rig r;
+        for (int x = 100; x <= 140; ++x) for (int y = 100; y <= 140; ++y) if (x == 100 || x == 140 || y == 100 || y == 140) r.world.setCell(x, y, M_WALL);
+        r.world.fillRect(101, 121, 139, 139, M_WATER);
+        r.gas(101, 101, 139, 118, M_PROPANE, 1.0f, 20.f);
+        r.step(300);
+        int in = 0; for (int y = 123; y < 140; ++y) for (int x = 101; x < 140; ++x) in += r.world.at(x, y).t == M_PROPANE;
+        char d[96]; std::snprintf(d, sizeof d, "%d propane cells below the surface", in);
+        check(in <= 2, "propane stays above a pool of water", d);
+    }
+    {   // a puff of gas in open space does not drift to one side
+        Rig r;
+        r.world.setCell(500, 100, M_AIR); r.world.at(500, 100).amt = 200.f;
+        r.step(20);
+        double sx = 0, n = 0; for (int y = 60; y < 140; ++y) for (int x = 460; x < 540; ++x) if (r.world.at(x, y).t == M_AIR) { sx += x * r.world.at(x, y).amt; n += r.world.at(x, y).amt; }
+        char d[96]; std::snprintf(d, sizeof d, "centre of the puff at x=%.2f (started at 500)", sx / n);
+        check(std::fabs(sx / n - 500.0) < 0.15, "a puff of gas spreads evenly in every direction", d);
+    }
+    {   // heat spreads the same way in both directions
+        Rig r;
+        for (int y = 90; y <= 110; ++y) for (int x = 90; x <= 110; ++x) r.world.setCell(x, y, M_STEEL);
+        r.world.at(100, 100).temp = 400.f;
+        double plus = 0, minus = 0;
+        for (int f = 0; f < 12; ++f) { r.step(1); plus += r.world.at(103, 100).temp; minus += r.world.at(97, 100).temp; }
+        char d[96]; std::snprintf(d, sizeof d, "mean rise %.2f to the right, %.2f to the left", plus / 12 - 20, minus / 12 - 20);
+        check(std::fabs(plus - minus) < 0.04 * (plus + minus - 40 * 12) + 0.3, "heat conducts equally to the left and right", d);
+    }
+    {   // a current through a conducting body heats it
+        Rig r;
+        r.world.battV = 20.f; r.world.battA = 200.f;
+        int b = r.phys.addBox(Vec2(110, 102), Vec2(10, 2), 0, M_STEEL, true);
+        for (int y = 100; y <= 104; ++y) { r.world.setCell(99, y, M_BATT_POS); r.world.setCell(121, y, M_BATT_NEG); }
+        r.phys.stampBodies();
+        r.step(240);
+        char d[96]; std::snprintf(d, sizeof d, "the steel bar is at %.0f C", r.phys.bodies[b].temp);
+        check(r.phys.bodies[b].temp > 30.f, "a steel bar carrying current warms up", d);
+    }
+    {   // damaged cell data and identical worlds
+        Rig a, b;
+        for (int x = 100; x < 140; ++x) { a.world.setCell(x, 100, M_WATER); b.world.setCell(x, 100, M_WATER); }
+        std::vector<uint8_t> ba, bb; Writer wa{ba}, wb{bb};
+        a.world.save(wa); b.world.save(wb);
+        bool same = ba == bb;
+        std::vector<uint8_t> bad = ba;
+        // the first cell's material byte sits right after the vector's element count
+        bad[sizeof(uint32_t)] = 200;
+        Rig c; Reader rd(bad);
+        bool refused = !c.world.load(rd);
+        char d[96]; std::snprintf(d, sizeof d, "identical worlds save identical bytes: %d; a cell of material 200 is refused: %d", (int)same, (int)refused);
+        check(same && refused, "saving is deterministic and a damaged cell cannot be loaded", d);
+    }
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -698,6 +886,8 @@ int runSelfTests() {
     gunpowder();
     liquids();
     emitters();
+    rigidReview();
+    gridReview();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

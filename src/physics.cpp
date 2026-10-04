@@ -13,6 +13,7 @@ constexpr int ITERATIONS = 8;
 constexpr float SLOP = 0.4f;
 constexpr float BAUMGARTE = 0.2f;
 constexpr float MAX_BIAS = 60.f;
+constexpr float MAX_CONTACT_BIAS = 14.f;   // overlap is pushed out slowly: fast enough to settle, too slow to fling a body out of the floor
 constexpr float GAS_PRESSURE = 20000.f;     // force per cell face for one unit of overpressure
 constexpr float LIQUID_PRESSURE = 600000.f;
 constexpr float LIQUID_DAMPING = 1500.f;
@@ -72,6 +73,17 @@ bool Body::contains(Vec2 p) const {
     return std::fabs(l.x) <= half.x && std::fabs(l.y) <= half.y;
 }
 
+int Physics::newGroupId() {
+    std::vector<char> used;
+    auto mark = [&](int g) { if (g >= 0 && g < 100000) { if ((int)used.size() <= g) used.resize(g + 1, 0); used[g] = 1; } };
+    for (auto& b : bodies) if (b.alive) mark(b.group);
+    for (auto& j : joints) if (j.alive) mark(j.group);
+    int g = 0;
+    while (g < (int)used.size() && used[g]) ++g;
+    groupCounter = std::max(groupCounter, g + 1);
+    return g;
+}
+
 float Body::distanceTo(Vec2 p) const {
     if (shape == SHAPE_CIRCLE) return std::max(0.f, length(p - pos) - radius);
     Vec2 l = toLocal(p);
@@ -88,6 +100,8 @@ void Physics::clear() {
     bodies.clear();
     joints.clear();
     contacts.clear();
+    flashes.clear(); noCollide.clear(); hits.clear(); primerStrikes.clear(); hydro.clear();
+    seqCounter = 0; groupCounter = 0; bondCounter = 0; bondsBroken = 0; eventFrames = 0; lastEvent.clear();
     std::fill(world->bodyMask.begin(), world->bodyMask.end(), (int16_t)-1);
 }
 
@@ -107,7 +121,24 @@ bool Physics::load(Reader& r) {
     Vec2 g = r.pod<Vec2>();
     int sc = r.pod<int>(), gc = r.pod<int>(), bc = r.pod<int>();
     if (!r.ok) return false;
-    bodies = b; joints = j; gravity = g; seqCounter = sc; groupCounter = gc; bondCounter = bc;
+    // a damaged or foreign file must not be able to crash the engine: check every index before using any of it
+    const int nb = (int)b.size();
+    int maxGroup = -1;
+    for (auto& bd : b) {
+        if (bd.alive) {
+            if (bd.mat >= M_COUNT || (bd.shape != SHAPE_BOX && bd.shape != SHAPE_CIRCLE) || bd.src.mat >= M_COUNT ||
+                !std::isfinite(bd.pos.x) || !std::isfinite(bd.pos.y) || !std::isfinite(bd.half.x) || !std::isfinite(bd.half.y) || !std::isfinite(bd.radius) ||
+                bd.group >= 100000) return false;
+            maxGroup = std::max(maxGroup, bd.group);
+        }
+    }
+    for (auto& jt : j) {
+        if (!jt.alive) continue;
+        if (jt.a < -1 || jt.a >= nb || jt.b < -1 || jt.b >= nb || (jt.a >= 0 && !b[jt.a].alive) || (jt.b >= 0 && !b[jt.b].alive) ||
+            jt.group >= 100000 || (jt.type != J_MOUSE && jt.a < 0 && jt.b < 0)) jt.alive = false;   // a joint to nothing is dropped, not fatal
+        else if (jt.type > J_SLIDER) return false;
+    }
+    bodies = b; joints = j; gravity = g; seqCounter = sc; groupCounter = std::max(gc, maxGroup + 1); bondCounter = bc;
     contacts.clear(); hydro.clear(); noCollide.clear(); hits.clear(); primerStrikes.clear(); flashes.clear();
     eventFrames = 0; lastEvent.clear();
     for (auto& jt : joints) if (jt.alive && jt.type == J_MOUSE) jt.alive = false;
@@ -129,7 +160,7 @@ int Physics::allocBody() {
 int Physics::allocJoint() {
     for (auto& j : joints)
         if (!j.alive) { int id = j.id; j = Joint{}; j.id = id; j.alive = true; return id; }
-    Joint j;
+    Joint j{};
     j.id = (int)joints.size();
     j.alive = true;
     joints.push_back(j);
@@ -137,6 +168,8 @@ int Physics::allocJoint() {
 }
 
 void Physics::finalize(Body& b) {
+    if (b.shape == SHAPE_BOX) { b.half.x = std::max(b.half.x, 0.25f); b.half.y = std::max(b.half.y, 0.25f); }   // a body of no size has no mass: NaN
+    else b.radius = std::max(b.radius, 0.25f);
     if (b.shape == SHAPE_BOX) {
         b.area = 4.f * b.half.x * b.half.y;
         b.bound = length(b.half);
@@ -223,7 +256,7 @@ void Physics::translateBodies(const std::vector<int>& ids, Vec2 delta) {
             const Body& B2 = bodies[j.b];
             j.lb = B2.toLocal((B2.pos - delta) + rotate(j.lb, B2.angle));
         }
-        if (j.type == J_DISTANCE && j.a >= 0) {
+        if (j.type == J_DISTANCE && j.a >= 0 && j.freq <= 0.f) {   // a rod keeps its new length; a spring keeps its natural one
             Vec2 pa = jointAnchorA(j), pb = jointAnchorB(j);
             j.length = length(pb - pa);
         }
@@ -311,7 +344,10 @@ void Physics::setMouseTarget(int joint, Vec2 target) {
 }
 
 void Physics::removeJoint(int id) {
-    if (id >= 0 && id < (int)joints.size()) joints[id].alive = false;
+    if (id < 0 || id >= (int)joints.size()) return;
+    int bond = joints[id].bondId;
+    joints[id].alive = false;
+    if (bond >= 0) for (auto& k : joints) if (k.alive && k.bondId == bond) k.alive = false;   // a bond is both its pins or neither
 }
 
 void Physics::removeBody(int id) {
@@ -582,7 +618,7 @@ void Physics::fluidForces() {
                 // in a confined, pressurised chamber and is negligible for a body moving through free gas
                 float vn = dot(b.vel + cross(b.w, r), sm.n);  // >0: moving into the gas
                 float over = std::max(0.f, n.amt * (n.temp + 273.f) / 293.f - 0.15f);
-                n.temp = std::max(-100.f, n.temp + std::clamp(over * vn * 0.08f * sm.w, -30.f, 30.f));
+                n.temp = std::clamp(n.temp + std::clamp(over * vn * 0.08f * sm.w, -30.f, 30.f), -100.f, 2500.f);
             }
             Vec2 f = sm.n * -(std::min(p, 3e5f) * sm.w);
             b.fluidF += f;
@@ -600,6 +636,7 @@ void Physics::thermalStep() {
         else if (b.mat == M_COOLER) b.temp = -60.f;
         float Cb = bm.cap * b.area;
         if (Cb <= 0) continue;
+        if (b.id < (int)world->bodyHeat.size() && world->bodyHeat[b.id] > 0.f) { b.temp += world->bodyHeat[b.id] / Cb; world->bodyHeat[b.id] = 0.f; }   // current through a conducting body
 
         // sample points just outside the outline; each stands for the stretch of outline it sits on
         struct TP { Vec2 p; float w; };
@@ -795,7 +832,8 @@ void Physics::applyBlasts() {
             float f = 1.f - dist / range;
             Vec2 dir = dist > 1e-3f ? d / dist : Vec2(0, -1);
             b.vel += dir * (bl.power * f);
-            b.w += (dir.x > 0 ? 1.f : -1.f) * f * bl.power * 0.02f;
+            float side = std::fabs(dir.x) > 0.3f ? (dir.x > 0 ? 1.f : -1.f) : (world->chance(0.5f) ? 1.f : -1.f);   // straight above or below the blast it could spin either way
+            b.w += side * f * bl.power * 0.02f;
         }
     }
     world->blasts.clear();
@@ -970,7 +1008,7 @@ void Physics::prestepContact(Contact& c, float h) {
         if (c.b >= 0 && Bb.mat == M_PRIMER && !Bb.spent) hits.push_back({c.b, c.p});
     }
     float bounce = vn < -60.f ? -c.e * vn : 0.f;
-    float pen = std::min(BAUMGARTE / h * std::max(c.depth - SLOP, 0.f), MAX_BIAS);
+    float pen = std::min(BAUMGARTE / h * std::max(c.depth - SLOP, 0.f), MAX_CONTACT_BIAS);
     c.vt = std::max(bounce, pen);
     c.jn = c.jt = 0;
 }
@@ -1225,9 +1263,17 @@ void Physics::substep(float h) {
         if (c.b >= 0) bodies[c.b].touching = true;
     }
     for (int it = 0; it < ITERATIONS; ++it) {
-        for (auto& j : joints) if (j.alive) solveJoint(j, h);
-        solveHydro();
-        for (auto& c : contacts) solveContact(c);
+        // alternate the sweep direction: always solving in the same order gives Gauss-Seidel a steady lean, and a perfectly
+        // aligned stack of boxes slowly topples
+        if (it & 1) {
+            for (size_t ji = joints.size(); ji-- > 0;) if (joints[ji].alive) solveJoint(joints[ji], h);
+            solveHydro();
+            for (size_t ci = contacts.size(); ci-- > 0;) solveContact(contacts[ci]);
+        } else {
+            for (auto& j : joints) if (j.alive) solveJoint(j, h);
+            solveHydro();
+            for (auto& c : contacts) solveContact(c);
+        }
     }
     for (auto& j : joints)
         if (j.alive && j.bondId >= 0) j.peak = std::max(j.peak, length(j.accP) / h);
@@ -1242,7 +1288,11 @@ void Physics::substep(float h) {
         if (!std::isfinite(b.pos.x) || !std::isfinite(b.pos.y) || b.pos.y > World::H + 200 || b.pos.y < -400 ||
             b.pos.x < -200 || b.pos.x > World::W + 200)
             removeBody(b.id);
-        else if (b.touching && !b.hasJoint && lengthSq(b.vel) < 0.04f && b.w * b.w < 0.0004f) { b.vel = Vec2(); b.w = 0; }
+        else if (b.touching && !b.hasJoint && lengthSq(b.vel) < 0.04f && b.w * b.w < 0.0004f) {
+            // a body that has really been still for an eighth of a second goes to sleep; one that is only starting to slide
+            // or tip keeps gaining speed and never reaches that
+            if (++b.sleepT > 30) { b.vel = Vec2(); b.w = 0; }
+        } else b.sleepT = 0;
     }
 }
 
@@ -1274,7 +1324,7 @@ void Physics::step(float dt) {
         return r;
     };
     for (auto& j : joints)
-        if (j.alive && j.group < 0 && (j.type == J_PIN || j.type == J_MOTOR || j.type == J_DISTANCE) && j.b >= 0) {
+        if (j.alive && j.group < 0 && (j.type == J_PIN || j.type == J_MOTOR || j.type == J_DISTANCE || j.type == J_SLIDER) && j.b >= 0) {
             // a joint between members of two groups frees the whole groups from colliding (hose joints)
             for (int x : expand(j.a)) for (int y : expand(j.b)) noCollide.push_back(pairKey(x, y));
         }
@@ -1465,6 +1515,7 @@ void Physics::applyFans(float dt) {
         const float v = mag / 60.f * flow;                 // cells per frame
         const float peak = vac ? 1.9f : 1.f;               // a vacuum fan accelerates the gas through the throat
         const int hops = std::max(1, (int)std::ceil(v * peak));
+        long movedAny = 0;   // how much gas actually moved through this fan this frame
         const float pHop = std::min(1.f, v / hops);
         for (int l = 0; l < lanes; ++l) {
             std::vector<int>& L = lane[l];
@@ -1504,6 +1555,7 @@ void Physics::applyFans(float dt) {
                     ++fanHopTries[zone];
                     if (!w.chance(std::min(1.f, pHop * prof))) continue;
                     ++fanHopMoves[zone];
+                    ++movedAny;
                     Cell& c = w.cells[L[k + 1]];
                     if (MATS[c.t].kind == K_GAS && psi(c) > psi(a) + 0.12f) continue;   // the stream cannot be pumped uphill: gas only moves on while the way ahead is not at a higher pressure
                     if (c.t == M_EMPTY) { c = a; a = Cell{}; }
@@ -1559,7 +1611,11 @@ void Physics::applyFans(float dt) {
                 exhaustBoost = std::clamp(std::sqrt((hotT + 273.f) / (AMBIENT_T + 273.f)), 1.f, 3.f);
             }
         }
-        if (!b.isStatic) b.vel += axis * (-THRUST_K * mag * flow * exhaustBoost) * (b.invMass * dt);
+        // no gas moving, or an exhaust face jammed against a wall, means no thrust: scale by the open fraction of the lanes
+        int openLanes = 0;
+        for (int l = 0; l < lanes; ++l) if ((int)lane[l].size() - split[l] >= 8) ++openLanes;
+        const float throughput = movedAny > 0 ? (float)openLanes / (float)lanes : 0.f;
+        if (!b.isStatic) b.vel += axis * (-THRUST_K * mag * flow * exhaustBoost * throughput) * (b.invMass * dt);
         for (auto& o : bodies) {
             if (!o.alive || o.isStatic || o.id == b.id || (b.group >= 0 && o.group == b.group)) continue;   // a fan doesn't blow on its own machine
             Vec2 rel = o.pos - b.pos;
@@ -1647,7 +1703,7 @@ void Physics::emitSources(float dt) {
     for (auto& b : bodies) {
         if (!b.alive || !b.src.on) continue;
         Emitter& e = b.src;
-        e.accum = std::min(e.accum + e.rate * dt, 3.f);   // a blocked outlet does not store up a burst
+        e.accum = std::min(e.accum + e.rate * dt, std::max(3.f, e.rate * dt * 2.f));   // a blocked outlet does not store up a burst
         while (e.accum >= 1.f) {
             if (!emitOne(b)) break;
             e.accum -= 1.f;
@@ -1705,7 +1761,10 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
     Vec2 ext = tc.shape == SHAPE_BOX ? tc.half : Vec2(tc.radius, tc.radius);
     std::vector<R> rects;
     long removed = 0;
-    for (float res : {0.5f, 1.f, 2.f, 4.f, 8.f}) {
+    static const float RES[5] = {0.5f, 1.f, 2.f, 4.f, 8.f};
+    bool relaxed = false;   // a coarse grid can miss a thin cutter that the fine one found: then accept the finer cut with more pieces
+    for (int ri = 0; ri < 5; ++ri) {
+        const float res = RES[ri];
         int nx = std::max(1, (int)std::ceil(ext.x * 2 / res)), ny = std::max(1, (int)std::ceil(ext.y * 2 / res));
         float cx = ext.x * 2 / nx, cy = ext.y * 2 / ny;
         std::vector<char> keep((size_t)nx * ny, 0);
@@ -1723,7 +1782,10 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
                 if (hit) { ++removed; continue; }
                 keep[(size_t)j * nx + i] = 1;
             }
-        if (removed == 0) return -1;
+        if (removed == 0) {
+            if (ri > 0 && !relaxed) { relaxed = true; ri -= 2; continue; }   // redo the previous (finer) resolution without the piece limit
+            return -1;
+        }
         // merge: horizontal runs, then identical runs on consecutive rows
         rects.clear();
         std::vector<int> open;  // indices into rects still growing
@@ -1741,7 +1803,7 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
             }
             open = nextOpen;
         }
-        if (rects.size() <= 300) {
+        if (rects.size() <= (relaxed ? 1500u : 300u)) {
             // convert cell rects to local boxes below
             std::vector<int> pieces;
             for (const R& r : rects) {
