@@ -46,12 +46,27 @@ The physics engine, the sand engine and the bitmap font are all written from scr
 * **Rocket** – drag to choose the thrust direction; hold `Up` to fire.
 * **Grab** – drag bodies around with a soft spring. **Delete** – click a body or joint.
 
-### Materials
+### Materials and tabs
 
-Wall, Sand, Water, Oil, Lava, Acid, Fire, Gunpowder, TNT, Stone, Wood, Plant, Ice, Ash, Steam, Smoke, Void, Eraser.
+The palette is split into tabs: **Powder** (sand, ash, gunpowder, coal), **Liquid** (water, oil, gasoline, diesel, kerosene, jet fuel, ethanol, hydraulic fluid, acid, lava), **Gas** (steam, fire, smoke, exhaust, fuel vapour, propane, hydrogen), **Metal** (steel, iron, copper, aluminum, lead, gold, titanium, tungsten), **Struct** (wall, stone, concrete, brick, ceramic, glass, wood, rubber, plastic, ice, plant, TNT), **Device** (heater, cooler, spark plug/igniter, fluid source, void drain), **Scenes** (ready-made machines) and a **Heat view** toggle that colours cells by temperature.
 
-Some things to try: lava on water makes stone and steam; fire spreads through wood, plants and oil; plants grow by drinking water; acid eats most solids; gunpowder and TNT chain-explode and throw bodies and debris; ice melts near heat and freezes water; steam condenses back into water; a light ball floats on oil on water.
+Every material has density, friction, restitution, **thermal conductivity** and heat capacity. Solid materials drawn as cells use those properties, and the `BODY:` button picks the material for box/circle bodies (density, friction, bounce, heat conduction, melting and burning all follow from it).
+
+* **Fuels differ** – flash point, autoignition temperature, volatility, burn rate and energy: gasoline flashes below freezing and evaporates fast, ethanol burns clean, kerosene/jet fuel/diesel need heat (diesel autoignites under compression/hot surfaces – glow plug), hydraulic fluid barely burns.
+* **Heat** flows by conduction through everything (copper moves it quickly, ceramic and plastic insulate), phase changes (water↔steam↔ice, metals↔molten, fuel↔vapour) absorb latent heat, and gases heat when compressed.
+* **Gas pressure** acts on rigid bodies, so steam and combustion gas can push pistons. **Liquid pressure** is equalised through connected liquid, so a closed hydraulic circuit transmits force from a master piston to a slave piston.
+* **Slider** tool – prismatic joint for pistons, valves and rams. **Spark** button – set the spark rate (or hold `E`).
+
+### Scenes
+
+* **Steam engine** – boiler, gate valve driven by an eccentric, piston, crank and flywheel. Runs continuously.
+* **Hydraulics** – master/slave cylinders with a mechanical advantage.
+* **Conduction** – bars of different metals/insulators heated at one end.
+* **Fuels** – seven liquids on a warming plate with spark plugs, showing flash-point order.
+* **Gasoline / diesel engines** – intake and exhaust gate valves, spark or glow-plug ignition, fuel supply. *Limitation:* these are demonstrators spun up by a starter; combustion works and cycles the piston, but the simplified gas model loses more energy on compression than it gains, so the flywheel slowly spins down rather than self-sustaining.
+
+Other things to try: lava on water makes stone and steam; fire spreads through wood, plants and oil; acid eats most solids; gunpowder and TNT chain-explode and throw bodies; a light ball floats on oil on water.
 
 ## Developer flags
 
-`sandbots --shot out.bmp [frames] [--scene N]` runs headless (SDL dummy video driver), simulates, and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use.
+`sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--g0]` runs headless (SDL dummy video driver), simulates, prints burn counts/wheel speed (and body/gas stats with `--trace`) and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use, `4` steam engine, `5` gasoline engine, `6` hydraulics, `7` conduction, `8` fuels, `9` pressure test, `10` diesel engine.

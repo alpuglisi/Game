@@ -1,6 +1,7 @@
 #include "physics.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace {
 constexpr float PI = 3.14159265f;
@@ -9,6 +10,17 @@ constexpr int ITERATIONS = 8;
 constexpr float SLOP = 0.4f;
 constexpr float BAUMGARTE = 0.2f;
 constexpr float MAX_BIAS = 60.f;
+constexpr float GAS_PRESSURE = 20000.f;     // force per cell face for one unit of overpressure
+constexpr float LIQUID_PRESSURE = 600000.f;
+constexpr float LIQUID_DAMPING = 1500.f;
+constexpr float ROCKET_THRUST = 1.4e5f;
+
+float cellFriction(const World& w, int ix, int iy) {
+    return w.inb(ix, iy) ? MATS[w.at(ix, iy).t].friction : MATS[M_WALL].friction;
+}
+float cellRestitution(const World& w, int ix, int iy) {
+    return w.inb(ix, iy) ? MATS[w.at(ix, iy).t].restitution : MATS[M_WALL].restitution;
+}
 
 uint64_t pairKey(int a, int b) {
     if (a > b) std::swap(a, b);
@@ -96,6 +108,8 @@ void Physics::finalize(Body& b) {
         b.area = PI * b.radius * b.radius;
         b.bound = b.radius;
     }
+    b.density = std::min(MATS[b.mat].density, 20.f);
+    if (!b.isStatic && MATS[b.mat].density > 20.f) b.density = 8.f;  // devices
     b.mass = b.density * b.area;
     float inertia = b.shape == SHAPE_BOX ? b.mass * (4 * b.half.x * b.half.x + 4 * b.half.y * b.half.y) / 12.f
                                          : 0.5f * b.mass * b.radius * b.radius;
@@ -103,24 +117,26 @@ void Physics::finalize(Body& b) {
     else { b.invMass = 1.f / b.mass; b.invI = 1.f / inertia; }
 }
 
-int Physics::addBox(Vec2 c, Vec2 half, float angle, float density, bool stat) {
+int Physics::addBox(Vec2 c, Vec2 half, float angle, uint8_t mat, bool stat) {
     int id = allocBody();
     Body& b = bodies[id];
-    b.shape = SHAPE_BOX; b.pos = c; b.half = half; b.angle = angle; b.density = density; b.isStatic = stat;
+    b.shape = SHAPE_BOX; b.pos = c; b.half = half; b.angle = angle; b.mat = mat; b.isStatic = stat;
+    b.color = MATS[mat].color; b.temp = MATS[mat].initT;
     finalize(b);
     return id;
 }
 
-int Physics::addCircle(Vec2 c, float r, float density, bool stat, bool wheel) {
+int Physics::addCircle(Vec2 c, float r, uint8_t mat, bool stat, bool wheel) {
     int id = allocBody();
     Body& b = bodies[id];
-    b.shape = SHAPE_CIRCLE; b.pos = c; b.radius = r; b.density = density; b.isStatic = stat; b.isWheel = wheel;
+    b.shape = SHAPE_CIRCLE; b.pos = c; b.radius = r; b.mat = mat; b.isStatic = stat; b.isWheel = wheel;
+    b.color = MATS[mat].color; b.temp = MATS[mat].initT;
     finalize(b);
     return id;
 }
 
 int Physics::addRocket(Vec2 c, float angle) {
-    int id = addBox(c, Vec2(4.f, 8.f), angle, 1.5f, false);
+    int id = addBox(c, Vec2(4.f, 8.f), angle, M_ALUMINUM, false);
     bodies[id].isRocket = true;
     bodies[id].color = 0xd04a3a;
     return id;
@@ -161,6 +177,18 @@ int Physics::addMouse(int body, Vec2 anchor) {
     j.la = bodies[body].toLocal(anchor);
     j.lb = anchor;
     j.maxForce = bodies[body].mass * 6000.f;
+    return id;
+}
+
+int Physics::addSlider(int body, Vec2 axis) {
+    if (body < 0 || length(axis) < 1e-3f) return -1;
+    int id = allocJoint();
+    Joint& j = joints[id];
+    j.type = J_SLIDER;
+    j.a = body; j.b = -1;
+    j.u = normalize(axis);
+    j.lb = bodies[body].pos;       // a point on the line
+    j.length = bodies[body].angle; // the locked angle
     return id;
 }
 
@@ -227,52 +255,273 @@ int Physics::nearestJoint(Vec2 p, float maxDist) const {
 // ---------------------------------------------------------------------------
 
 void Physics::stampBodies() {
-    static std::vector<std::pair<int, int>> offsets;
-    if (offsets.empty()) {
-        const int R = 14;
-        for (int dy = -R; dy <= R; ++dy)
-            for (int dx = -R; dx <= R; ++dx)
-                if (dx || dy) offsets.push_back({dx, dy});
-        std::sort(offsets.begin(), offsets.end(), [](auto& a, auto& b) {
-            return a.first * a.first + a.second * a.second < b.first * b.first + b.second * b.second;
-        });
-    }
     auto& mask = world->bodyMask;
     std::fill(mask.begin(), mask.end(), (int16_t)-1);
+    auto bounds = [&](const Body& b, int& x0, int& y0, int& x1, int& y1) {
+        float r = b.shape == SHAPE_CIRCLE ? b.radius : b.bound;
+        x0 = std::max(0, (int)std::floor(b.pos.x - r) - 1); x1 = std::min(World::W - 1, (int)std::ceil(b.pos.x + r) + 1);
+        y0 = std::max(0, (int)std::floor(b.pos.y - r) - 1); y1 = std::min(World::H - 1, (int)std::ceil(b.pos.y + r) + 1);
+    };
+    // A cell counts as covered when the body reaches into it noticeably, so pistons seal their bores.
+    auto nearSolid = [&](int x, int y) {
+        static const int DXs[4] = {1, -1, 0, 0}, DYs[4] = {0, 0, 1, -1};
+        for (int d = 0; d < 4; ++d) {
+            int nx = x + DXs[d], ny = y + DYs[d];
+            if (world->inb(nx, ny)) {
+                uint8_t t = world->cells[ny * World::W + nx].t;
+                if (MATS[t].kind == K_SOLID && t != M_VOID) return true;
+            }
+        }
+        return false;
+    };
+    // Cells next to a wall count as covered when the body is within a cell of them, so pistons seal their bores.
+    auto covers = [&](const Body& b, int x, int y) {
+        const float o = nearSolid(x, y) ? 0.95f : 0.45f;
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+                if (b.contains(Vec2(x + 0.5f + dx * o, y + 0.5f + dy * o))) return true;
+        return false;
+    };
     for (auto& b : bodies) {
         if (!b.alive) continue;
         int x0, y0, x1, y1;
-        if (b.shape == SHAPE_CIRCLE) {
-            x0 = (int)std::floor(b.pos.x - b.radius); x1 = (int)std::ceil(b.pos.x + b.radius);
-            y0 = (int)std::floor(b.pos.y - b.radius); y1 = (int)std::ceil(b.pos.y + b.radius);
-        } else {
-            x0 = (int)std::floor(b.pos.x - b.bound); x1 = (int)std::ceil(b.pos.x + b.bound);
-            y0 = (int)std::floor(b.pos.y - b.bound); y1 = (int)std::ceil(b.pos.y + b.bound);
-        }
-        for (int y = std::max(0, y0); y <= std::min(World::H - 1, y1); ++y) {
-            for (int x = std::max(0, x0); x <= std::min(World::W - 1, x1); ++x) {
-                if (!b.contains(Vec2(x + 0.5f, y + 0.5f))) continue;
+        bounds(b, x0, y0, x1, y1);
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
                 int i = y * World::W + x;
+                if (mask[i] >= 0 || !covers(b, x, y)) continue;
+                if (MATS[world->cells[i].t].kind == K_SOLID && world->cells[i].t != M_EMPTY) continue;
                 mask[i] = (int16_t)b.id;
-                Cell& c = world->cells[i];
-                if (c.t == M_EMPTY) continue;
-                Kind k = MATS[c.t].kind;
-                if (k == K_SOLID) continue;
-                // shove the particle to the nearest free cell
-                bool placed = false;
-                for (auto& o : offsets) {
-                    int nx = x + o.first, ny = y + o.second;
-                    if (world->isFree(nx, ny)) {
-                        world->cells[ny * World::W + nx] = c;
-                        placed = true;
-                        break;
-                    }
-                }
-                (void)placed;
-                c.t = M_EMPTY;
+                if (world->cells[i].t != M_EMPTY) world->displace(x, y);
             }
         }
     }
+}
+
+// Gas / liquid pressure on every body, measured on the relaxed grid at the start of a step.
+void Physics::fluidForces() {
+    auto& mask = world->bodyMask;
+    // Connected bodies of liquid. A region with (almost) no free surface is closed, hence incompressible.
+    static std::vector<int> compId;
+    const int N = World::W * World::H;
+    compId.assign(N, -1);
+    std::vector<char> closed;
+    {
+        std::vector<int> stack;
+        for (int i = 0; i < N; ++i) {
+            if (compId[i] >= 0 || mask[i] >= 0 || MATS[world->cells[i].t].kind != K_LIQUID) continue;
+            int id = (int)closed.size();
+            int openFaces = 0, size = 0;
+            compId[i] = id;
+            stack.push_back(i);
+            while (!stack.empty()) {
+                int p = stack.back();
+                stack.pop_back();
+                ++size;
+                int px = p % World::W, py = p / World::W;
+                static const int DXs[4] = {1, -1, 0, 0}, DYs[4] = {0, 0, 1, -1};
+                for (int d = 0; d < 4; ++d) {
+                    int nx = px + DXs[d], ny = py + DYs[d];
+                    if (!world->inb(nx, ny)) continue;
+                    int j = ny * World::W + nx;
+                    if (mask[j] >= 0) continue;
+                    Kind k = MATS[world->cells[j].t].kind;
+                    if (k == K_LIQUID) {
+                        if (compId[j] < 0) { compId[j] = id; stack.push_back(j); }
+                    } else if (k == K_EMPTY || k == K_GAS) {
+                        ++openFaces;
+                    }
+                }
+            }
+            closed.push_back(openFaces < 6 && size >= 40);  // droplets and puddles are not hydraulic circuits
+        }
+    }
+    hydro.clear();
+    std::vector<int> groupOf(closed.size(), -1);
+
+    // Pressure of the gas / liquid touching each body, applied as force next frame. Sampled along the
+    // body's true outline (outward normal, weighted by length) rather than the grid's coverage cells.
+    for (auto& b : bodies) {
+        b.fluidF = Vec2();
+        b.fluidT = 0;
+        b.fluidC = 0;
+        if (!b.alive || b.isStatic) continue;
+        struct Sample { Vec2 p, n; float w; int edge; };
+        std::vector<Sample> samples;
+        if (b.shape == SHAPE_CIRCLE) {
+            int n = std::max(8, (int)std::ceil(2 * PI * b.radius));
+            for (int i = 0; i < n; ++i) {
+                float ang = 2 * PI * (i + 0.5f) / n;
+                Vec2 d(std::cos(ang), std::sin(ang));
+                samples.push_back({b.pos + d * b.radius, d, 2 * PI * b.radius / n, -1});
+            }
+        } else {
+            Vec2 c[4] = {{-b.half.x, -b.half.y}, {b.half.x, -b.half.y}, {b.half.x, b.half.y}, {-b.half.x, b.half.y}};
+            Vec2 nl[4] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+            for (int e = 0; e < 4; ++e) {
+                Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
+                float len = length(p1 - p0);
+                int n = std::max(1, (int)std::ceil(len));
+                Vec2 nw = rotate(nl[e], b.angle);
+                for (int i = 0; i < n; ++i)
+                    samples.push_back({b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)), nw, len / n, e});
+            }
+        }
+        // pressure of the gas at each sample; gas equalises across a flat face almost instantly, so average it
+        // over the part of the face that touches gas
+        std::vector<float> gasP(samples.size(), -1.f);
+        float faceSum[4] = {0, 0, 0, 0};
+        int faceCnt[4] = {0, 0, 0, 0};
+        for (size_t i = 0; i < samples.size(); ++i) {
+            const Sample& sm = samples[i];
+            Vec2 q = sm.p + sm.n * 1.6f;
+            int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
+            if (!world->inb(ix, iy) || mask[iy * World::W + ix] >= 0) continue;
+            const Cell& n = world->cells[iy * World::W + ix];
+            if (MATS[n.t].kind != K_GAS) continue;
+            float psi = n.amt * (n.temp + 273.f) / 293.f;
+            gasP[i] = std::max(0.f, psi - 0.15f) * GAS_PRESSURE;
+            if (sm.edge >= 0) { faceSum[sm.edge] += gasP[i]; ++faceCnt[sm.edge]; }
+        }
+        for (size_t i = 0; i < samples.size(); ++i) {
+            const Sample& sm = samples[i];
+            Vec2 q = sm.p + sm.n * 1.6f;
+            int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
+            if (!world->inb(ix, iy)) continue;
+            int j = iy * World::W + ix;
+            if (mask[j] >= 0) continue;
+            Cell& n = world->cells[j];
+            Kind k = MATS[n.t].kind;
+            float p;
+            if (k == K_GAS) {
+                p = (sm.edge >= 0 && faceCnt[sm.edge] > 0) ? faceSum[sm.edge] / faceCnt[sm.edge] : gasP[i];
+            } else if (k == K_LIQUID) {
+                p = std::max(0.f, n.amt - 1.f) * LIQUID_PRESSURE * MATS[n.t].bulk;
+                int cid = compId[j];
+                if (cid >= 0 && closed[cid]) {
+                    if (groupOf[cid] < 0) { groupOf[cid] = (int)hydro.size(); hydro.emplace_back(); }
+                    HydroGroup& g = hydro[groupOf[cid]];
+                    HydroLink* link = nullptr;
+                    for (auto& l : g.links) if (l.body == b.id) link = &l;
+                    if (!link) { g.links.push_back({b.id, Vec2()}); link = &g.links.back(); }
+                    link->a += sm.n * sm.w;  // pointing from the body into the liquid
+                }
+                if (n.amt > 1.0001f) b.fluidC += LIQUID_DAMPING * sm.w;
+            } else {
+                continue;
+            }
+            Vec2 r = sm.p - b.pos;
+            if (k == K_GAS && n.amt > 0.05f) {
+                // work done on the gas heats it (and expansion cools it): pressure x motion, so it only matters
+                // in a confined, pressurised chamber and is negligible for a body moving through free gas
+                float vn = dot(b.vel + cross(b.w, r), sm.n);  // >0: moving into the gas
+                float over = std::max(0.f, n.amt * (n.temp + 273.f) / 293.f - 0.15f);
+                n.temp = std::max(-100.f, n.temp + std::clamp(over * vn * 0.08f, -30.f, 30.f));
+            }
+            Vec2 f = sm.n * -(std::min(p, 3e5f) * sm.w);
+            b.fluidF += f;
+            b.fluidT += cross(r, f);
+        }
+    }
+}
+
+// Heat exchange between bodies and the cells / bodies around them, plus melting and burning.
+void Physics::thermalStep() {
+    for (auto& b : bodies) {
+        if (!b.alive) continue;
+        const MatInfo& bm = MATS[b.mat];
+        if (b.mat == M_HEATER) b.temp = 900.f;
+        else if (b.mat == M_COOLER) b.temp = -60.f;
+        float Cb = bm.cap * b.area;
+        if (Cb <= 0) continue;
+
+        std::vector<Vec2> pts;
+        const float spacing = 3.f;
+        if (b.shape == SHAPE_CIRCLE) {
+            int n = std::clamp((int)(2 * PI * (b.radius + 1.5f) / spacing), 8, 64);
+            for (int i = 0; i < n; ++i) {
+                float a = 2 * PI * i / n;
+                pts.push_back(b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f));
+            }
+        } else {
+            float hx = b.half.x + 1.5f, hy = b.half.y + 1.5f;
+            Vec2 c[4] = {{-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}};
+            for (int e = 0; e < 4; ++e) {
+                Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
+                int n = std::max(1, (int)(length(p1 - p0) / spacing));
+                for (int i = 0; i < n; ++i) pts.push_back(b.toWorld(p0 + (p1 - p0) * ((float)i / n)));
+            }
+        }
+        for (Vec2 p : pts) {
+            int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
+            if (!world->inb(ix, iy) || world->bodyMask[iy * World::W + ix] >= 0) continue;
+            if (b.mat == M_IGNITER && world->sparkNow) world->ignitePoint(ix, iy);
+            Cell& c = world->at(ix, iy);
+            float dT, q, lim;
+            if (c.t == M_EMPTY) {
+                dT = b.temp - AMBIENT_T;
+                q = 0.0008f * spacing * dT;
+                lim = 0.24f * Cb * dT;
+                if (std::fabs(q) > std::fabs(lim)) q = lim;
+                b.temp -= q / Cb;
+            } else {
+                float Cc = cellCap(c);
+                float ka = bm.cond, kb = cellCond(c);
+                float k = 2.f * ka * kb / (ka + kb + 1e-6f);
+                dT = b.temp - c.temp;
+                q = k * spacing * dT;
+                lim = 0.24f * std::min(Cb, Cc) * dT;
+                if (std::fabs(q) > std::fabs(lim)) q = lim;
+                b.temp -= q / Cb;
+                c.temp += q / Cc;
+            }
+        }
+    }
+    // conduction through contacts between bodies
+    for (const Contact& c : contacts) {
+        if (c.a < 0 || c.b < 0) continue;
+        Body& A = bodies[c.a];
+        Body& B2 = bodies[c.b];
+        const MatInfo& ma = MATS[A.mat];
+        const MatInfo& mb = MATS[B2.mat];
+        float Ca = ma.cap * A.area, Cb = mb.cap * B2.area;
+        float k = 2.f * ma.cond * mb.cond / (ma.cond + mb.cond + 1e-6f);
+        float dT = A.temp - B2.temp;
+        float q = k * 2.5f * dT;
+        float lim = 0.24f * std::min(Ca, Cb) * dT;
+        if (std::fabs(q) > std::fabs(lim)) q = lim;
+        A.temp -= q / Ca;
+        B2.temp += q / Cb;
+    }
+    for (auto& b : bodies) {
+        if (!b.alive) continue;
+        const MatInfo& bm = MATS[b.mat];
+        bool melt = bm.hiTo != M_EMPTY && b.temp >= bm.hiT;
+        bool ignite = bm.ignT > 0.f && b.temp >= bm.ignT;
+        if (melt || ignite) dissolve(b);
+    }
+}
+
+// A body that melts or catches fire turns back into grid cells.
+void Physics::dissolve(Body& b) {
+    const MatInfo& bm = MATS[b.mat];
+    bool melt = bm.hiTo != M_EMPTY && b.temp >= bm.hiT;
+    float r = b.shape == SHAPE_CIRCLE ? b.radius : b.bound;
+    int x0 = std::max(0, (int)std::floor(b.pos.x - r)), x1 = std::min(World::W - 1, (int)std::ceil(b.pos.x + r));
+    int y0 = std::max(0, (int)std::floor(b.pos.y - r)), y1 = std::min(World::H - 1, (int)std::ceil(b.pos.y + r));
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            if (!b.contains(Vec2(x + 0.5f, y + 0.5f)) || world->at(x, y).t != M_EMPTY) continue;
+            if (melt) {
+                uint8_t to = bm.hiTo;
+                world->spawn(x, y, to, (to == M_MOLTEN || to == M_VAPOR) ? b.mat : (uint8_t)0, b.temp);
+            } else {
+                world->spawn(x, y, b.mat, 0, b.temp);
+                world->at(x, y).burn = (uint8_t)std::min(255, std::max(1, bm.burnTime));
+            }
+        }
+    }
+    removeBody(b.id);
 }
 
 void Physics::sampleFluids() {
@@ -343,10 +592,12 @@ Vec2 Physics::surfaceNormal(int ix, int iy) const {
 }
 
 void Physics::terrainContacts(Body& b) {
-    auto test = [&](Vec2 p) {
+    auto test = [&](Vec2 p, Vec2 faceN = Vec2()) {
         int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
         if (!world->isTerrain(ix, iy)) return;
         Vec2 n = surfaceNormal(ix, iy);
+        // a flat box face resting on a ledge must not be pushed sideways by the ledge's corner
+        if (lengthSq(faceN) > 0.f && dot(n, -faceN) < 0.7f) n = -faceN;
         if (lengthSq(n) < 1e-6f) n = normalize(b.pos - p);
         if (lengthSq(n) < 1e-6f) n = Vec2(0, -1);
         float depth = 12.f;
@@ -354,7 +605,9 @@ void Physics::terrainContacts(Body& b) {
             Vec2 q = p + n * t;
             if (!world->isTerrain((int)std::floor(q.x), (int)std::floor(q.y))) { depth = t - 0.25f; break; }
         }
-        contacts.emplace_back(-1, b.id, p, n, depth, b.isWheel ? 1.0f : 0.6f);
+        float mu = std::sqrt(MATS[b.mat].friction * cellFriction(*world, ix, iy)) * (b.isWheel ? 1.25f : 1.f);
+        float e = std::max(MATS[b.mat].restitution, cellRestitution(*world, ix, iy));
+        contacts.emplace_back(-1, b.id, p, n, depth, std::min(mu, 1.5f), e);
     };
     if (b.shape == SHAPE_CIRCLE) {
         int n = std::clamp((int)(2 * PI * b.radius / 2.5f), 12, 72);
@@ -367,8 +620,10 @@ void Physics::terrainContacts(Body& b) {
         Vec2 c[4] = {{-b.half.x, -b.half.y}, {b.half.x, -b.half.y}, {b.half.x, b.half.y}, {-b.half.x, b.half.y}};
         for (int e = 0; e < 4; ++e) {
             Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
+            static const Vec2 nl[4] = {{0, -1}, {1, 0}, {0, 1}, {-1, 0}};
+            Vec2 faceN = rotate(nl[e], b.angle);
             int n = std::max(1, (int)std::ceil(length(p1 - p0) / 2.5f));
-            for (int i = 0; i < n; ++i) test(b.toWorld(p0 + (p1 - p0) * ((float)i / n)));
+            for (int i = 0; i < n; ++i) test(b.toWorld(p0 + (p1 - p0) * ((float)i / n)), i == 0 ? Vec2() : faceN);
         }
         test(b.pos);
     }
@@ -378,7 +633,9 @@ void Physics::collidePair(Body& A, Body& B2) {
     Body* a = &A;
     Body* b = &B2;
     if (a->shape > b->shape) std::swap(a, b);  // boxes first
-    float mu = (a->isWheel || b->isWheel) ? 1.0f : 0.5f;
+    float mu = std::sqrt(MATS[a->mat].friction * MATS[b->mat].friction) * ((a->isWheel || b->isWheel) ? 1.25f : 1.f);
+    mu = std::min(mu, 1.5f);
+    float e = std::max(MATS[a->mat].restitution, MATS[b->mat].restitution);
 
     if (a->shape == SHAPE_CIRCLE) {  // circle-circle
         Vec2 d = b->pos - a->pos;
@@ -386,7 +643,7 @@ void Physics::collidePair(Body& A, Body& B2) {
         if (dist > rr) return;
         Vec2 n = dist > 1e-5f ? d / dist : Vec2(0, 1);
         float depth = rr - dist;
-        contacts.emplace_back(a->id, b->id, a->pos + n * (a->radius - depth * 0.5f), n, depth, mu);
+        contacts.emplace_back(a->id, b->id, a->pos + n * (a->radius - depth * 0.5f), n, depth, mu, e);
         return;
     }
     if (b->shape == SHAPE_CIRCLE) {  // box-circle
@@ -407,7 +664,7 @@ void Physics::collidePair(Body& A, Body& B2) {
             else { nl = Vec2(0, l.y < 0 ? -1.f : 1.f); depth = dy + b->radius; }
         }
         Vec2 n = rotate(nl, a->angle);
-        contacts.emplace_back(a->id, b->id, b->pos - n * (b->radius - depth * 0.5f), n, depth, mu);
+        contacts.emplace_back(a->id, b->id, b->pos - n * (b->radius - depth * 0.5f), n, depth, mu, e);
         return;
     }
     // box-box via SAT + reference-face clipping
@@ -437,7 +694,7 @@ void Physics::collidePair(Body& A, Body& B2) {
     Vec2 n = flip ? -refN : refN;
     for (int i = 0; i < 2; ++i) {
         float sep = dot(refN, seg2[i] - v1);
-        if (sep <= 0.05f) contacts.emplace_back(a->id, b->id, seg2[i], n, std::max(0.f, -sep), mu);
+        if (sep <= 0.05f) contacts.emplace_back(a->id, b->id, seg2[i], n, std::max(0.f, -sep), mu, e);
     }
 }
 
@@ -447,6 +704,7 @@ bool Physics::connected(int a, int b) const {
 
 void Physics::buildContacts() {
     contacts.clear();
+    for (auto& b : bodies) b.touching = false;
     for (auto& b : bodies)
         if (b.alive && !b.isStatic) terrainContacts(b);
     for (size_t i = 0; i < bodies.size(); ++i) {
@@ -481,7 +739,7 @@ void Physics::prestepContact(Contact& c, float h) {
     c.massT = kt > 0 ? 1.f / kt : 0.f;
     Vec2 vrel = Bb.vel + cross(Bb.w, c.rB) - A.vel - cross(A.w, c.rA);
     float vn = dot(vrel, c.n);
-    float bounce = vn < -60.f ? -0.2f * vn : 0.f;
+    float bounce = vn < -60.f ? -c.e * vn : 0.f;
     float pen = std::min(BAUMGARTE / h * std::max(c.depth - SLOP, 0.f), MAX_BIAS);
     c.vt = std::max(bounce, pen);
     c.jn = c.jt = 0;
@@ -520,6 +778,12 @@ void Physics::prestepJoint(Joint& j, float h) {
     j.rB = rotate(j.lb, Bb.angle);
     j.accImp = 0;
     j.accP = Vec2();
+    if (j.type == J_SLIDER) {
+        Vec2 n(-j.u.y, j.u.x);
+        j.beta = std::clamp(dot(n, A.pos - j.lb) * 0.2f / h, -MAX_BIAS, MAX_BIAS);       // perpendicular drift
+        j.gamma = std::clamp((A.angle - j.length) * 0.2f / h, -20.f, 20.f);               // angle drift
+        return;
+    }
 
     if (j.type == J_PIN || j.type == J_MOTOR) {
         float iM = A.invMass + Bb.invMass;
@@ -576,6 +840,14 @@ void Physics::prestepJoint(Joint& j, float h) {
 void Physics::solveJoint(Joint& j, float h) {
     Body& A = B(j.a);
     Body& Bb = B(j.b);
+    if (j.type == J_SLIDER) {
+        if (A.invI > 0.f) A.w -= j.gamma + A.w;          // hold the angle
+        if (A.invMass > 0.f) {
+            Vec2 n(-j.u.y, j.u.x);
+            A.vel -= n * (dot(n, A.vel) + j.beta);        // keep to the line
+        }
+        return;
+    }
     if (j.type == J_PIN || j.type == J_MOTOR) {
         if (j.type == J_MOTOR) {
             float iI = A.invI + Bb.invI;
@@ -626,10 +898,28 @@ void Physics::solveJoint(Joint& j, float h) {
     }
 }
 
+void Physics::solveHydro() {
+    for (auto& g : hydro) {
+        float D = 0.f, K = 0.f;
+        for (const HydroLink& l : g.links) {
+            const Body& b = bodies[l.body];
+            D += dot(l.a, b.vel);
+            K += dot(l.a, l.a) * b.invMass;
+        }
+        if (K < 1e-9f) continue;
+        float np = std::max(g.acc + D / K, 0.f);  // pressure can push but never pull
+        float dp = np - g.acc;
+        g.acc = np;
+        for (const HydroLink& l : g.links) {
+            Body& b = bodies[l.body];
+            b.vel -= l.a * (dp * b.invMass);
+        }
+    }
+}
+
 void Physics::substep(float h) {
     // external forces
-    float g = length(gravity);
-    for (auto& b : bodies) {
+        for (auto& b : bodies) {
         if (!b.alive || b.isStatic) continue;
         b.vel += gravity * h;
         if (b.wetFrac > 0) {
@@ -645,23 +935,36 @@ void Physics::substep(float h) {
             b.w *= 1.f / (1.f + 10.f * b.granFrac * h);
         }
         b.vel *= 1.f / (1.f + 0.03f * h);
+        b.vel += b.fluidF * (b.invMass * h);
+        if (b.fluidC > 0.f) {  // implicit damping while pressurised liquid pushes on the body
+            float k = 1.f / (1.f + b.fluidC * b.invMass * h);
+            b.vel *= k;
+            b.w *= k;
+        }
+        b.w += b.fluidT * b.invI * h;
         if (b.isRocket && thrustOn) {
             Vec2 dir = rotate(Vec2(0, -1), b.angle);
-            b.vel += dir * (g * 6.f * h);
+            b.vel += dir * (ROCKET_THRUST * b.invMass * h);
             if (world->chance(0.7f)) {
                 int len = 2 + world->rint(8);
                 Vec2 p = b.pos - dir * (b.half.y + (float)len) + Vec2((float)world->rint(3) - 1.f, (float)world->rint(3) - 1.f);
                 int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
-                if (world->isFree(ix, iy)) world->spawn(ix, iy, M_FIRE, (uint8_t)(3 + world->rint(5)));
+                if (world->isFree(ix, iy)) world->spawn(ix, iy, M_FIRE, (uint8_t)(3 + world->rint(5)), 1100.f);
             }
         }
     }
 
     for (auto& j : joints) if (j.alive) prestepJoint(j, h);
+    for (auto& g : hydro) g.acc = 0.f;
     buildContacts();
-    for (auto& c : contacts) prestepContact(c, h);
+    for (auto& c : contacts) {
+        prestepContact(c, h);
+        if (c.a >= 0) bodies[c.a].touching = true;
+        if (c.b >= 0) bodies[c.b].touching = true;
+    }
     for (int it = 0; it < ITERATIONS; ++it) {
         for (auto& j : joints) if (j.alive) solveJoint(j, h);
+        solveHydro();
         for (auto& c : contacts) solveContact(c);
     }
 
@@ -675,19 +978,33 @@ void Physics::substep(float h) {
         if (!std::isfinite(b.pos.x) || !std::isfinite(b.pos.y) || b.pos.y > World::H + 200 || b.pos.y < -400 ||
             b.pos.x < -200 || b.pos.x > World::W + 200)
             removeBody(b.id);
-        else if (lengthSq(b.vel) < 0.04f && b.w * b.w < 0.0004f) { b.vel = Vec2(); b.w = 0; }
+        else if (b.touching && !b.hasJoint && lengthSq(b.vel) < 0.04f && b.w * b.w < 0.0004f) { b.vel = Vec2(); b.w = 0; }
     }
 }
 
 void Physics::step(float dt) {
     applyBlasts();
+    fluidForces();
     sampleFluids();
     noCollide.clear();
+    for (auto& b : bodies) b.hasJoint = false;
+    for (auto& j : joints)
+        if (j.alive && j.type != J_MOUSE) {
+            if (j.a >= 0) bodies[j.a].hasJoint = true;
+            if (j.b >= 0) bodies[j.b].hasJoint = true;
+        }
     for (auto& j : joints)
         if (j.alive && (j.type == J_PIN || j.type == J_MOTOR || j.type == J_DISTANCE) && j.b >= 0)
             noCollide.push_back(pairKey(j.a, j.b));
     std::sort(noCollide.begin(), noCollide.end());
     float h = dt / SUBSTEPS;
     for (int s = 0; s < SUBSTEPS; ++s) substep(h);
+    thermalStep();
     stampBodies();
+}
+
+void Physics::dumpContacts(int body) const {
+    for (const Contact& c : contacts)
+        if (c.a == body || c.b == body)
+            std::printf("   contact a=%d b=%d p=(%.1f,%.1f) n=(%.2f,%.2f) depth=%.2f jn=%.0f\n", c.a, c.b, c.p.x, c.p.y, c.n.x, c.n.y, c.depth, c.jn);
 }

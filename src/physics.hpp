@@ -15,10 +15,16 @@ struct Body {
     float angle = 0, w = 0;
     Vec2 half;          // box half extents
     float radius = 0;   // circle radius
+    uint8_t mat = M_STEEL;
+    float temp = AMBIENT_T;
     float density = 1.5f;
     float area = 0, mass = 0, invMass = 0, invI = 0, bound = 0;
     bool isStatic = false, isWheel = false, isRocket = false;
+    bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
     uint32_t color = 0xe0b060;
+    // pressure of adjacent gas/liquid, refreshed once per frame
+    Vec2 fluidF;
+    float fluidT = 0, fluidC = 0;
     // fluid coupling, refreshed once per frame
     float wetFrac = 0, granFrac = 0, fluidRho = 0;
     Vec2 wetCentroid;
@@ -28,7 +34,7 @@ struct Body {
     bool contains(Vec2 p) const;
 };
 
-enum JointType { J_PIN, J_MOTOR, J_DISTANCE, J_MOUSE };
+enum JointType { J_PIN, J_MOTOR, J_DISTANCE, J_MOUSE, J_SLIDER };
 
 struct Joint {
     int id = -1;
@@ -52,10 +58,22 @@ struct Joint {
 struct Contact {
     int a, b;  // a may be -1 (terrain). Normal points from a to b.
     Vec2 p, n;
-    float depth, mu;
+    float depth, mu, e;
     Vec2 rA, rB;
     float massN = 0, massT = 0, vt = 0, jn = 0, jt = 0;
-    Contact(int a_, int b_, Vec2 p_, Vec2 n_, float depth_, float mu_) : a(a_), b(b_), p(p_), n(n_), depth(depth_), mu(mu_) {}
+    Contact(int a_, int b_, Vec2 p_, Vec2 n_, float depth_, float mu_, float e_)
+        : a(a_), b(b_), p(p_), n(n_), depth(depth_), mu(mu_), e(e_) {}
+};
+
+// A closed body of liquid shared by several rigid bodies: it can not be compressed, so the volume the
+// bodies sweep out must sum to zero (Pascal's law). Re-derived from the grid every frame.
+struct HydroLink {
+    int body;
+    Vec2 a;  // sum of face normals pointing from the body into the liquid
+};
+struct HydroGroup {
+    std::vector<HydroLink> links;
+    float acc = 0.f;
 };
 
 class Physics {
@@ -72,12 +90,13 @@ public:
     void step(float dt);
     void stampBodies();
 
-    int addBox(Vec2 c, Vec2 half, float angle, float density, bool stat);
-    int addCircle(Vec2 c, float r, float density, bool stat, bool wheel);
+    int addBox(Vec2 c, Vec2 half, float angle, uint8_t mat, bool stat);
+    int addCircle(Vec2 c, float r, uint8_t mat, bool stat, bool wheel);
     int addRocket(Vec2 c, float angle);
     int addPin(Vec2 anchor, int a, int b, bool motor, bool keyed);
     int addDistance(int a, Vec2 pa, int b, Vec2 pb, float freq);
     int addMouse(int body, Vec2 anchor);
+    int addSlider(int body, Vec2 axis);  // confine a body to a line through its centre; rotation locked
     void setMouseTarget(int joint, Vec2 target);
     void removeJoint(int id);
     void removeBody(int id);
@@ -88,11 +107,13 @@ public:
     Vec2 jointAnchorA(const Joint& j) const;
     Vec2 jointAnchorB(const Joint& j) const;
     int bodyCount() const;
+    void dumpContacts(int body) const;  // dev
 
 private:
     World* world;
     Body worldBody;
     std::vector<Contact> contacts;
+    std::vector<HydroGroup> hydro;
     std::vector<uint64_t> noCollide;
     int seqCounter = 0;
 
@@ -101,7 +122,11 @@ private:
     int allocJoint();
     void finalize(Body& b);
     void applyBlasts();
+    void fluidForces();
+    void solveHydro();
     void sampleFluids();
+    void thermalStep();
+    void dissolve(Body& b);
     void substep(float h);
     void buildContacts();
     void terrainContacts(Body& b);
