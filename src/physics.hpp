@@ -6,6 +6,15 @@
 
 enum ShapeType { SHAPE_BOX = 0, SHAPE_CIRCLE = 1 };
 
+// A body that endlessly produces a powder, liquid or gas into free cells beside its surface.
+struct Emitter {
+    bool on = false;
+    uint8_t mat = M_WATER;
+    float rate = 30.f;   // cells per second
+    float accum = 0.f;
+    uint8_t face = 0;    // 0 = all sides, else 1:+x 2:-x 3:+y 4:-y of the body's own frame
+};
+
 struct Body {
     int id = -1;
     int seq = 0;  // creation order (higher = on top)
@@ -21,6 +30,7 @@ struct Body {
     float area = 0, mass = 0, invMass = 0, invI = 0, bound = 0;
     bool isStatic = false, isWheel = false, isRocket = false;
     bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
+    Emitter src;
     int group = -1;     // rigid group (weld-linked bodies act as one object); -1 = none
     uint32_t color = 0xe0b060;
     // pressure of adjacent gas/liquid, refreshed once per frame
@@ -109,6 +119,12 @@ public:
     // exact edits: size (half/radius), pose and static flag of one body; welds and joints follow
     void reshape(int id, Vec2 pos, Vec2 half, float radius, float angle, uint8_t mat, bool stat);
     void transformGroup(int primary, Vec2 newPos, float newAngle);  // move/rotate a whole group about `primary`
+    // boolean subtract: remove the area of `cutters` from `target`. The remainder becomes welded rectangular
+    // pieces (<= 0.5 cell steps for curves). Returns the piece count, 0 if nothing is left, -1 if no overlap.
+    int cutBody(int target, const std::vector<int>& cutters);
+    // scale bodies about a pivot by factor s; joints and welds follow
+    void scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot);
+    void emitSources(float dt);
     // hollow tube between two points: two welded walls. Returns the group id.
     int addPipe(Vec2 a, Vec2 b, float outerD, float wall, uint8_t mat, bool stat);
     // flexible tube: chain of pipe segments hinged together. Returns the first segment's group id.
@@ -133,6 +149,7 @@ private:
     int seqCounter = 0;
     int groupCounter = 0;
     void weldPair(int root, int member);
+    bool emitOne(Body& b);
 
     Body& B(int id) { return id >= 0 ? bodies[id] : worldBody; }
     int allocBody();

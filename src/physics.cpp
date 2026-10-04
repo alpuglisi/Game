@@ -984,6 +984,7 @@ void Physics::substep(float h) {
 }
 
 void Physics::step(float dt) {
+    emitSources(dt);
     applyBlasts();
     fluidForces();
     sampleFluids();
@@ -1019,6 +1020,184 @@ void Physics::step(float dt) {
     for (int s = 0; s < SUBSTEPS; ++s) substep(h);
     thermalStep();
     stampBodies();
+}
+
+// ------------------------------------------------------------------ emitters
+bool Physics::emitOne(Body& b) {
+    const Emitter& e = b.src;
+    for (int tries = 0; tries < 20; ++tries) {
+        auto rf = [&]() { return (float)(world->rnd() & 0xFFFF) / 65535.f; };
+        Vec2 lp;
+        if (b.shape == SHAPE_BOX) {
+            int f = e.face;
+            if (f == 0) {  // choose a face in proportion to its length
+                float px = b.half.y * 2, py = b.half.x * 2, r = rf() * (2 * px + 2 * py);
+                f = r < px ? 1 : r < 2 * px ? 2 : r < 2 * px + py ? 3 : 4;
+            }
+            float u = (rf() * 2.f - 1.f) * 0.9f, off = 1.1f;
+            if (f == 1) lp = Vec2(b.half.x + off, u * b.half.y);
+            else if (f == 2) lp = Vec2(-b.half.x - off, u * b.half.y);
+            else if (f == 3) lp = Vec2(u * b.half.x, b.half.y + off);
+            else lp = Vec2(u * b.half.x, -b.half.y - off);
+        } else {
+            float base = e.face == 1 ? 0.f : e.face == 2 ? PI : e.face == 3 ? PI * 0.5f : -PI * 0.5f;
+            float a = e.face == 0 ? rf() * 2 * PI : base + (rf() - 0.5f) * 1.2f;
+            lp = Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.1f);
+        }
+        Vec2 w = b.toWorld(lp);
+        int x = (int)std::floor(w.x), y = (int)std::floor(w.y);
+        if (!world->inb(x, y) || world->bodyMask[y * World::W + x] >= 0) continue;
+        Cell& c = world->at(x, y);
+        if (c.t == M_EMPTY) {
+            world->setCell(x, y, e.mat);
+            if (MATS[e.mat].kind == K_GAS) world->at(x, y).amt = 1.f;
+            return true;
+        }
+        if (MATS[e.mat].kind == K_GAS && c.t == e.mat && c.amt < 1.f) { c.amt = std::min(1.f, c.amt + 0.5f); return true; }
+    }
+    return false;
+}
+
+void Physics::emitSources(float dt) {
+    for (auto& b : bodies) {
+        if (!b.alive || !b.src.on) continue;
+        Emitter& e = b.src;
+        e.accum = std::min(e.accum + e.rate * dt, 3.f);   // a blocked outlet does not store up a burst
+        while (e.accum >= 1.f) {
+            if (!emitOne(b)) break;
+            e.accum -= 1.f;
+        }
+    }
+}
+
+// ------------------------------------------------------------------ scale / cut
+void Physics::scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot) {
+    s = std::clamp(s, 0.05f, 10.f);
+    std::vector<Body> old(bodies.size());
+    std::vector<char> in(bodies.size(), 0);
+    std::vector<int> groups;
+    for (int id : ids) {
+        if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive || in[id]) continue;
+        in[id] = 1;
+        old[id] = bodies[id];
+        Body& b = bodies[id];
+        b.pos = pivot + (b.pos - pivot) * s;
+        if (b.shape == SHAPE_BOX) b.half = b.half * s; else b.radius *= s;
+        b.vel = Vec2(); b.w = 0;
+        finalize(b);
+        if (b.group >= 0 && std::find(groups.begin(), groups.end(), b.group) == groups.end()) groups.push_back(b.group);
+    }
+    for (auto& j : joints) {
+        if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+        bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
+        if (!ia && !ib) continue;
+        if (j.type == J_SLIDER) { if (ia) j.lb += bodies[j.a].pos - old[j.a].pos; continue; }
+        if (ia && ib) {  // both ends scale: anchors scale with them
+            j.la = j.la * s; j.lb = j.lb * s;
+            if (j.type == J_DISTANCE) j.length *= s;
+            continue;
+        }
+        if (ia) j.la = bodies[j.a].toLocal(old[j.a].toWorld(j.la));   // one end fixed: keep the joint in place
+        if (ib) j.lb = bodies[j.b].toLocal(old[j.b].toWorld(j.lb));
+    }
+    for (int g : groups) rebuildGroup(g);
+}
+
+int Physics::cutBody(int target, const std::vector<int>& cutters) {
+    if (target < 0 || target >= (int)bodies.size() || !bodies[target].alive) return -1;
+    const Body tc = bodies[target];
+    if (tc.isWheel || tc.isRocket || tc.src.on) return -1;
+    std::vector<const Body*> cut;
+    for (int c : cutters)
+        if (c >= 0 && c < (int)bodies.size() && bodies[c].alive && c != target) cut.push_back(&bodies[c]);
+    if (cut.empty()) return -1;
+    auto inCutter = [&](Vec2 lp) {
+        Vec2 w = tc.toWorld(lp);
+        for (auto* c : cut) if (c->contains(w)) return true;
+        return false;
+    };
+    struct R { int i0, i1, j0, j1; };
+    Vec2 ext = tc.shape == SHAPE_BOX ? tc.half : Vec2(tc.radius, tc.radius);
+    std::vector<R> rects;
+    long removed = 0;
+    for (float res : {0.5f, 1.f, 2.f, 4.f}) {
+        int nx = std::max(1, (int)std::ceil(ext.x * 2 / res)), ny = std::max(1, (int)std::ceil(ext.y * 2 / res));
+        float cx = ext.x * 2 / nx, cy = ext.y * 2 / ny;
+        std::vector<char> keep((size_t)nx * ny, 0);
+        removed = 0;
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                float x0 = -ext.x + i * cx, y0 = -ext.y + j * cy;
+                bool inside = true, hit = false;
+                for (int k = 0; k < 9; ++k) {   // corners, edge midpoints and centre
+                    Vec2 p(x0 + (k % 3) * cx * 0.5f, y0 + (k / 3) * cy * 0.5f);
+                    if (tc.shape == SHAPE_CIRCLE && lengthSq(p) > tc.radius * tc.radius + 1e-3f) { inside = false; break; }
+                    if (inCutter(p)) hit = true;
+                }
+                if (!inside) continue;
+                if (hit) { ++removed; continue; }
+                keep[(size_t)j * nx + i] = 1;
+            }
+        if (removed == 0) return -1;
+        // merge: horizontal runs, then identical runs on consecutive rows
+        rects.clear();
+        std::vector<int> open;  // indices into rects still growing
+        for (int j = 0; j < ny; ++j) {
+            std::vector<int> nextOpen;
+            int i = 0;
+            while (i < nx) {
+                if (!keep[(size_t)j * nx + i]) { ++i; continue; }
+                int a = i;
+                while (i < nx && keep[(size_t)j * nx + i]) ++i;
+                int found = -1;
+                for (int r : open) if (rects[r].i0 == a && rects[r].i1 == i && rects[r].j1 == j) { found = r; break; }
+                if (found >= 0) { rects[found].j1 = j + 1; nextOpen.push_back(found); }
+                else { rects.push_back({a, i, j, j + 1}); nextOpen.push_back((int)rects.size() - 1); }
+            }
+            open = nextOpen;
+        }
+        if (rects.size() <= 150) {
+            // convert cell rects to local boxes below
+            std::vector<int> pieces;
+            for (const R& r : rects) {
+                Vec2 lc(-ext.x + (r.i0 + r.i1) * 0.5f * cx, -ext.y + (r.j0 + r.j1) * 0.5f * cy);
+                Vec2 h((r.i1 - r.i0) * cx * 0.5f, (r.j1 - r.j0) * cy * 0.5f);
+                int id = addBox(tc.toWorld(lc), h, tc.angle, tc.mat, tc.isStatic);
+                Body& nb = bodies[id];
+                nb.temp = tc.temp; nb.color = tc.color;
+                nb.vel = tc.vel + cross(tc.w, nb.pos - tc.pos);
+                nb.w = tc.w;
+                pieces.push_back(id);
+            }
+            // joints that were attached to the target move to the piece nearest their anchor
+            for (auto& j : joints) {
+                if (!j.alive || j.group >= 0 || (j.a != target && j.b != target)) continue;
+                if (j.type == J_MOUSE) { j.alive = false; continue; }
+                if (pieces.empty()) { j.alive = false; continue; }
+                bool isA = j.a == target;
+                Vec2 anchor = tc.toWorld(isA ? j.la : j.lb);
+                if (j.type == J_SLIDER) anchor = tc.pos;
+                int best = pieces[0];
+                float bd = 1e30f;
+                for (int pid : pieces) {
+                    const Body& pb = bodies[pid];
+                    float d = pb.contains(anchor) ? -1.f : lengthSq(pb.pos - anchor);
+                    if (d < bd) { bd = d; best = pid; }
+                }
+                if (j.type == J_SLIDER) { j.lb += bodies[best].pos - tc.pos; j.a = best; continue; }
+                (isA ? j.a : j.b) = best;
+                (isA ? j.la : j.lb) = bodies[best].toLocal(anchor);
+            }
+            bodies[target].alive = false;
+            for (auto& j : joints) if (j.alive && (j.a == target || j.b == target)) j.alive = false;
+            std::vector<int> all = pieces;
+            if (tc.group >= 0) for (int m : groupMembers(tc.group)) all.push_back(m);
+            if (all.size() >= 2) groupBodies(all);
+            else if (tc.group >= 0) rebuildGroup(tc.group);
+            return (int)pieces.size();
+        }
+    }
+    return -1;  // too intricate even at the coarsest step
 }
 
 // ------------------------------------------------------------------ groups
