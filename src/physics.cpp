@@ -1657,6 +1657,26 @@ void Physics::applyFans(float dt) {
         const int hops = std::max(1, (int)std::ceil(v * peak));
         long movedAny = 0;   // how much gas actually moved through this fan this frame
         const float pHop = std::min(1.f, v / hops);
+        if (w.gasMomentum) {
+            // the stream carries momentum: the gas at the rotor is brought up towards the fan's speed (full speed leaving it, a
+            // gentler pull into it), and from there the jet coasts, so it keeps going past the end of the lane, bends round
+            // corners and drags the gas beside it along. Only the few cells either side of the rotor are driven: driving the
+            // whole lane would be a conveyor that holds gas against the far wall of a duct. Scaled by the fan curve like the
+            // hops, so a stalled fan pushes nothing.
+            const float vAhead = std::min(0.9f, v * peak), vBehind = std::min(0.9f, v * (vac ? 0.8f : 0.5f));
+            const int rotor = 4;
+            for (int l = 0; l < lanes; ++l)
+                for (size_t k = 0; k < lane[l].size(); ++k) {
+                    const int i = lane[l][k];
+                    const int fromRotor = (int)k >= split[l] ? (int)k - split[l] : split[l] - 1 - (int)k;
+                    if (fromRotor >= rotor || MATS[w.cells[i].t].kind != K_GAS || w.cells[i].t == M_FIRE) continue;
+                    const float want = (int)k >= split[l] ? vAhead : vBehind;
+                    const float along = w.gasVX[i] * axis.x + w.gasVY[i] * axis.y;
+                    if (along >= want) continue;
+                    const float d = (want - along) * 0.5f;
+                    w.gasVX[i] += axis.x * d; w.gasVY[i] += axis.y * d;
+                }
+        }
         for (int l = 0; l < lanes; ++l) {
             std::vector<int>& L = lane[l];
             if (L.empty()) continue;
@@ -1698,14 +1718,25 @@ void Physics::applyFans(float dt) {
                     ++movedAny;
                     Cell& c = w.cells[L[k + 1]];
                     if (MATS[c.t].kind == K_GAS && psi(c) > psi(a) + 0.12f) continue;   // the stream cannot be pumped uphill: gas only moves on while the way ahead is not at a higher pressure
-                    if (c.t == M_EMPTY) { c = a; a = Cell{}; }
-                    else if (MATS[c.t].kind == K_GAS) {
+                    // (a hopped parcel takes its momentum with it, so the speed given at the rotor travels down the lane)
+                    const int ia = L[k], ic = L[k + 1];
+                    if (c.t == M_EMPTY) {
+                        c = a; a = Cell{};
+                        if (w.gasMomentum) { w.gasVX[ic] = w.gasVX[ia]; w.gasVY[ic] = w.gasVY[ia]; w.gasVX[ia] = w.gasVY[ia] = 0.f; }
+                    } else if (MATS[c.t].kind == K_GAS) {
                         if (c.t == a.t) {   // same gas: carry half over, mixing the temperatures
-                            float m = a.amt * 0.5f;
-                            c.temp = (c.temp * c.amt + a.temp * m) / std::max(1e-4f, c.amt + m);
+                            float m = a.amt * 0.5f, tot = std::max(1e-4f, c.amt + m);
+                            c.temp = (c.temp * c.amt + a.temp * m) / tot;
+                            if (w.gasMomentum) {
+                                w.gasVX[ic] = (w.gasVX[ic] * c.amt + w.gasVX[ia] * m) / tot;
+                                w.gasVY[ic] = (w.gasVY[ic] * c.amt + w.gasVY[ia] * m) / tot;
+                            }
                             c.amt += m; a.amt -= m;
                             if (a.amt < 0.02f) a = Cell{};
-                        } else std::swap(a, c);
+                        } else {
+                            std::swap(a, c);
+                            if (w.gasMomentum) { std::swap(w.gasVX[ia], w.gasVX[ic]); std::swap(w.gasVY[ia], w.gasVY[ic]); }
+                        }
                     }
                 }
             }

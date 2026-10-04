@@ -43,6 +43,7 @@ World::World() { clear(); }
 void World::clear() {
     cells.assign(W * H, Cell{});
     bodyMask.assign(W * H, -1);
+    gasVX.assign((size_t)W * H, 0.f); gasVY.assign((size_t)W * H, 0.f);
     blasts.clear();
 }
 
@@ -64,6 +65,7 @@ bool World::load(Reader& r) {
     clk = r.pod<uint8_t>(); tick = r.pod<uint32_t>(); sparkTimer = r.pod<uint32_t>(); rng = r.pod<uint32_t>();
     battV = r.pod<float>(); battA = r.pod<float>(); sparkPeriod = r.pod<int>(); burnEvents = (long)r.pod<int64_t>();
     bodyMask.assign(W * H, -1);
+    gasVX.assign((size_t)W * H, 0.f); gasVY.assign((size_t)W * H, 0.f);   // (the flow field is not saved: a loaded world starts still)
     blasts.clear(); arcs.clear();
     volt.clear(); curr.clear(); elecCool.clear(); hadElec = false; vMax = iSource = 0.f; arcCount = 0;
     return r.ok;
@@ -801,16 +803,21 @@ void World::sourceCell(int x, int y) {
 // Gas moves from high to low pressure (amt * absolute temperature). Several relaxation passes per frame
 // let pressure waves outrun slow-moving pistons.
 void World::gasFlux() {
-    static std::vector<int> cur, next;
+    static std::vector<int> cur, next, all;
     static std::vector<uint32_t> mark;
     static std::vector<uint32_t> inList;   // which pass's list a cell is in (a running counter, so stale entries never match)
     static uint32_t listId = 0;
     static uint32_t gen = 0;
     if (mark.size() != (size_t)W * H) { mark.assign((size_t)W * H, 0); inList.assign((size_t)W * H, 0); }
     cur.clear();
-    for (int i = 0; i < W * H; ++i)
-        if (MATS[cells[i].t].kind == K_GAS && cells[i].t != M_FIRE) cur.push_back(i);
+    for (int i = 0; i < W * H; ++i) {
+        const bool g = MATS[cells[i].t].kind == K_GAS && cells[i].t != M_FIRE;
+        if (g) cur.push_back(i);
+        if (!g || bodyMask[i] >= 0) gasVX[i] = gasVY[i] = 0.f;   // only open gas carries a flow: anything else forgets the velocity that was here
+    }
     if (cur.empty()) return;
+    all = cur;                   // every gas cell of the frame, including those the passes create: the bulk-flow step works on these
+    const uint32_t gen0 = gen;   // a cell with mark > gen0 moved gas in some pass this frame
 
     // Moves gas between cells ia (a gas cell) and ib. Returns true when a worthwhile amount moved; *made gets a newly created cell, or -1.
     auto flux = [&](int ia, int ib, int& made) -> bool {
@@ -880,6 +887,7 @@ void World::gasFlux() {
                 if (cells[i].t == M_EMPTY || MATS[cells[i].t].kind != K_GAS) break;
                 int made;
                 bool moved = flux(i, j, made);
+                if (made >= 0) all.push_back(made);
                 if (moved) {
                     touch(i);
                     touch(j);
@@ -899,6 +907,7 @@ void World::gasFlux() {
         cur.swap(next);
         // gas cells created this pass are in 'next' already via touch(j)
     }
+    if (gasMomentum) gasMomentumStep(all, mark, gen0);
     // the open air: gas does not pile up against the edge of the world or hang on at the fringes of a cloud
     for (int x = 0; x < W; ++x) { for (int y : {0, H - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
     for (int y = 0; y < H; ++y) { for (int x : {0, W - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
@@ -929,6 +938,152 @@ void World::gasFlux() {
             bool open = (x + 1 < W && cells[i + 1].t == M_EMPTY && bodyMask[i + 1] < 0) || (x > 0 && cells[i - 1].t == M_EMPTY && bodyMask[i - 1] < 0) ||
                         (y + 1 < H && cells[i + W].t == M_EMPTY && bodyMask[i + W] < 0) || (y > 0 && cells[i - W].t == M_EMPTY && bodyMask[i - W] < 0);
             if (open) { c.amt *= 0.9f; if (c.amt < 0.008f) c.t = M_EMPTY; }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk flow
+// ---------------------------------------------------------------------------
+
+// Pressure equalisation alone spreads gas like treacle: nothing travels faster than the pressure difference across one cell
+// carries it, and the moment the difference is gone the gas stops. Real gas has inertia. So every open gas cell also carries a
+// velocity (cells per frame): the pressure gradient accelerates it, drag and walls slow it, neighbours trade momentum, and the
+// gas is then carried along it (first-order upwind: a share of the cell's content moves to the downwind neighbour and takes its
+// heat and momentum with it). A stream therefore keeps going when the push stops, drags the gas beside it along, is thinner
+// where it is fast, and the pressure drop across a restriction grows with the flow through it, since the gas must be
+// accelerated into the gap and that speed is lost again in the jet beyond. The pressure solver still does the equalising, and
+// through a one-cell gap it still carries most of the flow, so these effects sit on top of it rather than replacing it.
+void World::gasMomentumStep(const std::vector<int>& gas, const std::vector<uint32_t>& touched, uint32_t gen0) {
+    constexpr float K_ACC = 0.8f;      // acceleration per unit of pressure difference across a cell (relative above one atmosphere)
+    constexpr float DRAG = 0.004f;     // share of the velocity lost per frame in free gas (a jet keeps its core for a few diameters)
+    constexpr float WALL_DRAG = 0.06f; // ... and per neighbouring wall, grain, liquid or body
+    constexpr float VISC = 0.04f;      // share of the velocity difference to a neighbour evened out per frame
+    constexpr float VMAX = 0.9f;       // cells per frame: never more than most of a cell's content per frame
+    constexpr float STILL = 0.02f;     // below this speed (about a cell a second) a cell in still surroundings is left alone
+    constexpr float WISP = 0.03f;      // thinner gas carries no momentum worth the work (the thin-gas rules deal with it)
+    static std::vector<int> act;
+    static std::vector<float> base;
+    static std::vector<uint32_t> stamp;
+    static uint32_t stampId = 0;
+    if (stamp.size() != (size_t)W * H) stamp.assign((size_t)W * H, 0);
+    ++stampId;
+    auto psi = [](const Cell& c) { return c.amt * (c.temp + 273.f) / 293.f; };
+    auto openGas = [&](int i) { return bodyMask[i] < 0 && MATS[cells[i].t].kind == K_GAS && cells[i].t != M_FIRE; };
+    // the active cells: open gas that is moving, or whose surroundings changed pressure this frame; a still cloud costs nothing
+    act.clear();
+    for (int i : gas) {
+        if (!openGas(i) || stamp[i] == stampId) continue;
+        if (cells[i].amt < WISP) { gasVX[i] = gasVY[i] = 0.f; continue; }
+        if (std::fabs(gasVX[i]) + std::fabs(gasVY[i]) < STILL) {
+            if (touched[i] <= gen0) continue;                            // still gas in still surroundings
+            if (((i % W) + (i / W) + (int)tick) & 1) continue;          // still gas in changing surroundings is looked at every other frame: half the work on a slowly spreading cloud
+        }
+        stamp[i] = stampId;
+        act.push_back(i);
+    }
+    if (act.empty()) return;
+    base.resize(act.size());
+
+    // 1. accelerate, drag, walls
+    for (size_t n = 0; n < act.size(); ++n) {
+        const int i = act[n], x = i % W, y = i / W;
+        const Cell& a = cells[i];
+        const float pa = psi(a);
+        base[n] = a.amt;
+        // an empty cell inside a machine is vacuum and pulls the gas in; in the open air it stands for ambient air, which does
+        // not suck a plume outwards (the plume still spreads and thins by the pressure solver and the open-world rules)
+        const bool vacuum = outside.empty() || !outside[i];
+        float dp[4]; bool blk[4]; int nBlk = 0;
+        for (int k = 0; k < 4; ++k) {
+            const int nx = x + DX4[k], ny = y + DY4[k];
+            dp[k] = 0.f; blk[k] = true;
+            if (!inb(nx, ny) || bodyMask[ny * W + nx] >= 0) { ++nBlk; continue; }
+            const Cell& b = cells[ny * W + nx];
+            if (b.t == M_EMPTY) { blk[k] = false; if (vacuum) dp[k] = -pa; }
+            else if (MATS[b.t].kind == K_GAS) { blk[k] = false; if (b.t != M_FIRE) dp[k] = psi(b) - pa; }   // (a flame is left to its own devices)
+            else ++nBlk;                                                                                       // wall, grains, liquid
+        }
+        // the push on a parcel is the pressure difference over the pressure it is at, so hot or compressed gas does not
+        // accelerate without limit; below one atmosphere the difference itself counts (the pressure solver damps the rest)
+        const float inv = K_ACC / std::max(1.f, pa);
+        const float gx = (dp[0] - dp[1]) * (blk[0] || blk[1] ? 1.f : 0.5f);
+        const float gy = (dp[2] - dp[3]) * (blk[2] || blk[3] ? 1.f : 0.5f);
+        float vx = gasVX[i] - gx * inv, vy = gasVY[i] - gy * inv;   // (buoyancy stays with gasMove: a lift here would keep every plume cell busy)
+        const float keep = std::max(0.f, 1.f - DRAG - WALL_DRAG * (float)nBlk);
+        vx *= keep; vy *= keep;
+        if ((vx > 0.f && blk[0]) || (vx < 0.f && blk[1])) vx = 0.f;   // nothing flows into a wall
+        if ((vy > 0.f && blk[2]) || (vy < 0.f && blk[3])) vy = 0.f;
+        const float s2 = vx * vx + vy * vy;
+        if (s2 > VMAX * VMAX) { const float s = VMAX / std::sqrt(s2); vx *= s; vy *= s; }
+        gasVX[i] = vx; gasVY[i] = vy;
+    }
+    // 2. viscosity: neighbouring parcels even out their velocities, weighted by how much gas each holds (momentum is conserved).
+    // Each pair once, from a moving end: the lower-numbered one when both move. This is what lets a stream drag still gas along
+    // and start it moving.
+    auto moving = [&](int i) { return std::fabs(gasVX[i]) + std::fabs(gasVY[i]) >= STILL; };
+    for (int i : act) {
+        if (!moving(i)) continue;
+        const int x = i % W, y = i / W;
+        for (int k = 0; k < 4; ++k) {
+            const int nx = x + DX4[k], ny = y + DY4[k];
+            if (!inb(nx, ny)) continue;
+            const int j = ny * W + nx;
+            if (!openGas(j) || (stamp[j] == stampId && j < i && moving(j))) continue;
+            const float mi = std::max(cells[i].amt, 0.01f), mj = std::max(cells[j].amt, 0.01f);
+            const float cx = (mi * gasVX[i] + mj * gasVX[j]) / (mi + mj), cy = (mi * gasVY[i] + mj * gasVY[j]) / (mi + mj);
+            gasVX[i] += VISC * (cx - gasVX[i]); gasVY[i] += VISC * (cy - gasVY[i]);
+            gasVX[j] += VISC * (cx - gasVX[j]); gasVY[j] += VISC * (cy - gasVY[j]);
+        }
+    }
+    // 3. advection: upwind, from the amount the cell held before this step, so what arrives this frame is not passed straight on
+    const bool rev = tick & 1;
+    for (size_t nn = 0; nn < act.size(); ++nn) {
+        const size_t n = rev ? act.size() - 1 - nn : nn;
+        const int i = act[n], x = i % W, y = i / W;
+        Cell& a = cells[i];
+        if (!openGas(i) || a.amt < 0.002f) continue;   // (it may have been swapped away or emptied by an earlier cell)
+        float fx = std::fabs(gasVX[i]), fy = std::fabs(gasVY[i]);
+        const float tot = fx + fy;
+        if (tot < 0.005f) continue;
+        if (tot > VMAX) { fx *= VMAX / tot; fy *= VMAX / tot; }
+        for (int axis = 0; axis < 2; ++axis) {
+            const float f = axis ? fy : fx;
+            if (f <= 0.f) continue;
+            float& vel = axis ? gasVY[i] : gasVX[i];
+            const int sgn = vel > 0.f ? 1 : -1;
+            const int nx = x + (axis ? 0 : sgn), ny = y + (axis ? sgn : 0);
+            if (!inb(nx, ny) || bodyMask[ny * W + nx] >= 0) { vel = 0.f; continue; }
+            const int j = ny * W + nx;
+            Cell& b = cells[j];
+            const float move = std::min(a.amt, f * base[n]);
+            if (b.t == M_EMPTY) {
+                if (move < 0.005f) continue;
+                Cell c;
+                c.t = a.t; c.clock = clk; c.var = a.var; c.temp = a.temp; c.amt = move;
+                c.life = (a.t == M_VAPOR || a.t == M_AIR) ? a.life : (uint8_t)0;   // the fuel a vapour came from; intake air stays intake air
+                b = c;
+                a.amt -= move;
+                gasVX[j] = gasVX[i]; gasVY[j] = gasVY[i];
+            } else if (MATS[b.t].kind != K_GAS) {
+                vel = 0.f;                                                          // wall, grains or liquid: the flow stops here
+            } else if (b.t != M_FIRE && sameFluid(a, b)) {
+                if (move < 0.001f) continue;
+                const float nb = b.amt + move;
+                b.temp = (b.temp * b.amt + a.temp * move) / nb;
+                gasVX[j] = (gasVX[j] * b.amt + gasVX[i] * move) / nb;
+                gasVY[j] = (gasVY[j] * b.amt + gasVY[i] * move) / nb;
+                b.amt = nb;
+                a.amt -= move;
+            } else {
+                // a different gas (or a flame) ahead: the two cannot share a cell, so the parcel shoves it along and now and then
+                // they change places, as the pressure solver does, so a stream still works its way through foreign gas
+                const float share = move / (b.amt + move);
+                gasVX[j] += (gasVX[i] - gasVX[j]) * share;
+                gasVY[j] += (gasVY[i] - gasVY[j]) * share;
+                vel *= 0.5f;
+                if (chance(f)) { std::swap(a, b); std::swap(gasVX[i], gasVX[j]); std::swap(gasVY[i], gasVY[j]); break; }
+            }
         }
     }
 }

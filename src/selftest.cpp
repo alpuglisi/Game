@@ -1167,6 +1167,119 @@ void gridReview() {
     }
 }
 
+// the bulk-flow layer (World::gasMomentum): gas carries a velocity, so it has inertia on top of pressure equalisation
+void gasMomentum() {
+    std::printf("gas momentum\n");
+    auto gasSum = [](Rig& r, int x0, int y0, int x1, int y1) {
+        double s = 0;
+        for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) { const Cell& c = r.world.at(x, y); if (MATS[c.t].kind == K_GAS) s += c.amt; }
+        return s;
+    };
+    {   // a. a cylinder fed through a long port from a reservoir of air fills faster once the gas in the port is up to speed
+        double frac[2];
+        for (int mom = 0; mom < 2; ++mom) {
+            Rig r; r.world.gasMomentum = mom; r.phys.gravity = Vec2(0, 0);
+            r.world.fillRect(39, 89, 140, 140, M_STEEL); r.world.fillRect(40, 90, 139, 139, M_EMPTY);       // reservoir 100 x 50
+            r.world.fillRect(140, 111, 169, 118, M_STEEL);                                                   // port 6 high, 30 long
+            r.world.fillRect(169, 104, 200, 125, M_STEEL); r.world.fillRect(170, 105, 199, 124, M_EMPTY);   // cylinder 30 x 20
+            r.world.fillRect(140, 112, 169, 117, M_EMPTY);
+            r.gas(40, 90, 139, 139, M_AIR, 1.f);
+            r.step(60);
+            frac[mom] = gasSum(r, 170, 105, 199, 124) / 600.0;
+        }
+        char d[110];
+        std::snprintf(d, sizeof d, "cylinder at %.3f of the reservoir density after 60 frames with momentum, %.3f without", frac[1], frac[0]);
+        check(frac[1] > 1.3 * frac[0], "a cylinder fed through a port fills clearly faster when the gas has inertia", d);
+    }
+    {   // b. a fan pushes a puff of smoke along a pipe and is switched off: the puff keeps going
+        double coast[2];
+        for (int mom = 0; mom < 2; ++mom) {
+            Rig r; r.world.gasMomentum = mom; r.phys.gravity = Vec2(0, 0);
+            r.world.fillRect(40, 95, 300, 98, M_WALL); r.world.fillRect(40, 111, 300, 114, M_WALL); r.world.fillRect(40, 99, 43, 110, M_WALL);
+            int fan = r.phys.addBox(Vec2(52, 105), Vec2(2, 5.5f), 0, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = 100.f;
+            r.phys.stampBodies();
+            for (int y = 99; y <= 110; ++y) for (int x = 56; x < 62; ++x) { r.world.setCell(x, y, M_SMOKE); r.world.at(x, y).amt = 1.f; }
+            auto centroid = [&]() {
+                double sx = 0, n = 0;
+                for (int y = 99; y <= 110; ++y) for (int x = 44; x < 300; ++x) if (r.world.at(x, y).t == M_SMOKE) { sx += x * r.world.at(x, y).amt; n += r.world.at(x, y).amt; }
+                return n ? sx / n : 0;
+            };
+            r.step(20);
+            double c1 = centroid();
+            r.phys.bodies[fan].fan.strength = 0.f;
+            r.step(60);
+            coast[mom] = centroid() - c1;
+        }
+        char d[110];
+        std::snprintf(d, sizeof d, "smoke centroid travelled %.1f cells after the fan stopped with momentum, %.1f without", coast[1], coast[0]);
+        check(coast[1] > coast[0] + 4.0, "gas pushed along a pipe keeps travelling after the push stops", d);
+    }
+    {   // c. a venturi in the intake duct of a fan, inside a sealed box of air: the stream past the throat draws the pocket below it down
+        double pocket[3], p0 = 0;
+        for (int v = 0; v < 3; ++v) {
+            const bool mom = v != 2, stream = v != 1;
+            Rig r; r.world.gasMomentum = mom; r.phys.gravity = Vec2(0, 0);
+            r.world.fillRect(40, 60, 261, 131, M_STEEL); r.world.fillRect(41, 61, 260, 130, M_EMPTY);          // box
+            r.world.fillRect(60, 89, 200, 90, M_STEEL); r.world.fillRect(60, 103, 200, 104, M_STEEL);          // duct y 91..102, open at both ends
+            r.world.fillRect(140, 91, 160, 93, M_STEEL); r.world.fillRect(140, 100, 160, 102, M_STEEL);        // throat y 94..99
+            r.world.fillRect(134, 91, 139, 91, M_STEEL); r.world.fillRect(134, 102, 139, 102, M_STEEL);
+            r.world.fillRect(161, 91, 166, 91, M_STEEL); r.world.fillRect(161, 102, 166, 102, M_STEEL);
+            r.world.fillRect(138, 105, 161, 119, M_STEEL); r.world.fillRect(140, 108, 159, 117, M_EMPTY);      // pocket under the throat
+            r.world.fillRect(148, 100, 151, 107, M_EMPTY);                                                      // its neck into the throat
+            int fan = r.phys.addBox(Vec2(185, 96.5f), Vec2(2, 5.5f), 0, M_STEEL, true);                        // draws through the venturi
+            r.phys.bodies[fan].fan.strength = stream ? 100.f : 0.f; r.phys.bodies[fan].fan.vacuum = 1;
+            r.phys.stampBodies();
+            r.gas(41, 61, 260, 130, M_AIR, 1.f);
+            r.gas(138, 100, 161, 119, M_AIR, 1.f);
+            p0 = gasSum(r, 140, 108, 159, 117);
+            r.step(240);
+            pocket[v] = gasSum(r, 140, 108, 159, 117);
+        }
+        char d[128];
+        std::snprintf(d, sizeof d, "pocket %.0f -> %.0f with the stream, %.0f with the fan off (%.0f with the stream and momentum off)", p0, pocket[0], pocket[1], pocket[2]);
+        check(pocket[0] < 0.7 * p0 && pocket[1] > 0.98 * p0, "a stream past a side opening draws the pocket behind it down; still air leaves it alone", d);
+    }
+    {   // d. an orifice in a duct: the pressure drop across it grows with the flow through it
+        double drop[2][2], flow[2][2];
+        for (int mom = 0; mom < 2; ++mom)
+            for (int s = 0; s < 2; ++s) {
+                Rig r; r.world.gasMomentum = mom; r.phys.gravity = Vec2(0, 0);
+                const int ox = 180, xEnd = 420;
+                r.world.fillRect(40, 95, xEnd, 98, M_WALL); r.world.fillRect(40, 111, xEnd, 114, M_WALL); r.world.fillRect(40, 99, 43, 110, M_WALL);
+                r.world.fillRect(ox, 99, ox + 1, 110, M_WALL); r.world.fillRect(ox, 103, ox + 1, 106, M_EMPTY);   // a 4-cell gap in a 12-cell duct
+                int fan = r.phys.addBox(Vec2(110, 105), Vec2(2, 5.5f), 0, M_STEEL, true);
+                r.phys.bodies[fan].fan.strength = s ? 120.f : 60.f;
+                r.phys.stampBodies();
+                r.gas(44, 99, xEnd, 110, M_AIR, 0.5f);
+                r.step(240);   // a steady stream out of the open far end
+                double dp = 0;
+                for (int f = 0; f < 30; ++f) { r.step(1); dp += meanPsi(r, ox - 25, ox - 5, 99, 110) - meanPsi(r, ox + 6, ox + 26, 99, 110); }
+                drop[mom][s] = dp / 30;
+                r.world.fillRect(xEnd - 3, 99, xEnd, 110, M_WALL);   // wall the far end off: the flow is what piles up beyond the orifice
+                double before = gasSum(r, ox + 2, 99, xEnd - 4, 110);
+                r.step(30);
+                flow[mom][s] = (gasSum(r, ox + 2, 99, xEnd - 4, 110) - before) / 30;
+            }
+        char d[160];
+        auto ratio = [](double a, double b) { return b / std::max(1e-6, a); };
+        std::snprintf(d, sizeof d, "fan 60 -> 120: drop %.3f -> %.3f (x%.2f) for flow %.2f -> %.2f (x%.2f) per frame; without momentum drop x%.2f, flow x%.2f",
+                      drop[1][0], drop[1][1], ratio(drop[1][0], drop[1][1]), flow[1][0], flow[1][1], ratio(flow[1][0], flow[1][1]),
+                      ratio(drop[0][0], drop[0][1]), ratio(flow[0][0], flow[0][1]));
+        check(drop[1][1] > 1.2 * drop[1][0] && flow[1][1] > flow[1][0], "the pressure drop across an orifice grows with the flow through it", d);
+    }
+    {   // e. gas sloshing about a sealed box keeps its amount
+        Rig r; r.world.gasMomentum = true; r.phys.gravity = Vec2(0, 0);
+        r.world.fillRect(100, 100, 161, 131, M_WALL); r.world.fillRect(101, 101, 160, 130, M_EMPTY);
+        r.gas(101, 101, 120, 130, M_AIR, 3.f);
+        double t0 = gasSum(r, 101, 101, 160, 130);
+        r.step(300);
+        double t1 = gasSum(r, 101, 101, 160, 130);
+        char d[96]; std::snprintf(d, sizeof d, "%.1f -> %.1f after 300 frames (%.3f%%)", t0, t1, 100 * (t1 - t0) / t0);
+        check(std::fabs(t1 - t0) < 0.005 * t0, "the amount of gas in a sealed box is unchanged by the flow", d);
+    }
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -1191,6 +1304,7 @@ int runSelfTests() {
     rigidReview2();
     oxidiser();
     gridReview();
+    gasMomentum();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

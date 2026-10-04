@@ -94,6 +94,10 @@ public:
 
     uint32_t rnd();
     std::vector<uint8_t> outside; uint32_t outsideTick = 0;   // empty and gas cells connected to the edge of the world (open air), refreshed every so often
+    // ---- bulk gas flow (gasMomentumStep): on top of pressure equalisation, gas carries a velocity, so a stream has inertia,
+    // drags the gas beside it along and costs more to force through a restriction the faster it goes. Transient: not saved.
+    bool gasMomentum = true;              // a run-time setting a scene or the user may switch off; the old diffusion-only model remains
+    std::vector<float> gasVX, gasVY;      // velocity of the gas in each cell, in cells per frame (meaningful only in uncovered gas cells)
     double prof[5] = {0, 0, 0, 0, 0}; long profN = 0;   // dev: microseconds spent per frame in electricity, heat, cell updates, gas flow, liquid pressure
     int rint(int n) { return (int)(rnd() % (uint32_t)n); }
     bool chance(float p) { return (rnd() & 0xFFFF) < p * 65536.f; }
@@ -111,6 +115,7 @@ private:
 
     void thermalPass();
     void gasFlux();
+    void gasMomentumStep(const std::vector<int>& gas, const std::vector<uint32_t>& touched, uint32_t gen0);
     void liquidPressure();
 
     void updateCell(int x, int y);

@@ -3596,10 +3596,10 @@ int runSelfTests();
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) if (!std::strcmp(argv[i], "--selftest")) return runSelfTests();
-    // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--no-air]
+    // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--no-air] [--no-momentum]
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;
-    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false, noAir = false;
+    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false, noAir = false, noMomentum = false;
     int camFlag = -1;
     bool scenesFlag = false; bool timeFlag = false; float zoomFlag = 1.f, camYFlag = 0.f;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
@@ -3638,12 +3638,14 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
         else if (!std::strcmp(argv[i], "--no-air")) noAir = true;
+        else if (!std::strcmp(argv[i], "--no-momentum")) noMomentum = true;
     }
     if (shot) SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
 
     Game g;
     if (!g.init(shot != nullptr)) return 1;
-    g.world.needAir = !noAir;   // --no-air: the old model, fuel burns without oxygen
+    g.world.needAir = !noAir;              // --no-air: the old model, fuel burns without oxygen
+    g.world.gasMomentum = !noMomentum;   // --no-momentum: the diffusion-only gas model, for comparing scenes
 
     if (shot) {
         switch (scene) {
