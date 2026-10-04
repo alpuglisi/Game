@@ -9,6 +9,11 @@ namespace {
 const int DX4[4] = {1, -1, 0, 0};
 const int DY4[4] = {0, 0, 1, -1};
 
+// combustion with oxygen (World::needAir)
+const float AIR_MIN = 0.05f;      // air thinner than this does not keep a flame going (a fan intake makes air at 0.25)
+const float AIR_IGN_MIN = 0.02f;  // the least air a gas fuel cell can light from
+const float SOLID_AIR = 0.02f;    // a burning solid or liquid draws airNeed * this of air a frame (airNeed / 50)
+
 uint8_t initialLife(World& w, uint8_t t) {
     return t == M_FIRE ? (uint8_t)(25 + w.rint(35)) : (uint8_t)0;
 }
@@ -314,6 +319,68 @@ bool World::phase(int x, int y) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Combustion. Burning needs oxygen (unless the fuel carries its own, selfOx): the open air, which is unlimited, or AIR cells,
+// which are used up at airNeed units of air per unit of fuel. Empty cells inside a sealed machine are vacuum and feed nothing.
+// ---------------------------------------------------------------------------
+
+// Which empty and gas cells are open air (connected to the edge of the world); inside a sealed machine the empty cells are
+// vacuum. gasFlux refreshes this map every 20 frames; combustion wants it fresher (a valve that has just closed must not leave the
+// cylinder counting as open air for long) and asks for it first, so there is one in the very first frame too. About 2 ms a time.
+void World::refreshOutside() {
+    if (outside.size() == (size_t)W * H && tick - outsideTick < 6u && outsideTick <= tick) return;
+    outside.assign((size_t)W * H, 0);
+    outsideTick = tick;
+    std::vector<int> st;
+    auto open_ = [&](int i) { return bodyMask[i] < 0 && (cells[i].t == M_EMPTY || MATS[cells[i].t].kind == K_GAS); };
+    auto seed = [&](int i) { if (!outside[i] && open_(i)) { outside[i] = 1; st.push_back(i); } };
+    for (int x = 0; x < W; ++x) { seed(x); seed((H - 1) * W + x); }
+    for (int y = 0; y < H; ++y) { seed(y * W); seed(y * W + W - 1); }
+    while (!st.empty()) {
+        int p = st.back(); st.pop_back();
+        int px = p % W, py = p / W;
+        if (px + 1 < W) seed(p + 1);
+        if (px > 0) seed(p - 1);
+        if (py + 1 < H) seed(p + W);
+        if (py > 0) seed(p - W);
+    }
+}
+
+// The open air is any empty cell, or any gas but a fuel (smoke, flame, steam, air), that is connected to the edge of the world: it has
+// the atmosphere mixed in, so a fire in the open never wants for oxygen. Inside a sealed volume only AIR cells count, and they run out.
+World::AirNear World::airNear(int x, int y) {
+    refreshOutside();
+    AirNear a;
+    for (int k = 0; k < 4; ++k) {
+        int nx = x + DX4[k], ny = y + DY4[k];
+        if (!inb(nx, ny)) continue;
+        int i = ny * W + nx;
+        if (bodyMask[i] >= 0) continue;
+        const Cell& n = cells[i];
+        bool fuelGas = n.t == M_VAPOR || (MATS[n.t].kind == K_GAS && MATS[n.t].ignT > 0.f);
+        if (outside[i] && (n.t == M_EMPTY || (MATS[n.t].kind == K_GAS && !fuelGas))) a.open = true;
+        else if (n.t == M_EMPTY) a.vacuum = true;
+        else if (n.t == M_AIR && n.amt > 0.f) { a.idx[a.n++] = i; a.total += n.amt; }
+    }
+    return a;
+}
+
+bool World::oxygenFace(int x, int y) {
+    if (!needAir) {   // the old rule: any open face, empty or gas
+        for (int k = 0; k < 4; ++k) {
+            int nx = x + DX4[k], ny = y + DY4[k];
+            if (!inb(nx, ny)) continue;
+            uint8_t nt = cells[ny * W + nx].t;
+            if (nt == M_EMPTY || MATS[nt].kind == K_GAS) return true;
+        }
+        return false;
+    }
+    AirNear a = airNear(x, y);
+    if (a.open) return true;
+    for (int i = 0; i < a.n; ++i) if (cells[a.idx[i]].amt >= AIR_MIN) return true;
+    return false;
+}
+
 // A spark: ignites a flammable cell if it is above its flash point.
 void World::sparkAt(int x, int y) {
     Cell& c = at(x, y);
@@ -321,16 +388,7 @@ void World::sparkAt(int x, int y) {
     if (c.t == M_VAPOR) m = &MATS[c.life < M_COUNT ? c.life : (uint8_t)M_GASOLINE];
     if (m->ignT <= 0.f || c.burn > 0 || (c.t == M_TNT && c.life > 0)) return;
     if (c.temp < m->flashT) return;
-    if (m->kind != K_GAS && c.t != M_VAPOR && !m->selfOx) {
-        bool open = false;
-        for (int k = 0; k < 4 && !open; ++k) {
-            int nx = x + DX4[k], ny = y + DY4[k];
-            if (!inb(nx, ny)) continue;
-            uint8_t nt = cells[ny * W + nx].t;
-            open = nt == M_EMPTY || MATS[nt].kind == K_GAS;
-        }
-        if (!open) return;
-    }
+    if (m->kind != K_GAS && c.t != M_VAPOR && !m->selfOx && !oxygenFace(x, y)) return;
     burn(x, y, *m);
 }
 
@@ -342,16 +400,7 @@ bool World::tryIgnite(int x, int y) {
     if (c.t == M_TNT && c.life > 0) return false;
 
     bool gasFuel = m->kind == K_GAS || c.t == M_VAPOR;
-    if (!gasFuel && !m->selfOx) {  // needs air: an open face
-        bool open = false;
-        for (int k = 0; k < 4 && !open; ++k) {
-            int nx = x + DX4[k], ny = y + DY4[k];
-            if (!inb(nx, ny)) continue;
-            uint8_t nt = cells[ny * W + nx].t;
-            open = nt == M_EMPTY || MATS[nt].kind == K_GAS;
-        }
-        if (!open) return false;
-    }
+    if (!gasFuel && !m->selfOx && !oxygenFace(x, y)) return false;   // a solid or liquid burns at a face with oxygen at it
     bool hot = c.temp >= m->ignT;
     // a surface far above the ignition temperature lights the fuel on contact (glow plugs, lava, red-hot metal)
     for (int k = 0; k < 4 && !hot; ++k) {
@@ -367,32 +416,60 @@ bool World::tryIgnite(int x, int y) {
             if (inb(nx, ny) && (cells[ny * W + nx].t == M_FIRE || cells[ny * W + nx].burn > 0)) flame = true;
         }
     }
-    if (hot || (flame && chance(m->burnSpeed))) {
-        burn(x, y, *m);
-        return true;
-    }
+    if (hot || (flame && chance(m->burnSpeed))) return burn(x, y, *m);
     return false;
 }
 
-void World::burn(int x, int y, const MatInfo& m) {
-    ++burnEvents;
+bool World::burn(int x, int y, const MatInfo& m) {
     Cell& c = at(x, y);
     if (c.t == M_TNT) {
+        ++burnEvents;
         if (c.life == 0) c.life = (uint8_t)(2 + rint(5));
-        return;
+        return true;
     }
-    Cell& cc = at(x, y);
-    if (MATS[cc.t].kind == K_GAS) {  // gas-phase combustion: the whole mixture becomes flame
-        cc.var = 0;
-        cc.life = (uint8_t)(cc.t == M_VAPOR ? 8 : std::min(255, m.burnTime));
-        cc.temp = std::max(cc.temp, m.burnT);
-        cc.t = M_FIRE;
-        cc.burn = 0;
-        cc.clock = clk;
-        return;
+    if (MATS[c.t].kind == K_GAS) {  // gas-phase combustion: the mixture becomes flame, as far as the oxygen about it allows
+        float extra = 0.f;   // the air that burns with the fuel joins the flame, and later the exhaust: no gas is lost
+        if (needAir && !m.selfOx) {
+            AirNear a = airNear(x, y);
+            if (!a.open) {
+                const float need = c.amt * m.airNeed;
+                if (a.total < AIR_IGN_MIN || need <= 0.f) return false;   // nothing to burn with
+                const float used = std::min(need, a.total);
+                int richest = -1;
+                for (int i = 0; i < a.n; ++i) {   // each air cell gives its share
+                    Cell& n = cells[a.idx[i]];
+                    if (richest < 0 || n.amt > cells[richest].amt) richest = a.idx[i];
+                    n.amt -= used * n.amt / a.total;
+                    if (n.amt < 0.01f) n.t = M_EMPTY;
+                }
+                extra = used;
+                if (used < need) {   // too little air: only the part it supports burns, where the air was; the rest stays as fuel for later
+                    const float frac = used / need;
+                    Cell& f = cells[richest];   // (all of its air just went into the flame)
+                    f = Cell{};
+                    f.t = M_FIRE; f.life = (uint8_t)(c.t == M_VAPOR ? 8 : std::min(255, m.burnTime)); f.temp = m.burnT; f.clock = clk;
+                    f.amt = c.amt * frac + used;
+                    c.amt -= c.amt * frac;
+                    ++burnEvents;
+                    return true;
+                }
+            }
+        }
+        ++burnEvents;
+        c.var = 0;
+        c.life = (uint8_t)(c.t == M_VAPOR ? 8 : std::min(255, m.burnTime));
+        c.temp = std::max(c.temp, m.burnT);
+        c.t = M_FIRE;
+        c.burn = 0;
+        c.clock = clk;
+        c.amt += extra;
+        return true;
     }
-    cc.burn = (uint8_t)std::min(255, std::max(1, m.burnTime));
-    cc.temp = std::max(cc.temp, m.burnT);
+    ++burnEvents;
+    c.burn = c.aux ? c.aux : (uint8_t)std::min(255, std::max(1, m.burnTime));   // a relit cell carries on from where its fire was starved
+    c.aux = 0;
+    c.temp = std::max(c.temp, m.burnT);
+    return true;
 }
 
 void World::burnTick(int x, int y) {
@@ -403,6 +480,17 @@ void World::burnTick(int x, int y) {
         int nx = x + DX4[k], ny = y + DY4[k];
         if (inb(nx, ny) && cells[ny * W + nx].t == M_WATER) { c.burn = 0; c.temp = std::min(c.temp, std::max(AMBIENT_T, m.ignT - 20.f)); return; }   // doused: cooled below ignition, or it would relight next frame
     }
+    if (needAir && !m.selfOx) {   // a solid or liquid burns at its surface with the oxygen there; starved of it the fire goes out, but the fuel
+        AirNear a = airNear(x, y);  // stays hot and relights, with the fuel it had left (kept in aux), when air returns
+        if (!a.open) {
+            int best = -1;
+            for (int i = 0; i < a.n; ++i) if (best < 0 || cells[a.idx[i]].amt > cells[best].amt) best = a.idx[i];
+            if (best < 0 || cells[best].amt < AIR_MIN) { c.aux = c.burn; c.burn = 0; return; }
+            Cell& n = cells[best];
+            n.amt -= std::min(n.amt, m.airNeed * SOLID_AIR);
+            if (n.amt < 0.01f) n.t = M_EMPTY;
+        }
+    }
     c.temp = std::max(c.temp, m.burnT * 0.8f);
     if (chance(0.5f)) {
         int k = rint(4);
@@ -410,6 +498,10 @@ void World::burnTick(int x, int y) {
         if (isFree(nx, ny)) {
             spawn(nx, ny, M_FIRE, (uint8_t)(4 + rint(7)), m.burnT);
             at(nx, ny).amt = 0.6f;
+        } else if (needAir && inb(nx, ny) && bodyMask[ny * W + nx] < 0 && at(nx, ny).t == M_AIR && at(nx, ny).amt <= 0.35f) {
+            float amt = at(nx, ny).amt;   // thin air at the flame front becomes flame
+            spawn(nx, ny, M_FIRE, (uint8_t)(4 + rint(7)), m.burnT);
+            at(nx, ny).amt = amt;
         }
     }
     if (m.selfOx) {   // a burning grain lights its neighbours directly, even with no air about
@@ -531,6 +623,12 @@ void World::fireCell(int x, int y) {
         return;
     }
     --c.life;
+    if (needAir) {   // a flame in vacuum has nothing to feed on and dies out quickly
+        AirNear a = airNear(x, y);
+        bool fed = a.open;
+        for (int i = 0; i < a.n && !fed; ++i) fed = cells[a.idx[i]].amt >= AIR_MIN;
+        if (!fed && a.vacuum) c.life = c.life > 2 ? (uint8_t)(c.life - 2) : (uint8_t)0;
+    }
     if (chance(0.3f)) {
         int dir = rint(3) - 1;
         if (isFree(x + dir, y - 1)) moveTo(x, y, x + dir, y - 1);

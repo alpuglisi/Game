@@ -181,13 +181,16 @@ ChamberResult chamber(bool cut) {
             for (int x = cx - R - 1; x <= cx + R + 1; ++x)
                 if ((x - cx + 0.5f) * (x - cx + 0.5f) + (y - cy + 0.5f) * (y - cy + 0.5f) < (R + 0.5f) * (R + 0.5f)) r.world.at(x, y) = Cell{};
     }
-    // fill the cavity with fuel vapour and light it
+    // fill the cavity with a fuel/air charge (alternate cells of vapour and air: vapour alone, sealed in a vacuum, does not burn) and light it
     int filled = 0;
     for (int y = cy - R; y <= cy + R; ++y)
         for (int x = cx - R; x <= cx + R; ++x) {
             if (r.world.at(x, y).t != M_EMPTY || r.world.bodyMask[y * World::W + x] >= 0) continue;
             float d2 = (x - cx + 0.5f) * (x - cx + 0.5f) + (y - cy + 0.5f) * (y - cy + 0.5f);
-            if (d2 < (R - 1.f) * (R - 1.f)) { r.world.setCell(x, y, M_VAPOR); r.world.at(x, y).amt = 0.8f; ++filled; }
+            if (d2 < (R - 1.f) * (R - 1.f)) {
+                bool air = (x + y) & 1;
+                r.world.setCell(x, y, air ? M_AIR : M_VAPOR); r.world.at(x, y).amt = air ? 2.f : 0.8f; ++filled;
+            }
         }
     r.world.ignitePoint(cx, cy);
     ChamberResult out{0, 0, 0, 0};
@@ -218,7 +221,7 @@ void combustion() {
     std::snprintf(d, sizeof d, "cells: leaked %.2f inside %.1f Tmax %.0f | cut body: leaked %.2f inside %.1f Tmax %.0f", a.leaked, a.inside, a.tmax, b.leaked, b.inside, b.tmax);
     check(b.leaked < 0.5f, "no gas escapes through the joints of the cut pieces", d);
     check(std::fabs(b.inside - a.inside) < 0.2f * std::max(1.f, a.inside), "the same amount of gas ends up in the chamber", d);
-    check(b.tmax > 0.7f * a.tmax && b.tmax < 1.3f * a.tmax, "peak temperature matches", d);
+    check(a.tmax > 1000.f && b.tmax > 0.7f * a.tmax && b.tmax < 1.3f * a.tmax, "the charge burns and the peak temperature matches", d);
 }
 
 // 6. a boiler: water in a sealed cavity heated through the walls (vaporisation and pressurisation)
@@ -976,6 +979,97 @@ void rigidReview2() {
     }
 }
 
+// combustion needs oxygen: vapour sealed in a vacuum does not light, air lets it burn, the mixture ratio sets how much of it burns,
+// a solid needs an oxygen-bearing face, gunpowder brings its own oxidiser, and needAir = false brings back the old burns-anywhere model
+void oxidiser() {
+    std::printf("oxidiser\n");
+    // a sealed steel box with a spark plug in its left wall, filled with gasoline vapour or with alternate cells of vapour and air
+    struct Run { int fire = 0; float vapour0 = 0, vapour = 0, air0 = 0, heat = 0, pmax = 0; long burns = 0; };
+    auto run = [](bool needAir, bool withAir, float fuelAmt, float airAmt) {
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        r.world.needAir = needAir;
+        const int x0 = 100, y0 = 100, x1 = 139, y1 = 119;
+        r.world.fillRect(x0 - 3, y0 - 3, x1 + 3, y1 + 3, M_STEEL);
+        r.world.fillRect(x0, y0, x1, y1, M_EMPTY);
+        r.world.setCell(x0 - 1, y0 + 8, M_IGNITER);   // (its neighbour in the box is a vapour cell in the checkerboard)
+        r.world.sparkPeriod = 10;
+        Run o;
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                bool air = withAir && ((x + y) & 1);
+                r.world.setCell(x, y, air ? M_AIR : M_VAPOR);
+                r.world.at(x, y).amt = air ? airAmt : fuelAmt;
+                (air ? o.air0 : o.vapour0) += r.world.at(x, y).amt;
+            }
+        for (int f = 0; f < 120; ++f) {
+            r.step(1);
+            float heat = 0;
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    const Cell& c = r.world.at(x, y);
+                    if (c.t == M_FIRE) ++o.fire;
+                    if (MATS[c.t].kind == K_GAS) { heat += cellCap(c) * (c.temp - AMBIENT_T); o.pmax = std::max(o.pmax, c.amt * (c.temp + 273.f) / 293.f); }
+                }
+            o.heat = std::max(o.heat, heat);
+        }
+        for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) if (r.world.at(x, y).t == M_VAPOR) o.vapour += r.world.at(x, y).amt;
+        o.burns = r.world.burnEvents;
+        return o;
+    };
+    {   // a. vacuum: the spark plug fires twelve times into pure vapour and nothing happens
+        Run v = run(true, false, 0.8f, 0.f);
+        char d[128]; std::snprintf(d, sizeof d, "%d flame cells seen in 120 frames, %ld ignitions, vapour %.0f -> %.0f", v.fire, v.burns, v.vapour0, v.vapour);
+        check(v.fire == 0 && v.burns == 0 && v.vapour > 0.95f * v.vapour0, "gasoline vapour sealed in a vacuum does not ignite", d);
+    }
+    Run s = run(true, true, 0.8f, 2.0f);   // b, c. the stoichiometric charge (2.5 air per unit of gasoline vapour)
+    {
+        char d[128]; std::snprintf(d, sizeof d, "%d flame cells seen, %ld ignitions, vapour %.0f -> %.1f, Tmax-pressure %.1f", s.fire, s.burns, s.vapour0, s.vapour, s.pmax);
+        check(s.fire > 0 && s.burns > 0 && s.vapour < 0.1f * s.vapour0, "the same vapour with air mixed in ignites and burns", d);
+    }
+    {   // c. twice the fuel with the same air: half of it is left over, and the heat released is about the same, not double
+        Run rich = run(true, true, 1.6f, 2.0f);
+        char d[192];
+        std::snprintf(d, sizeof d, "stoichiometric: vapour %.0f -> %.1f, peak heat %.0f, peak cell pressure %.1f | rich: vapour %.0f -> %.0f, peak heat %.0f, peak cell pressure %.1f",
+                      s.vapour0, s.vapour, s.heat, s.pmax, rich.vapour0, rich.vapour, rich.heat, rich.pmax);
+        check(rich.vapour > 0.3f * rich.vapour0 && rich.vapour < 0.7f * rich.vapour0 && rich.heat < 1.4f * s.heat && rich.heat > 0.7f * s.heat,
+              "a rich charge leaves unburnt vapour and gives no more heat than the same air burns stoichiometrically", d);
+    }
+    {   // d. a wood block against a heater: sealed in a vacuum box it only gets hot; in the open it burns
+        int wood[2] = {0, 0}; long burns[2] = {0, 0}; int fire[2] = {0, 0}; float hot[2] = {0, 0};
+        for (int open = 0; open < 2; ++open) {
+            Rig r;
+            if (!open) { r.world.fillRect(97, 97, 132, 122, M_STEEL); r.world.fillRect(100, 100, 129, 119, M_EMPTY); }
+            r.world.fillRect(104, 104, 109, 115, M_HEATER);
+            r.world.fillRect(110, 104, 117, 115, M_WOOD);
+            for (int f = 0; f < 600; ++f) { r.step(1); for (int y = 100; y <= 119; ++y) for (int x = 100; x <= 129; ++x) fire[open] += r.world.at(x, y).t == M_FIRE; }
+            for (auto& c : r.world.cells) if (c.t == M_WOOD) { ++wood[open]; hot[open] = std::max(hot[open], c.temp); }
+            burns[open] = r.world.burnEvents;
+        }
+        char d[160];
+        std::snprintf(d, sizeof d, "sealed: 96 -> %d wood cells (hottest %.0f C), %ld ignitions, %d flame cells | open: %d wood cells, %ld ignitions, %d flame cells",
+                      wood[0], hot[0], burns[0], fire[0], wood[1], burns[1], fire[1]);
+        check(wood[0] == 96 && burns[0] == 0 && fire[0] == 0 && hot[0] > 300.f, "wood sealed in a vacuum with a heater gets hot but does not burn", d);
+        check(wood[1] < 96 && burns[1] > 0 && fire[1] > 0, "the same wood in the open air burns", d);
+    }
+    {   // e. gunpowder brings its own oxidiser: sealed in a vacuum it still burns away completely
+        Rig r;
+        r.world.fillRect(100, 100, 129, 119, M_STEEL);
+        r.world.fillRect(103, 103, 126, 116, M_GUNPOWDER);
+        r.world.setCell(102, 110, M_IGNITER);
+        r.world.sparkPeriod = 10;
+        r.step(120);
+        int left = 0; for (auto& c : r.world.cells) left += c.t == M_GUNPOWDER;
+        char d[96]; std::snprintf(d, sizeof d, "336 -> %d powder cells, %ld ignitions", left, r.world.burnEvents);
+        check(left < 34 && r.world.burnEvents > 300, "gunpowder sealed in a vacuum still burns completely", d);
+    }
+    {   // f. the switch: with needAir off the vacuum chamber of case a burns as it used to
+        Run v = run(false, false, 0.8f, 0.f);
+        char d[128]; std::snprintf(d, sizeof d, "%d flame cells seen, %ld ignitions, vapour %.0f -> %.1f", v.fire, v.burns, v.vapour0, v.vapour);
+        check(v.fire > 0 && v.vapour < 0.1f * v.vapour0, "needAir = false brings back vapour that burns without air", d);
+    }
+}
+
 // fixes from the adversarial review of the grid engine
 void gridReview() {
     std::printf("grid review fixes\n");
@@ -1095,6 +1189,7 @@ int runSelfTests() {
     rigidReview();
     buoyancyArea();
     rigidReview2();
+    oxidiser();
     gridReview();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;

@@ -946,12 +946,15 @@ struct Game {
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
         world.sourceAmt = 0.8f;
-        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel/air supply on the left of the chest (gasoline vapour by default)
+        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel supply on the left of the chest (gasoline vapour by default)
+        world.sourceAmt = 2.f;
+        rect(120, 136, 120, 145, M_SOURCE, M_AIR);             // air supply on the right: the charge needs oxygen to burn (2.5 air per unit of vapour)
         rect(90, 152, 90, 156, M_IGNITER);                     // spark plug set into the head wall
         sparkIdx = 5;
         world.sparkPeriod = SPARK_RATES[sparkIdx];
         rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(60, 124, "GASOLINE VAPOUR SUPPLY");
+        label(112, 130, "AIR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "SPARK PLUG");
         label(196, 118, "FLYWHEEL (STARTED SPINNING)");
@@ -969,11 +972,14 @@ struct Game {
         world.sourceAmt = 0.8f;
         rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // diesel vapour supply on the left of the chest
         for (int y = 136; y <= 145; ++y) world.at(76, y).aux = M_DIESEL;
+        world.sourceAmt = 2.4f;
+        rect(120, 136, 120, 145, M_SOURCE, M_AIR);             // air supply on the right: the charge needs oxygen to burn (3 air per unit of vapour)
         rect(90, 152, 90, 156, M_HEATER);                      // glow plug: diesel needs heat, not a spark, to light
         sparkIdx = 0;
         world.sparkPeriod = 0;
         rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(60, 124, "DIESEL VAPOUR SUPPLY");
+        label(112, 130, "AIR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "GLOW PLUG");
         label(196, 118, "FLYWHEEL (STARTED SPINNING)");
@@ -1732,6 +1738,8 @@ struct Game {
         rect(20, 60, 22, 62, M_BATT_POS); rect(20, 80, 22, 82, M_BATT_NEG);
         rect(23, 61, 59, 61, M_COPPER); rect(60, 61, 79, 61, M_TUNGSTEN); rect(80, 61, 100, 61, M_COPPER);
         rect(100, 61, 100, 81, M_COPPER); rect(23, 81, 100, 81, M_COPPER);
+        for (int y = 56; y <= 60; ++y)   // alternate cells of air: a solid block of vapour has no oxygen inside and would only burn at its edges
+            for (int x = 60 + (y & 1); x <= 80; x += 2) if (world.at(x, y).t == M_EMPTY) { world.setCell(x, y, M_AIR); world.at(x, y).amt = 1.5f; }
         gasRect(60, 56, 80, 60, M_VAPOR, 0.6f);
         label(24, 48, "12V 20A BATTERY, TUNGSTEN FILAMENT IN FUEL VAPOUR");
         // B: 20 kV / 50 mA through a 2-cell air gap (a spark plug) in vapour
@@ -1739,6 +1747,8 @@ struct Game {
         rect(150, 60, 152, 62, M_BATT_POS); rect(150, 80, 152, 82, M_BATT_NEG);
         rect(153, 61, 190, 61, M_COPPER); rect(190, 61, 190, 70, M_COPPER); rect(190, 70, 192, 70, M_COPPER);
         rect(195, 70, 197, 70, M_COPPER); rect(197, 70, 197, 81, M_COPPER); rect(153, 81, 197, 81, M_COPPER);
+        for (int y = 66; y <= 70; ++y)
+            for (int x = 191 + (y & 1); x <= 196; x += 2) if (world.at(x, y).t == M_EMPTY) { world.setCell(x, y, M_AIR); world.at(x, y).amt = 1.5f; }
         gasRect(191, 66, 196, 70, M_VAPOR, 0.6f);
         label(150, 48, "20KV, 2 CELL GAP = SPARK PLUG");
         // C: a lead wire in the loop acts as a fuse when the circuit is shorted by a copper bar
@@ -3583,10 +3593,10 @@ int runSelfTests();
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) if (!std::strcmp(argv[i], "--selftest")) return runSelfTests();
-    // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace]
+    // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--no-air]
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;
-    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false;
+    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false, noAir = false;
     int camFlag = -1;
     bool scenesFlag = false; bool timeFlag = false; float zoomFlag = 1.f, camYFlag = 0.f;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
@@ -3624,11 +3634,13 @@ int main(int argc, char** argv) {
         }
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
+        else if (!std::strcmp(argv[i], "--no-air")) noAir = true;
     }
     if (shot) SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
 
     Game g;
     if (!g.init(shot != nullptr)) return 1;
+    g.world.needAir = !noAir;   // --no-air: the old model, fuel burns without oxygen
 
     if (shot) {
         switch (scene) {

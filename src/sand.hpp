@@ -11,7 +11,7 @@ struct Cell {
     uint8_t life = 0;      // multipurpose: flame life, phase-change progress, origin material, TNT fuse, source payload
     uint8_t var = 0;       // colour variation (flames: residue material)
     uint8_t burn = 0;      // >0: a burning solid/powder/liquid, frames of fuel left
-    uint8_t aux = 0;       // spare: a SOURCE cell keeps the fuel its vapour comes from here
+    uint8_t aux = 0;       // spare: a SOURCE cell keeps the fuel its vapour comes from here; a fuel cell starved of air, the burn frames it had left
     float temp = AMBIENT_T;
     float amt = 1.f;       // gases: amount of gas in the cell (pressure = amt * T); liquids: >1 means compressed
 };
@@ -44,6 +44,10 @@ public:
     int sparkPeriod = 60;
     bool sparkHeld = false;
     bool sparkNow = false;
+    // combustion needs oxygen: from the open air (empty or non-fuel gas cells connected to the edge of the world, unlimited) or from
+    // AIR cells, which it uses up; fuel sealed in a vacuum does not burn unless it carries its own oxidiser (selfOx). Off = the old
+    // model, fuel burns anywhere.
+    bool needAir = true;   // (not saved)
 
     // ---- electricity (see elec.cpp): battery cells fix a potential, conductors form a resistor network
     float battV = 12.f, battA = 20.f;            // settings stamped into battery cells as they are painted
@@ -113,8 +117,13 @@ private:
     bool phase(int x, int y);
     bool tryIgnite(int x, int y);
     void sparkAt(int x, int y);
-    void burn(int x, int y, const MatInfo& m);
+    bool burn(int x, int y, const MatInfo& m);   // false: a gas fuel found no oxygen and did not light
     void burnTick(int x, int y);
+    // the oxygen within reach of a cell: the open air (unlimited), the AIR cells among its neighbours, or nothing (vacuum)
+    struct AirNear { bool open = false; bool vacuum = false; int n = 0; int idx[4] = {0, 0, 0, 0}; float total = 0.f; };
+    AirNear airNear(int x, int y);
+    bool oxygenFace(int x, int y);               // a solid or liquid has an open face with oxygen at it (with needAir off: any open face)
+    void refreshOutside();                       // recompute `outside` if it is missing or stale
     void powder(int x, int y);
     void liquid(int x, int y, int disp);
     void gasMove(int x, int y);
