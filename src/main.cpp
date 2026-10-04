@@ -55,6 +55,13 @@ const char* TOOL_HINTS[] = {
     "DRAG A FAN: THE ARROW SHOWS WHICH WAY IT BLOWS. SELECT IT, THEN + / - CHANGE STRENGTH AND \\ FLIPS IT. ENTER = EXACT VALUES",
     "DRAG A BOX OR CIRCLE OVER BODIES: THE AREA UNDER IT IS CUT OUT OF EVERY BODY IT TOUCHES. CTRL+Z UNDOES",
 };
+// the digit keys pick tools: 1 SELECT, 2 GRAB, 3 BOX, 4 CIRCLE, 5 WHEEL, 6 PIN, 7 MOTOR, 8 ROD, 9 SPRING, 0 PAINT
+const Tool DIGIT_TOOLS[10] = {T_MAT, T_SELECT, T_GRAB, T_BOX, T_CIRCLE, T_WHEEL, T_PIN, T_MOTOR, T_ROD, T_SPRING};
+const char* DIGIT_NAMES[10] = {"PAINT", "SELECT", "GRAB", "BOX", "CIRCLE", "WHEEL", "PIN", "MOTOR", "ROD", "SPRING"};   // as on the buttons
+char toolHotkey(Tool t) {
+    for (int i = 0; i < 10; ++i) if (DIGIT_TOOLS[i] == t) return (char)('0' + i);
+    return 0;
+}
 
 // materials a rigid body can be made of (shown as swatches, never cycled through)
 const uint8_t BODY_MATS[] = {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN,
@@ -118,6 +125,8 @@ struct Button {
     std::function<bool()> active;
     std::function<bool()> enabled;   // greyed out and inert when false
     std::string tip;                 // shown in the status bar while hovered
+    std::string widest;              // the longest label the button can show, so the toolbar does not shift when the label changes
+    char hotkey = 0;                 // the digit key that selects this tool, drawn small in the button's corner; 0 = none
     int zone = 0;                    // 0 toolbar (flowed), 1 tool panel (fixed rectangle), 2 header text
     int gap = 0;                     // extra space before a flow button (separates groups)
     int minW = 0;
@@ -352,38 +361,46 @@ struct Game {
             buttons.push_back(b);
             return buttons.back();
         };
-        // ---- toolbar: run control | files | undo | views | focus, scenes | help
+        // ---- toolbar: run control | files | undo | views | zoom, focus ... scenes, help (flowed from the right)
+        // buttons whose label changes name their widest label, so the row keeps still
         {
             Button& b = top([this] { return std::string(playing && !paused ? "PLAYING" : "PLAY"); },
                             "RUN THE SIMULATION (SPACE). YOUR DRAWING IS SNAPSHOT FIRST, SO STOP CAN RESTORE IT",
                             [this] { play(); }, [this] { return playing && !paused; });
-            b.style = 1; b.minW = 76;
+            b.style = 1; b.widest = "PLAYING";
         }
-        top([this] { return std::string(paused ? "RESUME" : "PAUSE"); }, "FREEZE / RESUME WHILE PLAYING (SPACE)",
-            [this] { togglePause(); }, [this] { return playing && paused; }).enabled = [this] { return playing; };
+        {
+            Button& b = top([this] { return std::string(paused ? "RESUME" : "PAUSE"); }, "FREEZE / RESUME WHILE PLAYING (SPACE)",
+                            [this] { togglePause(); }, [this] { return playing && paused; });
+            b.enabled = [this] { return playing; }; b.widest = "RESUME";
+        }
         top(lit("STEP"), "ADVANCE ONE FRAME (N)", [this] { stepFrame(); });
         {
             Button& b = top(lit("STOP"), "STOP AND RESTORE THE DRAWING EXACTLY AS IT WAS BEFORE PLAY", [this] { stopPlay(); });
             b.style = 2; b.enabled = [this] { return playing; };
         }
-        top([this] { return std::string(newArmed > 0 ? "SURE?" : "NEW"); }, "CLEAR EVERYTHING (PRESS TWICE) - CTRL+N",
-            [this] { newFile(); }, [this] { return newArmed > 0; }).gap = 14;
+        {
+            Button& b = top([this] { return std::string(newArmed > 0 ? "SURE?" : "NEW"); }, "CLEAR EVERYTHING (PRESS TWICE) - CTRL+N",
+                            [this] { newFile(); }, [this] { return newArmed > 0; });
+            b.gap = 10; b.widest = "SURE?";
+        }
         top(lit("OPEN"), "OPEN A SAVED FILE (CTRL+O)", [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
         top(lit("SAVE"), "SAVE TO THE CURRENT FILE (CTRL+S)", [this] { saveQuick(); });
         top(lit("SAVE AS"), "SAVE UNDER A NEW NAME", [this] { openFileForm(true); }, [this] { return formKind == FK_SAVE; });
-        top(lit("UNDO"), "UNDO THE LAST EDIT (CTRL+Z)", [this] { undo(); }).gap = 14;
+        top(lit("UNDO"), "UNDO THE LAST EDIT (CTRL+Z)", [this] { undo(); }).gap = 10;
         top(lit("REDO"), "REDO (CTRL+Y OR CTRL+SHIFT+Z)", [this] { redo(); });
-        top(lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 14;
+        top(lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 10;
         top(lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH (P)", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
         top(lit("ELECTRIC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
-        top(lit("GRID"), "A REFERENCE GRID WITH RULERS (CELL NUMBERS) AND A SCALE BAR (K)", [this] { gridOn = !gridOn; }, [this] { return gridOn; }).gap = 14;
+        top(lit("GRID"), "A REFERENCE GRID WITH RULERS (CELL NUMBERS) AND A SCALE BAR (K)", [this] { gridOn = !gridOn; }, [this] { return gridOn; }).gap = 10;
         { Button& b = top(lit("-"), "ZOOM OUT (CTRL+WHEEL OR CTRL + MINUS)", [this] { zoomCentre(-1); }, nullptr); b.enabled = [this] { return zoom > 1.01f; }; b.minW = 30; }
-        top([this] { return fmt(zoom) + "X"; }, "THE ZOOM. CLICK TO RESET TO 1X (CTRL+0). MIDDLE-DRAG PANS", [this] { zoomReset(); }, [this] { return zoom > 1.01f; });
+        top([this] { return fmt(zoom) + "X"; }, "THE ZOOM. CLICK TO RESET TO 1X (CTRL+0). MIDDLE-DRAG PANS", [this] { zoomReset(); }, [this] { return zoom > 1.01f; }).widest = "1.5X";
         { Button& b = top(lit("+"), "ZOOM IN TO WORK ON SMALL STRUCTURES (CTRL+WHEEL OR CTRL + PLUS)", [this] { zoomCentre(1); }, nullptr); b.enabled = [this] { return zoom < 7.9f; }; b.minW = 30; }
         top(lit("FOCUS"), "CAMERA FOLLOWS THE SELECTED BODY (F): SELECT A VEHICLE, PRESS FOCUS, PLAY. MIDDLE-DRAG OR THE STRIP AT THE BOTTOM OF THE VIEW PANS",
-            [this] { toggleFocus(); }, [this] { return focusBody >= 0; }).gap = 14;
-        top(lit("SCENES"), "READY-MADE MACHINES AND TESTS", [this] { scenesOpen = !scenesOpen; }, [this] { return scenesOpen; });
-        { Button& b = top(lit("HELP"), "SHORTCUTS AND A QUICK TOUR (F1)", [this] { helpOn = !helpOn; }, [this] { return helpOn; }); b.right = true; }
+            [this] { toggleFocus(); }, [this] { return focusBody >= 0; }).gap = 10;
+        // the right-hand group flows from the window edge inwards, so HELP is defined first to sit outermost
+        top(lit("HELP"), "SHORTCUTS AND A QUICK TOUR (F1)", [this] { helpOn = !helpOn; }, [this] { return helpOn; }).right = true;
+        top(lit("SCENES"), "READY-MADE MACHINES AND TESTS", [this] { scenesOpen = !scenesOpen; }, [this] { return scenesOpen; }).right = true;
 
         // ---- tool panel: always visible, grouped
         const int colW = (LEFT_W - 16 - 4) / 2;
@@ -407,6 +424,7 @@ struct Game {
             Button b;
             b.zone = 1; b.label = lit(name); b.tip = TOOL_HINTS[tl]; b.action = [this, tl] { tool = tl; };
             b.active = [this, tl] { return tool == tl; }; b.enabled = always;
+            if (char h = toolHotkey(tl)) { b.hotkey = h; b.tip += std::string("  (KEY ") + h + ")"; }
             place(b, false);
             buttons.push_back(b);
         };
@@ -439,8 +457,9 @@ struct Game {
         act_("PASTE", "PASTE AT THE CURSOR (CTRL+V)", [this] { pasteClipboard(); });
         act_("SUBTRACT", "CUT THE LAST-CLICKED (RED) BODY OUT OF THE OTHER SELECTED BODIES", [this] { cutSelection(); }, nullptr, true);
         header("PARTICLES");
-        act_("PAINT", "PAINT SAND, LIQUIDS, GASES AND SOLIDS AS CELLS (RMB ERASES)", [this] { if (mat == M_EMPTY) mat = M_SAND; tool = T_MAT; },
+        act_("PAINT", "PAINT SAND, LIQUIDS, GASES AND SOLIDS AS CELLS (RMB ERASES)  (KEY 0)", [this] { pickTool(T_MAT); },
              [this] { return tool == T_MAT && mat != M_EMPTY; });
+        buttons.back().hotkey = '0';
         act_("ERASER", "ERASE PARTICLES UNDER THE BRUSH", [this] { tool = T_MAT; mat = M_EMPTY; }, [this] { return tool == T_MAT && mat == M_EMPTY; });
         header("CLEAR");
         act_("WIPE PARTICLES", "REMOVE ALL SAND, LIQUID, GAS AND SOLID CELLS (CTRL+Z BRINGS THEM BACK)",
@@ -482,6 +501,21 @@ struct Game {
             PItem p; p.kind = 2; p.text = "+"; p.act = plus; p.tip = tip; p.r = SDL_Rect{x0 + w - 34, y, 34, 26}; rp.push_back(p);
             y += 32;
         };
+        // what a material is like, for the hint line while its swatch is hovered
+        auto matTip = [](uint8_t m) -> std::string {
+            if (m == M_EMPTY) return "ERASER: ERASES PARTICLES";
+            const MatInfo& mi = MATS[m];
+            char d[32];
+            std::snprintf(d, sizeof d, "%.3g", mi.density);
+            std::string s = std::string(mi.name) + ": DENSITY " + d;
+            if (mi.kind == K_SOLID) s += "  FRICTION " + fmt(mi.friction);
+            if (mi.hiT < 1e8f) s += (MATS[mi.hiTo].kind == K_GAS ? "  BOILS " : "  MELTS ") + fmt(mi.hiT) + "C";
+            if (mi.loT > -1e8f) s += (mi.kind == K_GAS ? "  CONDENSES " : "  FREEZES ") + fmt(mi.loT) + "C";
+            if (mi.ignT > 0.f) s += "  IGNITES " + fmt(mi.ignT) + "C";
+            if (mi.blastR > 0.f) s += "  EXPLOSIVE";
+            if (mi.elec > 0.f) s += "  CONDUCTS";
+            return s;
+        };
         auto swatches = [&](const std::vector<uint8_t>& list, std::function<bool(uint8_t)> active, std::function<void(uint8_t)> click, int sz = 34) {
             int per = std::max(1, (w + 3) / (sz + 3));
             for (size_t i = 0; i < list.size(); ++i) {
@@ -490,7 +524,7 @@ struct Game {
                 it.text = m == M_EMPTY ? "ERASER" : MATS[m].name;
                 it.active = active(m);
                 it.act = [click, m] { click(m); };
-                it.tip = std::string(it.text) + (m == M_EMPTY ? ": ERASES PARTICLES" : "");
+                it.tip = matTip(m);
                 it.r = SDL_Rect{x0 + (int)(i % per) * (sz + 3), y + (int)(i / per) * (sz + 3), sz, sz};
                 rp.push_back(it);
             }
@@ -741,15 +775,24 @@ struct Game {
 
     // Flow-lay out the toolbar from the current labels, rebuild the dynamic panels and find what the pointer is over.
     void layoutButtons() {
+        // the toolbar flows from both window edges; the padding around each label shrinks (never below 10 px) until the two flows fit
+        const int y0 = (TOP_H - 30) / 2, sp = 3;
+        auto labelW = [](const Button& b) { return std::max(font::textWidth(b.label(), 2), font::textWidth(b.widest, 2)); };
+        auto totalW = [&](int pad) {
+            int t = 10 + 10 - sp;
+            for (const Button& b : buttons) if (b.zone == 0) t += b.gap + std::max(b.minW, labelW(b) + pad) + sp;
+            return t;
+        };
+        int pad = 20;
+        while (pad > 10 && totalW(pad) > WIN_W) --pad;
         int x0 = 10, xr0 = WIN_W - 10;
-        const int y0 = (TOP_H - 30) / 2;
         hoverBtn = -1; hoverItem = -1;
         for (size_t i = 0; i < buttons.size(); ++i) {
             Button& b = buttons[i];
             if (b.zone == 0) {
-                int w = std::max(b.minW, font::textWidth(b.label(), 2) + 20);
-                if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, 30}; xr0 -= 4; }
-                else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, 30}; x0 += w + 4; }
+                int w = std::max(b.minW, labelW(b) + pad);
+                if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, 30}; xr0 -= sp; }
+                else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, 30}; x0 += w + sp; }
             }
             if (b.zone != 2 && mousePx >= b.r.x && mousePx < b.r.x + b.r.w && mousePy >= b.r.y && mousePy < b.r.y + b.r.h) hoverBtn = (int)i;
         }
@@ -1669,8 +1712,57 @@ struct Game {
         else if (k == SDLK_u) ungroupSelection();
         return true;
     }
-    SDL_Rect formRect() const { return SDL_Rect{8, 8, 300, 56 + (int)fields.size() * 20 + (formKind >= FK_EDIT_BOX || formKind == FK_EMITTER ? 52 : 20) + ((formKind == FK_SAVE || formKind == FK_LOAD) ? 14 + 12 * (int)std::min<size_t>(fileList.size(), 6) : 0)}; }
-    SDL_Rect fieldRect(int i) const { return SDL_Rect{16, 36 + i * 20, 284, 18}; }
+    // The form sits in the top-left of the view, clear of the rulers (30 px left, 13 px top); it is as wide as its longest line.
+    static constexpr int FORM_X = 40, FORM_Y = 24;
+    const char* formTitle() const {
+        switch (formKind) {
+            case FK_BOX: return "NEW BOX (CELLS)";
+            case FK_CIRCLE: return wheelForm ? "NEW WHEEL (CELLS)" : "NEW CIRCLE (CELLS)";
+            case FK_PIPE: return "NEW PIPE (CELLS)";
+            case FK_FAN: return "NEW FAN (STRENGTH < 0 REVERSES)";
+            case FK_BATTERY: return "BATTERY (VOLTS / AMPS)";
+            case FK_BOND: return "BOND SETTINGS";
+            case FK_SAVE: return "SAVE AS (saves/NAME.sbot)";
+            case FK_LOAD: return "LOAD (TYPE A NAME OR UP/DOWN)";
+            case FK_EMITTER: return "NEW EMITTER (CELLS, RATE = CELLS/S)";
+            case FK_SCALE: return "SCALE SELECTION";
+            case FK_HOSE: return "NEW HOSE (CELLS)";
+            case FK_EDIT_BOX: return "EDIT BOX PART";
+            case FK_EDIT_CIRCLE: return "EDIT CIRCLE PART";
+            case FK_EDIT_GROUP: return "EDIT GROUP (MOVE/ROTATE)";
+            default: return "";
+        }
+    }
+    // the small lines under the fields: notes, the material / fixed line, the saved-file list, the key hints and the message
+    std::vector<std::pair<std::string, SDL_Color>> formFooter() const {
+        std::vector<std::pair<std::string, SDL_Color>> out;
+        const SDL_Color gold{255, 220, 120, 255}, grey{150, 160, 180, 255};
+        if (formKind == FK_SCALE) out.push_back({"SCALES ALL SELECTED ABOUT THEIR CENTRE", gold});
+        if (formKind == FK_EDIT_GROUP) out.push_back({"PARTS: " + std::to_string(sel.size()) + "  CTRL+CLICK EDITS ONE PART", gold});
+        else if (formKind >= FK_EDIT_BOX) out.push_back({std::string("M: ") + MATS[fMat].name + "  S: " + (fStatic ? "STATIC" : "DYNAMIC"), gold});
+        if (emitterFormActive())
+            out.push_back({std::string("EMITS: ") + MATS[fPayload].name + " (CHOOSE IN THE PANEL)  FACE: " + faceName(fFace) + " (F)", SDL_Color{255, 160, 255, 255}});
+        if (formKind == FK_SAVE || formKind == FK_LOAD) {
+            out.push_back({fileList.empty() ? "NO SAVED FILES YET" : "SAVED FILES (NEWEST FIRST):", grey});
+            for (size_t i = 0; i < fileList.size() && i < 6; ++i) {
+                bool cur = (int)i == fileIdx;
+                out.push_back({(cur ? "> " : "  ") + fileList[i], cur ? SDL_Color{255, 255, 255, 255} : SDL_Color{190, 205, 225, 255}});
+            }
+            out.push_back({"ENTER: OK  ESC: CANCEL", grey});
+            out.push_back({formMsg, SDL_Color{255, 150, 120, 255}});
+        } else {
+            out.push_back({"TAB/CLICK: NEXT FIELD  ENTER: APPLY  ESC: CLOSE", grey});
+            out.push_back({formMsg, SDL_Color{150, 230, 255, 255}});
+        }
+        return out;
+    }
+    int formWidth() const {
+        int w = std::max(300, font::textWidth(formTitle(), 2) + 16);
+        for (const auto& l : formFooter()) w = std::max(w, font::textWidth(l.first, 1) + 16);
+        return w;
+    }
+    SDL_Rect formRect() const { return SDL_Rect{FORM_X, FORM_Y, formWidth(), 32 + (int)fields.size() * 20 + 12 * (int)formFooter().size() + 10}; }
+    SDL_Rect fieldRect(int i) const { return SDL_Rect{FORM_X + 8, FORM_Y + 28 + i * 20, formWidth() - 16, 18}; }
     bool formClick(int mx, int my) {
         if (formKind == FK_NONE) return false;
         SDL_Rect r = formRect();
@@ -2728,6 +2820,11 @@ struct Game {
             notify("MOVED TO " + fmt(phys.bodies[primary].pos.x) + ", " + fmt(phys.bodies[primary].pos.y) + "  (ARROW = 1 CELL, SHIFT = 10, CTRL = 0.25)");
     }
 
+    void pickTool(Tool t) {   // a digit key or the PAINT button: painting needs a material, not the eraser
+        if (t == T_MAT && mat == M_EMPTY) mat = M_SAND;
+        tool = t;
+    }
+
     void handleKey(SDL_Keycode k) {
         if (formKey(k, SDL_GetModState())) return;
         const Uint16 mod = SDL_GetModState();
@@ -2782,6 +2879,8 @@ struct Game {
             case SDLK_LEFTBRACKET: brush = std::max(1, brush - 1); break;
             case SDLK_RIGHTBRACKET: brush = std::min(24, brush + 1); break;
             case SDLK_DELETE: case SDLK_BACKSPACE: deleteSelection(); break;
+            case SDLK_0: case SDLK_1: case SDLK_2: case SDLK_3: case SDLK_4: case SDLK_5: case SDLK_6: case SDLK_7: case SDLK_8: case SDLK_9:
+                pickTool(DIGIT_TOOLS[k - SDLK_0]); break;   // digits reach here only while no form is open (formKey types them)
             default: break;
         }
     }
@@ -3381,25 +3480,7 @@ struct Game {
         SDL_RenderFillRect(ren, &r);
         SDL_SetRenderDrawColor(ren, 120, 255, 160, 255);
         SDL_RenderDrawRect(ren, &r);
-        const char* title = "";
-        switch (formKind) {
-            case FK_BOX: title = "NEW BOX (CELLS)"; break;
-            case FK_CIRCLE: title = wheelForm ? "NEW WHEEL (CELLS)" : "NEW CIRCLE (CELLS)"; break;
-            case FK_PIPE: title = "NEW PIPE (CELLS)"; break;
-            case FK_FAN: title = "NEW FAN (STRENGTH < 0 REVERSES)"; break;
-            case FK_BATTERY: title = "BATTERY (VOLTS / AMPS)"; break;
-            case FK_BOND: title = "BOND SETTINGS"; break;
-            case FK_SAVE: title = "SAVE AS (saves/NAME.sbot)"; break;
-            case FK_LOAD: title = "LOAD (TYPE A NAME OR UP/DOWN)"; break;
-            case FK_EMITTER: title = "NEW EMITTER (CELLS, RATE = CELLS/S)"; break;
-            case FK_SCALE: title = "SCALE SELECTION"; break;
-            case FK_HOSE: title = "NEW HOSE (CELLS)"; break;
-            case FK_EDIT_BOX: title = "EDIT BOX PART"; break;
-            case FK_EDIT_CIRCLE: title = "EDIT CIRCLE PART"; break;
-            case FK_EDIT_GROUP: title = "EDIT GROUP (MOVE/ROTATE)"; break;
-            default: break;
-        }
-        font::draw(ren, title, 16, 16, 2, SDL_Color{120, 255, 160, 255});
+        font::draw(ren, formTitle(), r.x + 8, r.y + 8, 2, SDL_Color{120, 255, 160, 255});
         for (int i = 0; i < (int)fields.size(); ++i) {
             SDL_Rect f = fieldRect(i);
             bool act = i == fActive;
@@ -3409,33 +3490,49 @@ struct Game {
             std::string t = fields[i].text + (act && !fFresh ? "_" : "");
             font::draw(ren, t, f.x + 130, f.y + 2, 2, act ? SDL_Color{255, 255, 255, 255} : SDL_Color{220, 230, 245, 255});
         }
-        int y = 36 + (int)fields.size() * 20 + 4;
-        if (formKind == FK_SCALE) font::draw(ren, "SCALES ALL SELECTED ABOUT THEIR CENTRE", 16, y, 1, SDL_Color{255, 220, 120, 255}), y += 12;
-        if (emitterFormActive()) {
-            font::draw(ren, std::string("EMITS: ") + MATS[fPayload].name + " (CHOOSE IN THE PANEL)  FACE: " + faceName(fFace) + " (F)", 16, y + (formKind >= FK_EDIT_BOX ? 12 : 0), 1, SDL_Color{255, 160, 255, 255});
-            if (formKind == FK_EMITTER) y += 12;
-        }
-        if (formKind >= FK_EDIT_BOX) {
-            std::string ms = formKind == FK_EDIT_GROUP ? "" : std::string("M: ") + MATS[fMat].name + "  ";
-            ms += std::string("S: ") + (fStatic ? "STATIC" : "DYNAMIC");
-            if (formKind == FK_EDIT_GROUP) ms = "PARTS: " + std::to_string(sel.size()) + "  CTRL+CLICK EDITS ONE PART";
-            font::draw(ren, ms, 16, y, 1, SDL_Color{255, 220, 120, 255});
-            y += 12;
-        }
-        if (formKind == FK_SAVE || formKind == FK_LOAD) {
-            int ly = y;
-            font::draw(ren, fileList.empty() ? "NO SAVED FILES YET" : "SAVED FILES (NEWEST FIRST):", 16, ly, 1, SDL_Color{150, 160, 180, 255});
-            for (size_t i = 0; i < fileList.size() && i < 6; ++i) {
-                bool cur = (int)i == fileIdx;
-                font::draw(ren, (cur ? "> " : "  ") + fileList[i], 16, ly + 12 + 12 * (int)i, 1, cur ? SDL_Color{255, 255, 255, 255} : SDL_Color{190, 205, 225, 255});
+        int y = r.y + 32 + (int)fields.size() * 20;
+        for (const auto& l : formFooter()) { font::draw(ren, l.first, r.x + 8, y, 1, l.second); y += 12; }
+    }
+
+    // "BOX 30X8", "CIRCLE R10", "WHEEL R6", "ROCKET": a body's kind and size, for the status bar and the hover line
+    std::string shapeText(const Body& b) const {
+        if (b.isRocket) return "ROCKET";
+        if (b.shape == SHAPE_BOX) return "BOX " + fmt(b.half.x * 2) + "X" + fmt(b.half.y * 2);
+        return std::string(b.isWheel ? "WHEEL R" : "CIRCLE R") + fmt(b.radius);
+    }
+    // one line about the selection: a body's shape, size, angle and material; a count (and groups) for several; a joint and its key value
+    std::string selectionText() const {
+        if (tool == T_SELECT && jointValid(selJoint)) {
+            const Joint& J = phys.joints[selJoint];
+            if (J.bondId >= 0) {
+                for (int i = 0; i < 4; ++i) if (BOND_TEMP[i] == J.breakT) return std::string("BOND ") + BOND_NAMES[i];
+                return "BOND " + fmt(J.breakT) + "C";
             }
-            y += 14 + 12 * (int)std::min<size_t>(fileList.size(), 6);
-            font::draw(ren, "ENTER: OK  ESC: CANCEL", 16, y, 1, SDL_Color{150, 160, 180, 255});
-            font::draw(ren, formMsg, 16, y + 12, 1, SDL_Color{255, 150, 120, 255});
-            return;
+            if (J.type == J_DISTANCE) return J.freq > 0.f ? "SPRING " + fmt(J.freq) + "/S" : "ROD " + fmt(J.length);
+            if (J.type == J_MOTOR) return "MOTOR " + fmt(J.speed) + " RAD/S";
+            return J.type == J_SLIDER ? "SLIDER" : "PIN";
         }
-        font::draw(ren, "TAB/CLICK: NEXT FIELD  ENTER: APPLY  ESC: CLOSE", 16, y + (formKind >= FK_EDIT_BOX && emitterFormActive() ? 12 : 0), 1, SDL_Color{150, 160, 180, 255});
-        font::draw(ren, formMsg, 16, y + 12, 1, SDL_Color{150, 230, 255, 255});
+        if (sel.empty()) return "";
+        if (sel.size() == 1 && primary >= 0 && primary < (int)phys.bodies.size()) {
+            const Body& b = phys.bodies[primary];
+            float deg = std::fmod(b.angle * 180.f / PI, 360.f);
+            if (deg > 180.f) deg -= 360.f;
+            if (deg <= -180.f) deg += 360.f;
+            std::string s = shapeText(b);
+            if (std::fabs(deg) >= 0.05f) s += " " + fmt(deg) + "DEG";
+            s += std::string(" ") + MATS[b.mat].name;
+            if (b.isStatic) s += " FIXED";
+            return s;
+        }
+        std::vector<int> groups;
+        for (int id : sel) {
+            if (id < 0 || id >= (int)phys.bodies.size()) continue;
+            int g = phys.bodies[id].group;
+            if (g >= 0 && std::find(groups.begin(), groups.end(), g) == groups.end()) groups.push_back(g);
+        }
+        std::string s = std::to_string(sel.size()) + " BODIES";
+        if (!groups.empty()) s += " (" + std::to_string(groups.size()) + (groups.size() == 1 ? " GROUP)" : " GROUPS)");
+        return s;
     }
 
     std::string hoverText() const {
@@ -3445,6 +3542,15 @@ struct Game {
         int bid = world.bodyMask[y * World::W + x];
         if (bid >= 0 && bid < (int)phys.bodies.size() && phys.bodies[bid].alive) {
             const Body& b = phys.bodies[bid];
+            // pointing at a body with select or grab, nothing in hand: say what it is
+            if ((tool == T_SELECT || tool == T_GRAB) && !lmb && !moving && grabJoint < 0) {
+                std::string s = std::string(MATS[b.mat].name) + " " + shapeText(b);
+                if (b.isStatic) s += " FIXED";
+                if (b.group >= 0) s += " GROUP OF " + std::to_string(phys.groupMembers(b.group).size());
+                if (b.fan.strength != 0.f) s += " FAN " + fmt(std::fabs(b.fan.strength)) + "/S";
+                else if (b.src.on) s += std::string(" EMITS ") + MATS[b.src.mat].name;
+                return s;
+            }
             if (b.fan.strength != 0.f) std::snprintf(buf, sizeof buf, "FAN %s %g/S%s", b.fan.vacuum ? "VACUUM" : "BLOW", b.fan.strength, b.fan.strength < 0 ? " REVERSED" : "");
             else if (b.src.on) std::snprintf(buf, sizeof buf, "EMITTER %s %g/S", MATS[b.src.mat].name, b.src.rate);
             else std::snprintf(buf, sizeof buf, "BODY %s %dC", MATS[b.mat].name, (int)b.temp);
@@ -3502,9 +3608,11 @@ struct Game {
         rrectLine(b.r, line);
         std::string lab = b.label();
         int tw = font::textWidth(lab, 2);
-        int tx = b.r.x + (b.r.w - tw) / 2;
-        if (tw > b.r.w - 6) { lab = lab.substr(0, std::max<size_t>(1, (size_t)(b.r.w - 6) / 12)); tx = b.r.x + 3; }
+        const int keyW = b.hotkey ? 9 : 0;   // the label is centred in what is left beside the hotkey digit
+        int tx = b.r.x + (b.r.w - keyW - tw) / 2;
+        if (tw > b.r.w - 6 - keyW) { lab = lab.substr(0, std::max<size_t>(1, (size_t)(b.r.w - 6 - keyW) / 12)); tx = b.r.x + 3; }
         font::draw(ren, lab, tx, b.r.y + (b.r.h - 14) / 2, 2, text);
+        if (b.hotkey) font::draw(ren, std::string(1, b.hotkey), b.r.x + b.r.w - 8, b.r.y + 3, 1, act ? SDL_Color{205, 225, 255, 255} : SDL_Color{122, 134, 164, 255});
     }
 
     void renderPItem(const PItem& it, bool hovered) {
@@ -3553,57 +3661,105 @@ struct Game {
         }
     }
 
+    // The help card. The text is laid out first (relative to the card's corner) so the card is exactly as tall as its content;
+    // if it still would not fit the view, it is laid out again with tighter lines.
     void renderHelp() {
-        SDL_Rect card{(SIM_W - 1040) / 2, 40, 1040, SIM_H - 80};
+        struct Op { int x, y, scale; SDL_Color c; std::string s; };
+        struct KeyRow { const char* key; const char* what; };
+        // (the font has no ';' glyph, so the copy uses commas and full stops)
+        static const KeyRow leftKeys[] = {
+            {"SPACE", "PLAY / PAUSE"}, {"N", "STEP ONE FRAME"}, {"ENTER", "EXACT-VALUE FORM"}, {"DEL", "DELETE THE SELECTION"},
+            {"CTRL+Z / CTRL+Y", "UNDO / REDO"}, {"CTRL+C / CTRL+V", "COPY / PASTE"}, {"CTRL+D", "DUPLICATE THE SELECTION"},
+            {"CTRL+A", "SELECT ALL"}, {"CTRL+G / CTRL+U", "GROUP / UNGROUP"}, {"CTRL+H", "FLIP HORIZONTAL"}, {"CTRL+SHIFT+H", "FLIP VERTICAL"},
+            {"CTRL+S / O / N", "SAVE / OPEN / NEW"}, {"T", "NEW BODIES FIXED IN PLACE"},
+            {"ARROWS", "NUDGE 1 CELL, SHIFT 10, CTRL 1/4"}, {"[ ]", "BRUSH SIZE"},
+        };
+        static const KeyRow rightKeys[] = {
+            {"F1", "THIS HELP"}, {"F", "CAMERA FOLLOWS THE SELECTION"}, {"SHIFT+F", "ZOOM TO THE SELECTION"},
+            {"CTRL+WHEEL, CTRL + -", "ZOOM, CTRL+0 = 1X"}, {"MIDDLE-DRAG, PGUP / PGDN", "PAN THE VIEW"},
+            {"K", "GRID, RULERS AND SCALE BAR"}, {"H / P", "HEAT / PRESSURE VIEW"}, {"G", "FLIP GRAVITY"},
+            {"ARROWS, A / D", "DRIVE MOTORS (PLAYING)"}, {"UP / W", "FIRE ROCKETS"}, {"+ / -", "SELECTED FAN STRENGTH"},
+            {"BACKSLASH, M", "FLIP FAN, BLOW / VACUUM"}, {"E HOLD / , .", "SPARK PLUGS: FIRE / PERIOD"},
+            {"MEASURE TOOL", "DRAG TO MEASURE DISTANCE AND ANGLE"},
+        };
+        const SDL_Color white{255, 255, 255, 255}, gold{255, 200, 110, 255}, body{214, 222, 238, 255}, keyC{255, 232, 170, 255}, dim{150, 165, 195, 255};
+        const int cw = std::min(1040, SIM_W - 24), pad = 24, colW = (cw - pad * 2 - 12 - 16) / 2;
+        std::vector<Op> ops;
+        // split `t` into lines no wider than `w` pixels, measured with the font
+        auto wrap = [](const std::string& t, int w, int scale) {
+            std::vector<std::string> out;
+            std::string cur;
+            for (size_t pos = 0; pos < t.size();) {
+                size_t e = t.find(' ', pos);
+                if (e == std::string::npos) e = t.size();
+                std::string wd = t.substr(pos, e - pos);
+                if (!cur.empty() && font::textWidth(cur + " " + wd, scale) > w) { out.push_back(cur); cur.clear(); }
+                cur += (cur.empty() ? "" : " ") + wd;
+                pos = e + 1;
+            }
+            if (!cur.empty()) out.push_back(cur);
+            return out;
+        };
+        auto layout = [&](int lineH) {   // fills `ops`, returns the card height
+            ops.clear();
+            int y = 18;
+            auto put = [&](int x, int yy, int scale, SDL_Color c, const std::string& s) { ops.push_back({x, yy, scale, c, s}); };
+            auto head = [&](const std::string& t) { y += 6; put(pad, y, 2, gold, t); y += lineH + 3; };
+            auto para = [&](const std::string& t) {   // a wrapped paragraph, continuation lines indented
+                std::vector<std::string> ls = wrap(t, cw - pad * 2 - 12 - 36, 2);
+                for (size_t i = 0; i < ls.size(); ++i) { put(pad + 12 + (i ? 36 : 0), y, 2, body, ls[i]); y += lineH; }
+            };
+            auto column = [&](const KeyRow* rows, int n, int x) {   // "KEY  WHAT IT DOES" rows; returns where the column ends
+                int yy = y;
+                for (int i = 0; i < n; ++i) {
+                    int kw = font::textWidth(rows[i].key, 2) + 12;
+                    put(x, yy, 2, keyC, rows[i].key);
+                    std::vector<std::string> ls = wrap(rows[i].what, colW - kw, 2);
+                    for (size_t j = 0; j < ls.size(); ++j) { put(x + (j ? 24 : kw), yy, 2, body, ls[j]); yy += lineH; }
+                }
+                return yy;
+            };
+            put(pad, y, 3, white, "SANDBOTS - QUICK HELP");
+            put(cw - pad - font::textWidth("F1 / ESC / CLICK TO CLOSE", 2), y + 4, 2, dim, "F1 / ESC / CLICK TO CLOSE");
+            y += 32;
+            head("WORKFLOW");
+            para("1. DRAW IN EDIT MODE: NOTHING MOVES WHILE YOU BUILD. CTRL+Z UNDOES ANY EDIT.");
+            para("2. PRESS PLAY (SPACE) TO RUN IT. PAUSE OR STEP (N) WHILE IT RUNS.");
+            para("3. STOP RESTORES EXACTLY WHAT YOU DREW. SAVE / OPEN KEEP YOUR MACHINES.");
+            head("THE WINDOW");
+            para("LEFT: TOOLS. PICK ONE AND DRAW IN THE MIDDLE. THE DIGIT ON A TOOL IS ITS KEY.");
+            para("RIGHT: THE TOOL OR SELECTION SETTINGS. HOVER A SWATCH FOR MATERIAL DETAILS.");
+            para("TOP: PLAY / STOP, FILES, UNDO, VIEWS, ZOOM, FOCUS, SCENES AND HELP.");
+            para("BOTTOM: THE TOOL, WHAT IS SELECTED, AND A HINT FOR WHATEVER YOU POINT AT.");
+            head("EDITING BODIES");
+            para("SELECT: CLICK A BODY (CLICK AGAIN FOR THE ONE UNDER IT, SHIFT ADDS).");
+            para("DRAG A SELECTED BODY TO MOVE IT. DRAG EMPTY SPACE TO BOX-SELECT. DEL DELETES.");
+            para("SWATCHES RECOLOUR THE SELECTION. ENTER OPENS THE EXACT-VALUE FORM.");
+            para("CUT: DRAG A SHAPE OVER A BODY TO CUT THAT AREA OUT OF IT.");
+            para("SUBTRACT CUTS THE RED (LAST-CLICKED) BODY OUT OF THE OTHER SELECTED ONES.");
+            para("EMITTER: A BODY THAT ENDLESSLY MAKES A MATERIAL. PIN IT, OR LET IT TRAVEL.");
+            head("KEYS");
+            int x = pad + 12;   // the tool digits, one line across the card
+            for (int i = 1; i <= 10; ++i) {
+                const std::string name = DIGIT_NAMES[i % 10];
+                put(x, y, 2, keyC, std::string(1, (char)('0' + i % 10)));
+                put(x + 18, y, 2, body, name);
+                x += 18 + font::textWidth(name, 2) + 22;
+            }
+            y += lineH;
+            int yl = column(leftKeys, (int)(sizeof leftKeys / sizeof leftKeys[0]), pad + 12);
+            int yr = column(rightKeys, (int)(sizeof rightKeys / sizeof rightKeys[0]), pad + 12 + colW + 16);
+            return std::max(yl, yr) + 16;
+        };
+        int ch = layout(17);
+        if (ch > SIM_H - 12) ch = layout(15);
+        SDL_Rect card{(SIM_W - cw) / 2, std::max(6, (SIM_H - ch) / 2), cw, ch};
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
         SDL_Rect all{0, 0, SIM_W, SIM_H};
         SDL_RenderFillRect(ren, &all);
         rrect(card, SDL_Color{22, 26, 36, 250});
         rrectLine(card, SDL_Color{120, 150, 210, 255});
-        int x = card.x + 24, y = card.y + 18;
-        auto head = [&](const std::string& t) { font::draw(ren, t, x, y, 2, SDL_Color{255, 200, 110, 255}); y += 20; };
-        const int maxChars = (card.w - 24 - 36 - 12) / 12;
-        auto line = [&](const std::string& t) {   // word-wrapped
-            size_t pos = 0;
-            std::string cur;
-            bool first = true;
-            auto flush = [&] { font::draw(ren, (first ? "" : "   ") + cur, x + 12, y, 2, SDL_Color{214, 222, 238, 255}); y += 17; cur.clear(); first = false; };
-            while (pos < t.size()) {
-                size_t e = t.find(' ', pos);
-                if (e == std::string::npos) e = t.size();
-                std::string w = t.substr(pos, e - pos);
-                if (!cur.empty() && (int)(cur.size() + 1 + w.size()) + (first ? 0 : 3) > maxChars) flush();
-                cur += (cur.empty() ? "" : " ") + w;
-                pos = e + 1;
-            }
-            if (!cur.empty()) flush();
-        };
-        font::draw(ren, "SANDBOTS - QUICK HELP", x, y, 3, SDL_Color{255, 255, 255, 255});
-        font::draw(ren, "F1 / ESC / CLICK TO CLOSE", card.x + card.w - font::textWidth("F1 / ESC / CLICK TO CLOSE", 2) - 24, y + 4, 2, SDL_Color{150, 165, 195, 255});
-        y += 38;
-        head("WORKFLOW");
-        line("1. DRAW IN EDIT MODE - NOTHING MOVES, SO YOU CAN BUILD CALMLY. CTRL+Z UNDOES ANY EDIT.");
-        line("2. PRESS PLAY (SPACE). THE DRAWING IS SNAPSHOT FIRST. PAUSE / STEP WHILE IT RUNS.");
-        line("3. PRESS STOP TO GO BACK TO EXACTLY WHAT YOU DREW. SAVE / OPEN KEEP YOUR MACHINES.");
-        y += 6;
-        head("THE WINDOW");
-        line("LEFT: TOOLS, GROUPED. PICK ONE AND DRAW IN THE MIDDLE.   RIGHT: PROPERTIES OF THE TOOL OR SELECTION - MATERIALS ARE SWATCHES YOU CLICK, NOTHING TO SCROLL THROUGH.");
-        line("TOP: PLAY / STOP, FILES, UNDO, VIEWS, FOCUS AND SCENES.   BOTTOM: A HINT FOR THE TOOL OR FOR WHATEVER YOU HOVER.");
-        y += 6;
-        head("EDITING BODIES");
-        line("SELECT: CLICK A BODY (CLICK AGAIN TO REACH THE ONE UNDER IT, SHIFT ADDS), DRAG EMPTY SPACE TO BOX-SELECT, DRAG A SELECTED BODY TO MOVE IT.");
-        line("CLICKING A MATERIAL SWATCH WHILE BODIES ARE SELECTED CHANGES THEIR MATERIAL. CTRL+C / CTRL+V COPY AND PASTE; DEL DELETES.");
-        line("CUT TOOL: DRAG A BOX OR CIRCLE OVER A BODY AND THAT AREA IS CUT OUT OF IT. SUBTRACT: CUT ONE SELECTED BODY (THE RED, LAST-CLICKED ONE) OUT OF THE OTHERS.");
-        line("EMITTER: A BODY THAT ENDLESSLY MAKES THE MATERIAL YOU PICK IN THE PANEL. PIN IT, OR LET IT TRAVEL WITH A MACHINE.");
-        y += 6;
-        head("KEYS");
-        line("SPACE PLAY / PAUSE    N STEP    ENTER EXACT-VALUE FORM    F1 HELP    F FOCUS ON THE SELECTED BODY    DEL DELETE");
-        line("CTRL+Z UNDO    CTRL+Y REDO    CTRL+C COPY    CTRL+V PASTE    CTRL+A SELECT ALL    CTRL+S SAVE    CTRL+O OPEN    CTRL+N NEW");
-        line("CTRL+G GROUP    CTRL+U UNGROUP    T FIXED IN PLACE    H HEAT VIEW    P PRESSURE VIEW    G FLIP GRAVITY    [ ] BRUSH SIZE");
-        line("FAN SELECTED: + / - STRENGTH    BACKSLASH FLIPS    M BLOW / VACUUM       E HOLD = SPARK PLUG    , . SPARK PLUG PERIOD");
-        line("ARROWS OR A / D DRIVE MOTORS    UP OR W FIRE ROCKETS       MIDDLE-DRAG, THE STRIPS AT THE VIEW EDGES, HOME / END / PAGE UP / PAGE DOWN SCROLL");
-        line("ARROW KEYS NUDGE THE SELECTION IN EDIT MODE: 1 CELL, SHIFT = 10 CELLS, CTRL = 1/4 CELL (WHILE PLAYING THEY DRIVE MOTORS AS BEFORE).");
-        line("ZOOM: CTRL+WHEEL, CTRL + PLUS / MINUS, OR THE - AND + BUTTONS (CTRL+0 RESETS).    K OR THE GRID BUTTON: REFERENCE GRID, RULERS (CELL NUMBERS) AND A SCALE BAR.");
+        for (const Op& o : ops) font::draw(ren, o.s, card.x + o.x, card.y + o.y, o.scale, o.c);
     }
 
     // things drawn over the simulation view (the viewport is already the view): messages, mode, readouts
@@ -3676,10 +3832,12 @@ struct Game {
         for (size_t i = 0; i < buttons.size(); ++i) renderButton(buttons[i], (int)i == hoverBtn);
         for (size_t i = 0; i < rp.size(); ++i) renderPItem(rp[i], (int)i == hoverItem);
 
-        // status bar under the view
+        // status bar under the view: the tool, its material, what is selected, then the file and the cursor as long as they
+        // fit before the FPS counter (the cursor is the first to go)
         const int bx = LEFT_W + 10, sy = TOP_H + SIM_H + 6;
         const SDL_Color gold{255, 214, 120, 255}, dim{118, 128, 150, 255}, cyan{150, 228, 255, 255}, white{236, 240, 248, 255};
-        std::vector<std::pair<std::string, SDL_Color>> segs;
+        using Segs = std::vector<std::pair<std::string, SDL_Color>>;
+        Segs segs;
         auto sep = [&] { segs.push_back({"   |   ", dim}); };
         segs.push_back({"TOOL ", dim});
         segs.push_back({tool == T_MAT ? (mat == M_EMPTY ? "ERASER" : MATS[mat].name) : TOOL_NAMES[tool], gold});
@@ -3687,30 +3845,33 @@ struct Game {
         if (tool == T_MAT) { segs.push_back({"BRUSH ", dim}); segs.push_back({std::to_string(brush), white}); }
         else if (tool == T_PIPE || tool == T_HOSE) { segs.push_back({"DIAMETER ", dim}); segs.push_back({fmt(pipeD), white}); }
         else { segs.push_back({"MATERIAL ", dim}); segs.push_back({MATS[bodyMat].name, white}); }
-        if (!sel.empty()) { sep(); segs.push_back({"SELECTED ", dim}); segs.push_back({std::to_string(sel.size()), white}); }
-        sep();
-        segs.push_back({"X ", dim}); segs.push_back({std::to_string((int)smouse().x), white});
-        segs.push_back({"  Y ", dim}); segs.push_back({std::to_string((int)smouse().y), white});
-        if (!currentFile.empty()) { sep(); segs.push_back({"FILE ", dim}); segs.push_back({currentFile, white}); }
+        const std::string selS = selectionText();
+        if (!selS.empty()) { sep(); segs.push_back({selS, white}); }
+        const std::string fpsS = "FPS " + std::to_string((int)fps);
+        const int fpsX = LEFT_W + SIM_W - font::textWidth(fpsS, 2) - 10;
+        auto width = [](const Segs& s) { int w = 0; for (auto& p : s) w += font::textWidth(p.first, 2); return w; };
+        auto addIfFits = [&](const Segs& extra) { if (bx + width(segs) + width(extra) <= fpsX - 12) segs.insert(segs.end(), extra.begin(), extra.end()); };
+        if (!currentFile.empty()) addIfFits({{"   |   ", dim}, {"FILE ", dim}, {currentFile, white}});
+        addIfFits({{"   |   ", dim}, {"X ", dim}, {std::to_string((int)smouse().x), white}, {"  Y ", dim}, {std::to_string((int)smouse().y), white}});
         drawSegments(segs, bx, sy, 2);
-        std::string fpsS = "FPS " + std::to_string((int)fps);
-        font::draw(ren, fpsS, LEFT_W + SIM_W - font::textWidth(fpsS, 2) - 10, sy, 2, dim);
+        font::draw(ren, fpsS, fpsX, sy, 2, dim);
 
         std::string tip;
         if (hoverBtn >= 0 && !buttons[hoverBtn].tip.empty()) tip = buttons[hoverBtn].tip;
         else if (hoverItem >= 0 && !rp[hoverItem].tip.empty()) tip = rp[hoverItem].tip;
         else tip = TOOL_HINTS[tool];
-        // wrap the hint over two lines
-        const size_t per = (size_t)(SIM_W - 20) / 6;
+        // wrap the hint over two lines, leaving the right end of the rows to the hover readout
+        const std::string hover = hoverText();
+        const int hoverW = hover.empty() ? 0 : font::textWidth(hover, 2) + 24;
+        const size_t per = (size_t)std::max(60, SIM_W - 20 - hoverW) / 6;
         std::string l1 = tip.substr(0, per), l2;
         if (tip.size() > per) {
             size_t cut = tip.rfind(' ', per);
             if (cut == std::string::npos) cut = per;
-            l1 = tip.substr(0, cut); l2 = tip.substr(cut + 1);
+            l1 = tip.substr(0, cut); l2 = tip.substr(cut + 1, per);
         }
         font::draw(ren, l1, bx, sy + 26, 1, SDL_Color{190, 202, 226, 255});
         if (!l2.empty()) font::draw(ren, l2, bx, sy + 38, 1, SDL_Color{190, 202, 226, 255});
-        std::string hover = hoverText();
         if (!hover.empty()) font::draw(ren, hover, LEFT_W + SIM_W - font::textWidth(hover, 2) - 10, sy + 26, 2, cyan);
         font::draw(ren, "CTRL+Z UNDO   CTRL+C / CTRL+V COPY, PASTE   F1 HELP", bx, sy + 54, 1, SDL_Color{90, 100, 124, 255});
     }
@@ -4230,7 +4391,7 @@ int main(int argc, char** argv) {
         if (camFlag >= 0) g.setCam((float)camFlag, camYFlag); else g.setCam(g.camXf, camYFlag);
         if (tabFlag >= 0) g.tool = (Tool)tabFlag;
         if (scenesFlag) g.scenesOpen = true;
-        if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; }
+        if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; g.inSim = Game::inSimPx(hoverX, hoverY); if (g.inSim) g.mouse = g.toWorld(hoverX, hoverY); }
         if (g0) g.phys.gravity = Vec2(0, 0);
         double tPhys = 0, tWorld = 0;
         auto nowS = [] { return (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency(); };
