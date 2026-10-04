@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 #include "physics.hpp"
 #include <algorithm>
 #include <cmath>
@@ -342,6 +344,12 @@ void Physics::fluidForces() {
         }
     }
     hydro.clear();
+    groupMem.clear();
+    for (auto& b : bodies)
+        if (b.alive && b.group >= 0) {
+            if ((int)groupMem.size() <= b.group) groupMem.resize(b.group + 1);
+            groupMem[b.group].push_back(b.id);
+        }
     std::vector<int> groupOf(closed.size(), -1);
 
     // Pressure of the gas / liquid touching each body, applied as force next frame. Sampled along the
@@ -377,12 +385,39 @@ void Physics::fluidForces() {
         std::vector<float> gasP(samples.size(), -1.f);
         float faceSum[4] = {0, 0, 0, 0};
         int faceCnt[4] = {0, 0, 0, 0};
+        // The fluid cell in front of a sample. A face that is flush against a sibling in the same rigid group is
+        // interior and carries no load. Otherwise step outward past the body's own cover margin and that of its
+        // siblings (stair steps) to the first free cell; a sibling's real body in the way (a narrow pocket) or any
+        // other body means no fluid touches this part of the outline.
+        const std::vector<int>* sibs = (b.group >= 0 && b.group < (int)groupMem.size()) ? &groupMem[b.group] : nullptr;
+        auto insideSibling = [&](Vec2 q) {
+            if (!sibs) return false;
+            for (int m : *sibs) if (m != b.id && bodies[m].contains(q)) return true;
+            return false;
+        };
+        auto probe = [&](const Sample& sm) -> int {
+            if (insideSibling(sm.p + sm.n * 0.3f)) return -1;
+            static const float reach[4] = {1.2f, 1.6f, 2.0f, 2.4f};
+            for (float d : reach) {
+                Vec2 q = sm.p + sm.n * d;
+                int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
+                if (!world->inb(ix, iy)) return -1;
+                int j = iy * World::W + ix;
+                int m = mask[j];
+                if (m == b.id) continue;
+                if (m >= 0 && sibs && bodies[m].group == b.group) {
+                    if (bodies[m].contains(q)) return -1;  // the far wall of a narrow pocket
+                    continue;                              // only a sibling's cover margin
+                }
+                return m >= 0 ? -1 : j;
+            }
+            return -1;
+        };
         for (size_t i = 0; i < samples.size(); ++i) {
             const Sample& sm = samples[i];
-            Vec2 q = sm.p + sm.n * 1.6f;
-            int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
-            if (!world->inb(ix, iy) || mask[iy * World::W + ix] >= 0) continue;
-            const Cell& n = world->cells[iy * World::W + ix];
+            int pj = probe(sm);
+            if (pj < 0) continue;
+            const Cell& n = world->cells[pj];
             if (MATS[n.t].kind != K_GAS) continue;
             float psi = n.amt * (n.temp + 273.f) / 293.f;
             gasP[i] = std::max(0.f, psi - 0.15f) * GAS_PRESSURE;
@@ -390,11 +425,8 @@ void Physics::fluidForces() {
         }
         for (size_t i = 0; i < samples.size(); ++i) {
             const Sample& sm = samples[i];
-            Vec2 q = sm.p + sm.n * 1.6f;
-            int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
-            if (!world->inb(ix, iy)) continue;
-            int j = iy * World::W + ix;
-            if (mask[j] >= 0) continue;
+            int j = probe(sm);
+            if (j < 0) continue;
             Cell& n = world->cells[j];
             Kind k = MATS[n.t].kind;
             float p;
@@ -406,9 +438,19 @@ void Physics::fluidForces() {
                 if (cid >= 0 && closed[cid]) {
                     if (groupOf[cid] < 0) { groupOf[cid] = (int)hydro.size(); hydro.emplace_back(); }
                     HydroGroup& g = hydro[groupOf[cid]];
+                    // the members of a rigid group sweep volume together: one link per group
+                    int key = b.id;
+                    float invM = b.invMass;
+                    if (b.group >= 0 && b.group < (int)groupMem.size()) {
+                        const std::vector<int>& mem = groupMem[b.group];
+                        key = mem[0];
+                        double mass = 0; bool fixedMember = false;
+                        for (int m : mem) { mass += bodies[m].mass; fixedMember |= bodies[m].isStatic; }
+                        invM = (fixedMember || mass <= 0) ? 0.f : (float)(1.0 / mass);
+                    }
                     HydroLink* link = nullptr;
-                    for (auto& l : g.links) if (l.body == b.id) link = &l;
-                    if (!link) { g.links.push_back({b.id, Vec2()}); link = &g.links.back(); }
+                    for (auto& l : g.links) if (l.body == key) link = &l;
+                    if (!link) { g.links.push_back({key, Vec2(), invM}); link = &g.links.back(); }
                     link->a += sm.n * sm.w;  // pointing from the body into the liquid
                 }
                 if (n.amt > 1.0001f) b.fluidC += LIQUID_DAMPING * sm.w;
@@ -421,7 +463,7 @@ void Physics::fluidForces() {
                 // in a confined, pressurised chamber and is negligible for a body moving through free gas
                 float vn = dot(b.vel + cross(b.w, r), sm.n);  // >0: moving into the gas
                 float over = std::max(0.f, n.amt * (n.temp + 273.f) / 293.f - 0.15f);
-                n.temp = std::max(-100.f, n.temp + std::clamp(over * vn * 0.08f, -30.f, 30.f));
+                n.temp = std::max(-100.f, n.temp + std::clamp(over * vn * 0.08f * sm.w, -30.f, 30.f));
             }
             Vec2 f = sm.n * -(std::min(p, 3e5f) * sm.w);
             b.fluidF += f;
@@ -440,24 +482,29 @@ void Physics::thermalStep() {
         float Cb = bm.cap * b.area;
         if (Cb <= 0) continue;
 
-        std::vector<Vec2> pts;
-        const float spacing = 3.f;
+        // sample points just outside the outline; each stands for the stretch of outline it sits on
+        struct TP { Vec2 p; float w; };
+        std::vector<TP> pts;
         if (b.shape == SHAPE_CIRCLE) {
-            int n = std::clamp((int)(2 * PI * (b.radius + 1.5f) / spacing), 8, 64);
+            int n = std::clamp((int)(2 * PI * (b.radius + 1.5f) / 3.f), 8, 64);
+            float w = 2 * PI * b.radius / n;
             for (int i = 0; i < n; ++i) {
-                float a = 2 * PI * i / n;
-                pts.push_back(b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f));
+                float a = 2 * PI * (i + 0.5f) / n;
+                pts.push_back({b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f), w});
             }
         } else {
             float hx = b.half.x + 1.5f, hy = b.half.y + 1.5f;
             Vec2 c[4] = {{-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}};
             for (int e = 0; e < 4; ++e) {
                 Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
-                int n = std::max(1, (int)(length(p1 - p0) / spacing));
-                for (int i = 0; i < n; ++i) pts.push_back(b.toWorld(p0 + (p1 - p0) * ((float)i / n)));
+                float len = (e & 1) ? 2.f * b.half.y : 2.f * b.half.x;   // the body's own edge length
+                int n = std::max(1, (int)std::ceil(len / 3.f));
+                for (int i = 0; i < n; ++i) pts.push_back({b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)), len / n});
             }
         }
-        for (Vec2 p : pts) {
+        for (const TP& tp : pts) {
+            Vec2 p = tp.p;
+            const float spacing = tp.w;
             int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
             if (!world->inb(ix, iy) || world->bodyMask[iy * World::W + ix] >= 0) continue;
             if (b.mat == M_IGNITER && world->sparkNow) world->ignitePoint(ix, iy);
@@ -482,21 +529,45 @@ void Physics::thermalStep() {
             }
         }
     }
-    // conduction through contacts between bodies
-    for (const Contact& c : contacts) {
-        if (c.a < 0 || c.b < 0) continue;
-        Body& A = bodies[c.a];
-        Body& B2 = bodies[c.b];
-        const MatInfo& ma = MATS[A.mat];
-        const MatInfo& mb = MATS[B2.mat];
-        float Ca = ma.cap * A.area, Cb = mb.cap * B2.area;
-        float k = 2.f * ma.cond * mb.cond / (ma.cond + mb.cond + 1e-6f);
-        float dT = A.temp - B2.temp;
-        float q = k * 2.5f * dT;
-        float lim = 0.24f * std::min(Ca, Cb) * dT;
-        if (std::fabs(q) > std::fabs(lim)) q = lim;
-        A.temp -= q / Ca;
-        B2.temp += q / Cb;
+    // conduction between bodies that touch: every pair of adjacent covered cells carries heat, so welded pieces,
+    // pipe segments and bodies resting on each other share temperature in proportion to the contact length
+    {
+        const int Wd = World::W, Hd = World::H;
+        std::vector<std::pair<uint64_t, int>> shared;
+        auto note = [&](int a, int b) {
+            if (a < 0 || b < 0 || a == b) return;
+            if (a > b) std::swap(a, b);
+            shared.push_back({((uint64_t)a << 32) | (uint32_t)b, 1});
+        };
+        const auto& mask = world->bodyMask;
+        for (int y = 0; y < Hd; ++y)
+            for (int x = 0; x < Wd; ++x) {
+                int a = mask[y * Wd + x];
+                if (a < 0) continue;
+                if (x + 1 < Wd) note(a, mask[y * Wd + x + 1]);
+                if (y + 1 < Hd) note(a, mask[(y + 1) * Wd + x]);
+            }
+        std::sort(shared.begin(), shared.end());
+        for (size_t i = 0; i < shared.size();) {
+            size_t j = i;
+            while (j < shared.size() && shared[j].first == shared[i].first) ++j;
+            int cnt = (int)(j - i);
+            Body& A = bodies[(int)(shared[i].first >> 32)];
+            Body& B2 = bodies[(int)(shared[i].first & 0xffffffffu)];
+            i = j;
+            if (!A.alive || !B2.alive) continue;
+            const MatInfo& ma = MATS[A.mat];
+            const MatInfo& mb = MATS[B2.mat];
+            float Ca = ma.cap * A.area, Cb = mb.cap * B2.area;
+            if (Ca <= 0 || Cb <= 0) continue;
+            float k = 2.f * ma.cond * mb.cond / (ma.cond + mb.cond + 1e-6f);
+            float dT = A.temp - B2.temp;
+            float q = k * (float)cnt * dT;
+            float lim = 0.15f * std::min(Ca, Cb) * dT;
+            if (std::fabs(q) > std::fabs(lim)) q = lim;
+            A.temp -= q / Ca;
+            B2.temp += q / Cb;
+        }
     }
     for (auto& b : bodies) {
         if (!b.alive) continue;
@@ -514,9 +585,11 @@ void Physics::dissolve(Body& b) {
     float r = b.shape == SHAPE_CIRCLE ? b.radius : b.bound;
     int x0 = std::max(0, (int)std::floor(b.pos.x - r)), x1 = std::min(World::W - 1, (int)std::ceil(b.pos.x + r));
     int y0 = std::max(0, (int)std::floor(b.pos.y - r)), y1 = std::min(World::H - 1, (int)std::ceil(b.pos.y + r));
+    int spawned = 0;
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             if (!b.contains(Vec2(x + 0.5f, y + 0.5f)) || world->at(x, y).t != M_EMPTY) continue;
+            ++spawned;
             if (melt) {
                 uint8_t to = bm.hiTo;
                 world->spawn(x, y, to, (to == M_MOLTEN || to == M_VAPOR) ? b.mat : (uint8_t)0, b.temp);
@@ -526,10 +599,23 @@ void Physics::dissolve(Body& b) {
             }
         }
     }
+    if (!spawned && b.area > 0.2f) {  // a sliver covers no cell centre: its material still goes somewhere
+        int x = (int)std::floor(b.pos.x), y = (int)std::floor(b.pos.y);
+        if (world->inb(x, y) && world->at(x, y).t == M_EMPTY && world->bodyMask[y * World::W + x] < 0) {
+            if (melt) world->spawn(x, y, bm.hiTo, (bm.hiTo == M_MOLTEN || bm.hiTo == M_VAPOR) ? b.mat : (uint8_t)0, b.temp);
+            else { world->spawn(x, y, b.mat, 0, b.temp); world->at(x, y).burn = (uint8_t)std::min(255, std::max(1, bm.burnTime)); }
+        }
+    }
     removeBody(b.id);
 }
 
 void Physics::sampleFluids() {
+    // Exposure of a body to liquid / grains is read from points just outside its outline. Members of a rigid
+    // group are one object: points that fall inside a sibling's cover are interior and ignored, and the group's
+    // totals are shared by every member, so a welded plate floats like the single box it replaces.
+    struct Acc { int wet = 0, gran = 0, n = 0; float rho = 0; Vec2 cen; };
+    std::vector<Acc> groupAcc;
+    std::vector<Acc> own(bodies.size());
     for (auto& b : bodies) {
         b.wetFrac = b.granFrac = b.fluidRho = 0;
         if (!b.alive || b.isStatic) continue;
@@ -546,24 +632,36 @@ void Physics::sampleFluids() {
             for (int e = 0; e < 4; ++e) {
                 Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
                 int n = std::max(1, (int)(length(p1 - p0) / 3.f));
-                for (int i = 0; i < n; ++i) pts.push_back(b.toWorld(p0 + (p1 - p0) * ((float)i / n)));
+                for (int i = 0; i < n; ++i) pts.push_back(b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)));
             }
         }
-        int wet = 0, gran = 0;
-        float rho = 0;
-        Vec2 cen;
+        Acc& ac = own[b.id];
         for (Vec2 p : pts) {
             int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
             if (!world->inb(ix, iy)) continue;
+            if (b.group >= 0) {
+                int m = world->bodyMask[iy * World::W + ix];
+                if (m >= 0 && m < (int)bodies.size() && bodies[m].group == b.group) continue;  // interior to the group
+            }
+            ++ac.n;
             uint8_t t = world->at(ix, iy).t;
             Kind k = MATS[t].kind;
-            if (k == K_LIQUID) { ++wet; rho += MATS[t].density; cen += p; }
-            else if (k == K_POWDER) ++gran;
+            if (k == K_LIQUID) { ++ac.wet; ac.rho += MATS[t].density; ac.cen += p; }
+            else if (k == K_POWDER) ++ac.gran;
         }
-        float n = (float)pts.size();
-        b.wetFrac = wet / n;
-        b.granFrac = gran / n;
-        if (wet) { b.fluidRho = rho / wet; b.wetCentroid = cen / (float)wet; }
+        if (b.group >= 0) {
+            if ((int)groupAcc.size() <= b.group) groupAcc.resize(b.group + 1);
+            Acc& g = groupAcc[b.group];
+            g.wet += ac.wet; g.gran += ac.gran; g.n += ac.n; g.rho += ac.rho; g.cen += ac.cen;
+        }
+    }
+    for (auto& b : bodies) {
+        if (!b.alive || b.isStatic) continue;
+        const Acc& ac = b.group >= 0 ? groupAcc[b.group] : own[b.id];
+        if (ac.n <= 0) continue;
+        b.wetFrac = (float)ac.wet / ac.n;
+        b.granFrac = (float)ac.gran / ac.n;
+        if (ac.wet) { b.fluidRho = ac.rho / ac.wet; b.wetCentroid = ac.cen / (float)ac.wet; }
     }
 }
 
@@ -918,15 +1016,19 @@ void Physics::solveHydro() {
         for (const HydroLink& l : g.links) {
             const Body& b = bodies[l.body];
             D += dot(l.a, b.vel);
-            K += dot(l.a, l.a) * b.invMass;
+            K += dot(l.a, l.a) * l.invM;
         }
         if (K < 1e-9f) continue;
         float np = std::max(g.acc + D / K, 0.f);  // pressure can push but never pull
         float dp = np - g.acc;
         g.acc = np;
         for (const HydroLink& l : g.links) {
-            Body& b = bodies[l.body];
-            b.vel -= l.a * (dp * b.invMass);
+            Vec2 dv = l.a * (dp * l.invM);
+            const Body& rep = bodies[l.body];
+            if (rep.group >= 0 && rep.group < (int)groupMem.size())
+                for (int m : groupMem[rep.group]) bodies[m].vel -= dv;
+            else
+                bodies[l.body].vel -= dv;
         }
     }
 }

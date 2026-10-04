@@ -427,7 +427,7 @@ void World::fireCell(int x, int y) {
     Cell& c = at(x, y);
     if (c.life == 0 || c.temp < 350.f) {
         float amt = c.amt, temp = c.temp;
-        uint8_t res = c.var;
+        uint8_t res = c.aux;  // residue material, set explicitly by whoever spawned the flame (var is just colour noise)
         if (res != M_EMPTY && res < M_COUNT && chance(0.15f)) { setCell(x, y, res); at(x, y).temp = temp; return; }
         convert(x, y, chance(0.3f) ? M_SMOKE : M_EXHAUST, 0, temp, std::max(0.1f, amt));
         return;

@@ -91,4 +91,6 @@ Other things to try: lava on water makes stone and steam; fire spreads through w
 
 ## Developer flags
 
+`sandbots --selftest` runs headless regression checks (no window): the same physical situation built from a single body and from compound shapes (welded strips, a pocket cut into a piston, a chamber or boiler cut out of a block, a plug scaled to 98 %) must agree on buoyancy, gas-pressure force, heat conduction, hydraulic transmission, sealing, combustion, boiling and flame burn-out.
+
 `sandbots --shot out.bmp [frames] [--scene N] [--heat] [--elec] [--trace] [--g0]` runs headless (SDL dummy video driver), simulates, prints burn counts/wheel speed (and body/gas stats with `--trace`) and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use, `11`–`13` precision/group/hose tests (13 shows the numeric form), `15` cut + scale, `16` emitters, `17` electricity, `18` bonds/wax, `19` primers, `4` steam engine, `5` gasoline engine, `6` hydraulics, `7` conduction, `8` fuels, `9` pressure test, `10` diesel engine.

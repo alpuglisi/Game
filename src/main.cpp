@@ -1801,7 +1801,10 @@ struct Game {
 
 }  // namespace
 
+int runSelfTests();
+
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) if (!std::strcmp(argv[i], "--selftest")) return runSelfTests();
     // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace]
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;

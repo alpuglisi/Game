@@ -13,7 +13,8 @@ add_executable(sandbots
   src/main.cpp
   src/sand.cpp
   src/physics.cpp
-  src/elec.cpp)
+  src/elec.cpp
+  src/selftest.cpp)
 
 target_include_directories(sandbots PRIVATE ${SDL2_INCLUDE_DIRS})
 if(TARGET SDL2::SDL2)

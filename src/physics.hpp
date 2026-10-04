@@ -84,8 +84,9 @@ struct Contact {
 // A closed body of liquid shared by several rigid bodies: it can not be compressed, so the volume the
 // bodies sweep out must sum to zero (Pascal's law). Re-derived from the grid every frame.
 struct HydroLink {
-    int body;
-    Vec2 a;  // sum of face normals pointing from the body into the liquid
+    int body;       // the body, or the representative member of a rigid group (a group acts as one piston)
+    Vec2 a;         // sum of face normals pointing from the body (group) into the liquid
+    float invM = 0; // inverse mass of the whole rigid group; 0 if it cannot move
 };
 struct HydroGroup {
     std::vector<HydroLink> links;
@@ -154,6 +155,7 @@ private:
     Body worldBody;
     std::vector<Contact> contacts;
     std::vector<HydroGroup> hydro;
+    std::vector<std::vector<int>> groupMem;  // members of each rigid group, refreshed once per step
     std::vector<uint64_t> noCollide;
     int seqCounter = 0;
     int groupCounter = 0;
