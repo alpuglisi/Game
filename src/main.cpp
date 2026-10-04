@@ -19,23 +19,20 @@
 namespace {
 
 constexpr int S = 3;  // screen pixels per sand cell
-constexpr int VIEW_W = 400;                 // cells visible across the window; the world is wider and the camera scrolls
+constexpr int VIEW_W = 360;                 // cells visible across the view; the world is wider and the camera scrolls
 constexpr int SIM_W = VIEW_W * S;
 constexpr int SIM_H = World::H * S;
-// bottom panel: toolbar row, tab row, two rows of tab content, then a three-line status area
-constexpr int PAD = 6, TB_H = 28, TAB_H = 26, BTN_H = 26, BTN_GAP = 4, COLS = 7, CONTENT_ROWS = 2, STATUS_H = 54;
-constexpr int UI_H = PAD + TB_H + 6 + TAB_H + 6 + CONTENT_ROWS * (BTN_H + BTN_GAP) + 6 + STATUS_H + PAD;
-constexpr int WIN_W = SIM_W, WIN_H = SIM_H + UI_H;
+// window layout: tool panel | simulation view | properties panel, a toolbar above and a status bar below
+constexpr int LEFT_W = 200, RIGHT_W = 252, TOP_H = 46, BOT_H = 74;
+constexpr int SIM_X = LEFT_W, SIM_Y = TOP_H;
+constexpr int WIN_W = LEFT_W + SIM_W + RIGHT_W, WIN_H = TOP_H + SIM_H + BOT_H;
 constexpr float PI = 3.14159265f;
 
 enum Tool {
-    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND, T_FAN
+    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND, T_FAN, T_CUT
 };
-enum Tab { TAB_POWDER, TAB_LIQUID, TAB_GAS, TAB_METAL, TAB_STRUCT, TAB_DEVICE, TAB_SHAPES, TAB_JOINTS, TAB_EDIT, TAB_SCENE, TAB_COUNT };
-constexpr int TAB_MATS = 6;  // the first six tabs are material palettes
-
 const char* TOOL_NAMES[] = {"PARTICLES", "BOX", "CIRCLE", "WHEEL", "ROCKET", "PIN JOINT", "MOTOR (ARROWS)",
-                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND", "FAN"};
+                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND", "FAN", "CUT"};
 const char* TOOL_HINTS[] = {
     "LMB: PAINT  RMB: ERASE  WHEEL: BRUSH SIZE",
     "DRAG TO SIZE A BOX OF THE SELECTED SOLID (CLICK = DEFAULT)",
@@ -50,24 +47,32 @@ const char* TOOL_HINTS[] = {
     "DRAG BODIES AROUND",
     "CLICK A BODY OR JOINT TO REMOVE IT",
     "PRESS ON A BODY AND DRAG ALONG THE LINE IT MAY SLIDE ON (PISTONS, VALVES). ROTATION IS LOCKED",
-    "CLICK = SELECT (SHIFT ADDS, CTRL = ONE PART OF A GROUP). DRAG = BOX SELECT. ENTER = EDIT EXACT VALUES",
+    "CLICK A BODY TO SELECT IT (CLICK AGAIN TO REACH THE ONE UNDER IT, SHIFT ADDS). DRAG SELECTED BODIES TO MOVE THEM. DRAG EMPTY SPACE TO BOX-SELECT",
     "DRAG ALONG THE PIPE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/WALL",
     "DRAG ALONG THE HOSE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/SEGMENTS",
     "DRAG A SMALL BOX THAT ENDLESSLY PRODUCES THE SELECTED POWDER/LIQUID/GAS. PIN IT, OR LEAVE IT FREE TO TRAVEL. ENTER = RATE",
     "CLICK WHERE TWO BODIES OVERLAP (OR ONE = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO ABOVE ITS MELT TEMPERATURE OR BREAKING FORCE. ENTER = SET BOTH",
     "DRAG A FAN: THE ARROW SHOWS WHICH WAY IT BLOWS. SELECT IT, THEN + / - CHANGE STRENGTH AND \\ FLIPS IT. ENTER = EXACT VALUES",
+    "DRAG A BOX OR CIRCLE OVER BODIES: THE AREA UNDER IT IS CUT OUT OF EVERY BODY IT TOUCHES. CTRL+Z UNDOES",
 };
 
-const uint8_t PALETTE[TAB_COUNT][18] = {
-    {M_SAND, M_ASH, M_GUNPOWDER, M_COAL},
-    {M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA},
-    {M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN, M_AIR},
-    {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN, M_SOLDER},
-    {M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT, M_PARAFFIN},
-    {M_HEATER, M_COOLER, M_IGNITER, M_SOURCE, M_VOID, M_EMPTY, M_BATT_POS, M_BATT_NEG, M_PRIMER},
-    {}, {}, {}, {},
+// materials a rigid body can be made of (shown as swatches, never cycled through)
+const uint8_t BODY_MATS[] = {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN,
+                             M_WOOD, M_RUBBER, M_PLASTIC, M_GLASS, M_CONCRETE, M_BRICK, M_CERAMIC, M_STONE,
+                             M_ICE, M_SOLDER, M_PARAFFIN, M_PRIMER};
+// what an emitter body can produce
+const uint8_t EMIT_MATS[] = {M_SAND, M_ASH, M_GUNPOWDER, M_COAL,
+                             M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA,
+                             M_STEAM, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN, M_AIR};
+struct PaintGroup { const char* name; std::vector<uint8_t> mats; };
+const std::vector<PaintGroup> PAINT_GROUPS = {
+    {"POWDERS", {M_SAND, M_ASH, M_GUNPOWDER, M_COAL}},
+    {"LIQUIDS", {M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA}},
+    {"GASES", {M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN, M_AIR}},
+    {"METALS", {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN, M_SOLDER}},
+    {"BUILDING", {M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT, M_PARAFFIN}},
+    {"DEVICES", {M_HEATER, M_COOLER, M_IGNITER, M_VOID, M_BATT_POS, M_BATT_NEG, M_PRIMER, M_EMPTY}},
 };
-const char* TAB_NAMES[TAB_COUNT] = {"POWDER", "LIQUID", "GAS", "METAL", "STRUCT", "DEVICE", "SHAPES", "JOINTS", "EDIT", "SCENES"};
 const int SPARK_RATES[] = {0, 120, 60, 40, 30, 20, 12};
 const int SNAPS[] = {0, 1, 2, 5, 10};
 // bond presets: melting temperature (deg C) and breaking force (engine units)
@@ -111,18 +116,24 @@ struct Button {
     std::function<std::string()> label;
     std::function<void()> action;
     std::function<bool()> active;
-    std::function<bool()> visible;
     std::function<bool()> enabled;   // greyed out and inert when false
-    std::string tip;                 // shown in the status area while hovered
-    int zone = 2;                    // 0 toolbar, 1 tab strip, 2 tab content
-    int slot = 0;                    // content grid position
+    std::string tip;                 // shown in the status bar while hovered
+    int zone = 0;                    // 0 toolbar (flowed), 1 tool panel (fixed rectangle), 2 header text
     int gap = 0;                     // extra space before a flow button (separates groups)
     int minW = 0;
     bool right = false;              // flow from the right edge
-    uint32_t swatch = 0;
-    bool hasSwatch = false;
-    uint32_t accent = 0;             // tab underline colour
-    int style = 0;                   // 0 normal, 1 run (green when active), 2 stop (red), 3 tab
+    int style = 0;                   // 0 normal, 1 run (green when active), 2 stop (red), 3 header
+};
+
+// one element of the properties panel, rebuilt every frame from the current tool and selection
+struct PItem {
+    int kind = 0;                    // 0 header, 1 swatch, 2 button, 3 text line, 4 value box
+    SDL_Rect r{0, 0, 0, 0};
+    std::string text;
+    uint32_t color = 0;
+    bool active = false, enabled = true;
+    std::function<void()> act;
+    std::string tip;
 };
 
 struct Label { Vec2 p; std::string s; };
@@ -138,7 +149,6 @@ struct Game {
     std::vector<Label> labels;
 
     Tool tool = T_MAT;
-    Tab tab = TAB_POWDER;
     uint8_t mat = M_SAND;
     uint8_t bodyMat = M_STEEL;
     uint8_t payload = M_WATER;  // what SOURCE blocks emit
@@ -151,6 +161,20 @@ struct Game {
     int primary = -1;          // the body the form edits
     bool partMode = false;     // true = the selection is one component of a group
     int snapIdx = 0;
+    // ---- editing: undo, clipboard, moving, cutting
+    std::vector<std::vector<uint8_t>> undoStack, redoStack;
+    size_t undoBytes = 0;
+    std::string lastUndoKey;
+    Uint32 lastUndoTick = 0;
+    struct Clip { std::vector<Body> bodies; std::vector<Joint> joints; Vec2 center; } clip;
+    bool moving = false, moveArmed = false;
+    Vec2 moveApplied;
+    int moveHit = -1;
+    int cycleIdx = 0;
+    Vec2 lastClickPos;
+    Uint32 lastClickTick = 0;
+    size_t lastClickCount = 0;
+    bool cutCircle = false, keepCutter = false;
     float pipeD = 12.f, pipeWall = 2.f;
     int hoseSegs = 0;          // 0 = automatic
     Tool lastTool = T_MAT;
@@ -223,199 +247,433 @@ struct Game {
         if (formKind == FK_EDIT_CIRCLE) return fields.size() > 4 && std::atof(fields[4].text.c_str()) > 0;
         return false;
     }
-    void selectMaterial(uint8_t m) {
-        Kind kk = MATS[m].kind;
-        if ((kk == K_POWDER || kk == K_LIQUID || kk == K_GAS) && emitterFormActive()) {  // pick what the emitter makes
-            fPayload = m;
-            formMsg = std::string("EMITS ") + MATS[m].name;
-            return;
+    void selectMaterial(uint8_t m) { tool = T_MAT; mat = m; }
+
+    bool helpOn = false, scenesOpen = false;
+    int hoverBtn = -1, hoverItem = -1;
+    int mousePx = 0, mousePy = 0;                 // window pixel coordinates of the pointer
+    std::vector<PItem> rp, modal;                 // properties panel items, scene-picker items
+
+    // ---------------------------------------------------------------- what the panels act on
+    std::vector<int> selectedWith(const std::function<bool(const Body&)>& pred) {
+        pruneSelection();
+        std::vector<int> r;
+        for (int id : sel) if (pred(phys.bodies[id])) r.push_back(id);
+        return r;
+    }
+    std::vector<int> selFans() { return selectedWith([](const Body& b) { return b.fan.strength != 0.f; }); }
+    std::vector<int> selEmitters() { return selectedWith([](const Body& b) { return b.src.on; }); }
+
+    void setBodyMaterial(uint8_t m) {
+        bodyMat = m;
+        pruneSelection();
+        if (sel.empty()) return;
+        pushUndo("material");
+        for (int id : sel) { const Body b = phys.bodies[id]; phys.reshape(id, b.pos, b.half, b.radius, b.angle, m, b.isStatic); }
+        phys.stampBodies();
+    }
+    void setFixed(bool fixed) {
+        anchored = fixed;
+        pruneSelection();
+        if (sel.empty()) return;
+        pushUndo("fixed");
+        for (int id : sel) { const Body b = phys.bodies[id]; phys.reshape(id, b.pos, b.half, b.radius, b.angle, b.mat, fixed); }
+        phys.stampBodies();
+    }
+    void adjustFan(float d) {
+        std::vector<int> fans = selFans();
+        if (fans.empty()) { lastFan = std::clamp(lastFan + d, 5.f, 300.f); return; }
+        pushUndo("fan");
+        for (int id : fans) {
+            float& st = phys.bodies[id].fan.strength;
+            float mag = std::clamp(std::fabs(st) + d, 5.f, 300.f);
+            st = st < 0 ? -mag : mag;
         }
-        tool = T_MAT;
-        mat = m;
-        Kind k = MATS[m].kind;
-        if (k == K_SOLID && m != M_VOID && m != M_SOURCE && m != M_BATT_POS && m != M_BATT_NEG) bodyMat = m;
-        if (k == K_POWDER || k == K_LIQUID || k == K_GAS) payload = m;
+        lastFan = std::fabs(phys.bodies[fans[0]].fan.strength);
+    }
+    void flipFan() {
+        std::vector<int> fans = selFans();
+        if (fans.empty()) return;
+        pushUndo("fan");
+        for (int id : fans) phys.bodies[id].fan.strength = -phys.bodies[id].fan.strength;
+    }
+    void setFanVacuum(bool v) {
+        fanVacuumDefault = v;
+        std::vector<int> fans = selFans();
+        if (!fans.empty()) pushUndo("fan");
+        for (int id : fans) phys.bodies[id].fan.vacuum = v ? 1 : 0;
+    }
+    void adjustRate(float d) {
+        std::vector<int> em = selEmitters();
+        if (em.empty()) { lastRate = std::clamp(lastRate + d, 5.f, 1000.f); return; }
+        pushUndo("rate");
+        for (int id : em) phys.bodies[id].src.rate = std::clamp(phys.bodies[id].src.rate + d, 5.f, 1000.f);
+        lastRate = phys.bodies[em[0]].src.rate;
+    }
+    void setEmitMaterial(uint8_t m) {
+        payload = m;
+        std::vector<int> em = selEmitters();
+        if (!em.empty()) pushUndo("emits");
+        for (int id : em) phys.bodies[id].src.mat = m;
+    }
+    void setSelectionFace(int f) {
+        std::vector<int> em = selEmitters();
+        for (int id : em) phys.bodies[id].src.face = (uint8_t)f;
     }
 
-    bool helpOn = false;
-    int hoverBtn = -1;
-    int mousePx = 0, mousePy = 0;
-
+    // ---------------------------------------------------------------- toolbar and tool panel
     void buildButtons() {
         auto always = [] { return true; };
-        auto mk = [&](int zone, std::function<std::string()> label, std::string tip, std::function<void()> act,
-                      std::function<bool()> active = nullptr, std::function<bool()> visible = nullptr) -> Button& {
+        auto lit = [](std::string s) { return [s] { return s; }; };
+        auto top = [&](std::function<std::string()> label, std::string tip, std::function<void()> act,
+                       std::function<bool()> active = nullptr) -> Button& {
             Button b;
-            b.zone = zone;
-            b.label = label; b.tip = tip; b.action = act;
+            b.zone = 0; b.label = label; b.tip = tip; b.action = act;
             b.active = active ? active : [] { return false; };
-            b.visible = visible ? visible : always;
             b.enabled = always;
             buttons.push_back(b);
             return buttons.back();
         };
-        auto lit = [](std::string s) { return [s] { return s; }; };
-
-        // ---- toolbar: run control | files | views | help
+        // ---- toolbar: run control | files | undo | views | focus, scenes | help
         {
-            Button& b = mk(0, [this] { return std::string(playing && !paused ? "PLAYING" : "PLAY"); },
-                           "RUN THE SIMULATION (SPACE). YOUR DRAWING IS SNAPSHOT FIRST, SO STOP CAN RESTORE IT",
-                           [this] { play(); }, [this] { return playing && !paused; });
-            b.style = 1; b.minW = 70;
+            Button& b = top([this] { return std::string(playing && !paused ? "PLAYING" : "PLAY"); },
+                            "RUN THE SIMULATION (SPACE). YOUR DRAWING IS SNAPSHOT FIRST, SO STOP CAN RESTORE IT",
+                            [this] { play(); }, [this] { return playing && !paused; });
+            b.style = 1; b.minW = 76;
         }
+        top([this] { return std::string(paused ? "RESUME" : "PAUSE"); }, "FREEZE / RESUME WHILE PLAYING (SPACE)",
+            [this] { togglePause(); }, [this] { return playing && paused; }).enabled = [this] { return playing; };
+        top(lit("STEP"), "ADVANCE ONE FRAME (N)", [this] { stepFrame(); });
         {
-            Button& b = mk(0, [this] { return std::string(paused ? "RESUME" : "PAUSE"); }, "FREEZE / RESUME WHILE PLAYING (SPACE)",
-                           [this] { togglePause(); }, [this] { return playing && paused; });
-            b.enabled = [this] { return playing; };
-        }
-        mk(0, lit("STEP"), "ADVANCE ONE FRAME (N)", [this] { stepFrame(); });
-        {
-            Button& b = mk(0, lit("STOP"), "STOP AND RESTORE THE DRAWING EXACTLY AS IT WAS BEFORE PLAY", [this] { stopPlay(); });
+            Button& b = top(lit("STOP"), "STOP AND RESTORE THE DRAWING EXACTLY AS IT WAS BEFORE PLAY", [this] { stopPlay(); });
             b.style = 2; b.enabled = [this] { return playing; };
         }
-        mk(0, [this] { return std::string(newArmed > 0 ? "SURE?" : "NEW"); }, "CLEAR EVERYTHING (PRESS TWICE) - CTRL+N",
-           [this] { newFile(); }, [this] { return newArmed > 0; }).gap = 10;
-        mk(0, lit("SAVE"), "SAVE TO THE CURRENT FILE (CTRL+S)", [this] { saveQuick(); });
-        mk(0, lit("SAVE AS"), "SAVE UNDER A NEW NAME", [this] { openFileForm(true); }, [this] { return formKind == FK_SAVE; });
-        mk(0, lit("LOAD"), "OPEN A SAVED FILE (CTRL+O)", [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
-        mk(0, lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 10;
-        mk(0, lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
-        mk(0, [this] { return std::string("FOCUS"); },
-           "CAMERA FOLLOWS THE SELECTED BODY (Z): SELECT A VEHICLE, PRESS FOCUS, PLAY. MIDDLE-DRAG OR THE STRIP AT THE BOTTOM PANS",
-           [this] { toggleFocus(); }, [this] { return focusBody >= 0; });
-        mk(0, lit("ELEC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
-        mk(0, [this] { return std::string("SNAP") + (SNAPS[snapIdx] ? " " + std::to_string(SNAPS[snapIdx]) : ""); },
-           "ROUND MOUSE-DRAWN SHAPES TO A GRID OF THIS MANY CELLS", [this] { snapIdx = (snapIdx + 1) % 5; }, [this] { return snapIdx > 0; });
-        mk(0, [this] { return std::string("SPARK ") + (SPARK_RATES[sparkIdx] ? std::to_string(SPARK_RATES[sparkIdx]) + "F" : "OFF"); },
-           "SPARK-PLUG PULSE PERIOD IN FRAMES (HOLD E TO FIRE; , AND . CHANGE IT)",
-           [this] { sparkIdx = (sparkIdx + 1) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; });
-        {
-            Button& b = mk(0, lit("HELP"), "SHORTCUTS AND A QUICK TOUR (F1)", [this] { helpOn = !helpOn; }, [this] { return helpOn; });
-            b.right = true;
-        }
+        top([this] { return std::string(newArmed > 0 ? "SURE?" : "NEW"); }, "CLEAR EVERYTHING (PRESS TWICE) - CTRL+N",
+            [this] { newFile(); }, [this] { return newArmed > 0; }).gap = 14;
+        top(lit("OPEN"), "OPEN A SAVED FILE (CTRL+O)", [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
+        top(lit("SAVE"), "SAVE TO THE CURRENT FILE (CTRL+S)", [this] { saveQuick(); });
+        top(lit("SAVE AS"), "SAVE UNDER A NEW NAME", [this] { openFileForm(true); }, [this] { return formKind == FK_SAVE; });
+        top(lit("UNDO"), "UNDO THE LAST EDIT (CTRL+Z)", [this] { undo(); }).gap = 14;
+        top(lit("REDO"), "REDO (CTRL+Y OR CTRL+SHIFT+Z)", [this] { redo(); });
+        top(lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 14;
+        top(lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH (P)", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
+        top(lit("ELECTRIC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
+        top(lit("FOCUS"), "CAMERA FOLLOWS THE SELECTED BODY (F): SELECT A VEHICLE, PRESS FOCUS, PLAY. MIDDLE-DRAG OR THE STRIP AT THE BOTTOM OF THE VIEW PANS",
+            [this] { toggleFocus(); }, [this] { return focusBody >= 0; }).gap = 14;
+        top(lit("SCENES"), "READY-MADE MACHINES AND TESTS", [this] { scenesOpen = !scenesOpen; }, [this] { return scenesOpen; });
+        { Button& b = top(lit("HELP"), "SHORTCUTS AND A QUICK TOUR (F1)", [this] { helpOn = !helpOn; }, [this] { return helpOn; }); b.right = true; }
 
-        // ---- tab strip
-        static const char* tabTips[TAB_COUNT] = {
-            "POWDERS: LMB PAINTS, RMB ERASES, WHEEL CHANGES BRUSH SIZE", "LIQUIDS AND FUELS", "GASES AND VAPOURS",
-            "METALS (CELLS, AND THE MATERIAL OF BODIES YOU DRAW)", "STRUCTURAL SOLIDS, WAX, TNT",
-            "HEATERS, SPARK PLUGS, SOURCES, BATTERIES, PRIMER",
-            "RIGID BODIES, PIPES AND SELF-REPLENISHING EMITTERS", "JOINTS, MOTORS, SLIDERS AND TEMPORARY BONDS",
-            "SELECT, GROUP, CUT, SCALE AND EDIT BY EXACT VALUES", "READY-MADE MACHINES AND TESTS"};
-        for (int t = 0; t < TAB_COUNT; ++t) {
-            std::string nm = TAB_NAMES[t];
-            Button& b = mk(1, lit(nm), tabTips[t], [this, t] { tab = (Tab)t; }, [this, t] { return tab == t; });
-            b.style = 3;
-            b.accent = t < TAB_MATS ? 0x5a9aff : (t < TAB_SCENE ? 0xffaa46 : 0xbe78ff);
-            if (t == TAB_SHAPES || t == TAB_SCENE) b.gap = 16;
-            b.minW = 70;
-        }
-
-        // ---- material palettes
-        for (int t = 0; t < TAB_MATS; ++t) {
-            int slot = 0;
-            for (int i = 0; i < 18 && (PALETTE[t][i] || (t == TAB_DEVICE && i < 6)); ++i) {
-                uint8_t m = PALETTE[t][i];
-                if (m == M_EMPTY && t != TAB_DEVICE) break;
-                std::string name = m == M_EMPTY ? "ERASER" : MATS[m].name;
-                Button& b = mk(2, lit(name), "", [this, m] { selectMaterial(m); }, [this, m] { return tool == T_MAT && mat == m; },
-                               [this, t] { return tab == t; });
-                b.slot = slot++;
-                b.hasSwatch = true;
-                b.swatch = m == M_EMPTY ? 0xff5050 : MATS[m].color;
-                b.tip = m == M_EMPTY ? "ERASES CELLS UNDER THE BRUSH" : std::string("PAINT ") + MATS[m].name + " (LMB)";
-            }
-            if (t == TAB_DEVICE) {
-                Button& b = mk(2, [this] { return std::string("BATT ") + fmt(world.battV) + "V " + fmt(world.battA) + "A"; },
-                               "SET THE VOLTS AND AMPS STAMPED INTO BATTERY CELLS YOU PAINT NEXT",
-                               [this] { openBatteryForm(); }, [this] { return formKind == FK_BATTERY; }, [this] { return tab == TAB_DEVICE; });
-                b.slot = slot++;
-            }
-        }
-
-        // ---- tool tabs
-        auto toolBtn = [&](Tab t, int slot, const char* name, Tool tl) {
-            Button& b = mk(2, lit(name), TOOL_HINTS[tl], [this, tl] { tool = tl; }, [this, tl] { return tool == tl; },
-                           [this, t] { return tab == t; });
-            b.slot = slot;
+        // ---- tool panel: always visible, grouped
+        const int colW = (LEFT_W - 16 - 4) / 2;
+        int ly = TOP_H + 8, col = 0;
+        auto header = [&](const char* t) {
+            if (col) { ly += 30; col = 0; }
+            Button b;
+            b.zone = 2; b.style = 3; b.label = lit(t);
+            b.r = SDL_Rect{8, ly + 2, LEFT_W - 16, 16};
+            b.enabled = always; b.active = [] { return false; };
+            buttons.push_back(b);
+            ly += 22;
         };
-        auto actBtn = [&](Tab t, int slot, std::function<std::string()> label, const char* tip, std::function<void()> act,
-                          std::function<bool()> active = nullptr) {
-            Button& b = mk(2, label, tip, act, active, [this, t] { return tab == t; });
-            b.slot = slot;
+        auto place = [&](Button& b, bool full) {
+            if (full && col) { ly += 30; col = 0; }
+            b.r = SDL_Rect{8 + (full ? 0 : col * (colW + 4)), ly, full ? LEFT_W - 16 : colW, 26};
+            if (full) ly += 30;
+            else if (++col == 2) { col = 0; ly += 30; }
         };
-        toolBtn(TAB_SHAPES, 0, "BOX", T_BOX);
-        toolBtn(TAB_SHAPES, 1, "CIRCLE", T_CIRCLE);
-        toolBtn(TAB_SHAPES, 2, "WHEEL", T_WHEEL);
-        toolBtn(TAB_SHAPES, 3, "ROCKET", T_ROCKET);
-        toolBtn(TAB_SHAPES, 4, "PIPE", T_PIPE);
-        toolBtn(TAB_SHAPES, 5, "HOSE", T_HOSE);
-        toolBtn(TAB_SHAPES, 6, "EMITTER", T_EMITTER);
-        toolBtn(TAB_SHAPES, 7, "FAN", T_FAN);
-        actBtn(TAB_SHAPES, 10, [this] { return std::string(fanModeLabel()); },
-               "FAN MODE: BLOW DRAWS IN AMBIENT AIR; VACUUM ONLY PULLS THE GAS THAT IS THERE, ACCELERATING IT THROUGH THE FAN (M)", [this] { toggleFanMode(); },
-               [this] { return fanModeVacuum(); });
-        actBtn(TAB_SHAPES, 8, [this] { return std::string(anchored ? "ANCHOR: ON" : "ANCHOR: OFF"); },
-               "ANCHORED SHAPES ARE FIXED IN PLACE (T)", [this] { anchored = !anchored; }, [this] { return anchored; });
-        actBtn(TAB_SHAPES, 9, [this] { return std::string("BODY: ") + MATS[bodyMat].name; },
-               "MATERIAL OF NEW BODIES: DENSITY, FRICTION, CONDUCTIVITY, MELTING POINT (F CYCLES)", [this] { cycleBodyMat(); });
-        toolBtn(TAB_JOINTS, 0, "PIN", T_PIN);
-        toolBtn(TAB_JOINTS, 1, "MOTOR", T_MOTOR);
-        toolBtn(TAB_JOINTS, 2, "AUTOMOTOR", T_AUTOMOTOR);
-        toolBtn(TAB_JOINTS, 3, "ROD", T_ROD);
-        toolBtn(TAB_JOINTS, 4, "SPRING", T_SPRING);
-        toolBtn(TAB_JOINTS, 5, "SLIDER", T_SLIDER);
-        toolBtn(TAB_JOINTS, 6, "BOND", T_BOND);
-        actBtn(TAB_JOINTS, 7, [this] { return std::string(BOND_NAMES[bondType]); },
-               "WHAT THE NEXT BOND IS MADE OF: PARAFFIN / SOLDER / EPOXY / SHEAR PIN", [this] { cycleBond(); });
-        toolBtn(TAB_EDIT, 0, "SELECT", T_SELECT);
-        actBtn(TAB_EDIT, 1, lit("GROUP"), "WELD THE SELECTED BODIES INTO ONE RIGID OBJECT (CTRL+G)", [this] { groupSelection(); });
-        actBtn(TAB_EDIT, 2, lit("UNGROUP"), "SPLIT A GROUP BACK INTO BODIES (CTRL+U)", [this] { ungroupSelection(); });
-        actBtn(TAB_EDIT, 3, lit("CUT"), "SUBTRACT THE LAST-SELECTED BODY FROM THE OTHER SELECTED BODIES", [this] { cutSelection(); });
-        actBtn(TAB_EDIT, 4, lit("SCALE"), "RESIZE THE SELECTION BY A PERCENTAGE",
-               [this] { openScaleForm(); }, [this] { return formKind == FK_SCALE; });
-        actBtn(TAB_EDIT, 5, lit("EXACT"), "TYPE EXACT SIZES, POSITIONS AND ANGLES (ENTER)",
-               [this] { if (formKind == FK_NONE) openForm(); else closeForm(); }, [this] { return formKind != FK_NONE; });
-        toolBtn(TAB_EDIT, 6, "GRAB", T_GRAB);
-        toolBtn(TAB_EDIT, 7, "DELETE", T_DELETE);
-        actBtn(TAB_EDIT, 8, lit("CLEAR CELLS"), "REMOVE ALL SAND, LIQUID, GAS AND SOLID CELLS (C)", [this] { world.clear(); phys.stampBodies(); });
-        actBtn(TAB_EDIT, 9, lit("CLEAR BODIES"), "REMOVE ALL RIGID BODIES AND JOINTS (X)", [this] { clearBodies(); });
+        auto tool_ = [&](const char* name, Tool tl) {
+            Button b;
+            b.zone = 1; b.label = lit(name); b.tip = TOOL_HINTS[tl]; b.action = [this, tl] { tool = tl; };
+            b.active = [this, tl] { return tool == tl; }; b.enabled = always;
+            place(b, false);
+            buttons.push_back(b);
+        };
+        auto act_ = [&](const char* name, std::string tip, std::function<void()> act, std::function<bool()> active = nullptr, bool full = false) {
+            Button b;
+            b.zone = 1; b.label = lit(name); b.tip = tip; b.action = act;
+            b.active = active ? active : [] { return false; }; b.enabled = always;
+            place(b, full);
+            buttons.push_back(b);
+        };
+        header("TOOLS");
+        tool_("SELECT", T_SELECT);
+        tool_("GRAB", T_GRAB);
+        header("SHAPES");
+        tool_("BOX", T_BOX); tool_("CIRCLE", T_CIRCLE); tool_("WHEEL", T_WHEEL); tool_("ROCKET", T_ROCKET);
+        tool_("PIPE", T_PIPE); tool_("HOSE", T_HOSE);
+        header("MACHINES");
+        tool_("FAN", T_FAN); tool_("EMITTER", T_EMITTER);
+        header("JOINTS");
+        tool_("PIN", T_PIN); tool_("MOTOR", T_MOTOR); tool_("SPINNER", T_AUTOMOTOR); tool_("ROD", T_ROD);
+        tool_("SPRING", T_SPRING); tool_("SLIDER", T_SLIDER); tool_("BOND", T_BOND);
+        header("EDIT");
+        tool_("CUT", T_CUT);
+        act_("SCALE", "RESIZE THE SELECTION BY A PERCENTAGE", [this] { openScaleForm(); }, [this] { return formKind == FK_SCALE; });
+        act_("EXACT", "TYPE EXACT SIZES, POSITIONS AND ANGLES (ENTER)", [this] { if (formKind == FK_NONE) openForm(); else closeForm(); }, [this] { return formKind != FK_NONE; });
+        tool_("DELETE", T_DELETE);
+        act_("GROUP", "WELD THE SELECTED BODIES INTO ONE RIGID OBJECT (CTRL+G)", [this] { groupSelection(); });
+        act_("UNGROUP", "SPLIT A GROUP BACK INTO BODIES (CTRL+U)", [this] { ungroupSelection(); });
+        act_("COPY", "COPY THE SELECTED BODIES (CTRL+C)", [this] { copySelection(); });
+        act_("PASTE", "PASTE AT THE CURSOR (CTRL+V)", [this] { pasteClipboard(); });
+        act_("SUBTRACT", "CUT THE LAST-CLICKED (RED) BODY OUT OF THE OTHER SELECTED BODIES", [this] { cutSelection(); }, nullptr, true);
+        header("PARTICLES");
+        act_("PAINT", "PAINT SAND, LIQUIDS, GASES AND SOLIDS AS CELLS (RMB ERASES)", [this] { if (mat == M_EMPTY) mat = M_SAND; tool = T_MAT; },
+             [this] { return tool == T_MAT && mat != M_EMPTY; });
+        act_("ERASER", "ERASE PARTICLES UNDER THE BRUSH", [this] { tool = T_MAT; mat = M_EMPTY; }, [this] { return tool == T_MAT && mat == M_EMPTY; });
+        header("CLEAR");
+        act_("WIPE PARTICLES", "REMOVE ALL SAND, LIQUID, GAS AND SOLID CELLS (CTRL+Z BRINGS THEM BACK)",
+             [this] { pushUndo(); world.clear(); phys.stampBodies(); }, nullptr, true);
+        act_("WIPE BODIES", "REMOVE ALL RIGID BODIES AND JOINTS (CTRL+Z BRINGS THEM BACK)", [this] { pushUndo(); clearBodies(); }, nullptr, true);
+    }
 
-        // ---- scenes
-        struct SceneDef { const char* name; void (Game::*fn)(); };
+    // ---------------------------------------------------------------- the properties panel (rebuilt each frame)
+    void buildRightPanel() {
+        rp.clear();
+        const int x0 = SIM_X + SIM_W + 12, w = RIGHT_W - 24;
+        int y = TOP_H + 10;
+        auto header = [&](const std::string& t) {
+            PItem it; it.kind = 0; it.text = t; it.r = SDL_Rect{x0, y, w, 16}; rp.push_back(it); y += 22;
+        };
+        auto line = [&](const std::string& t, uint32_t color = 0xb0bcd4) {
+            PItem it; it.kind = 3; it.text = t; it.color = color; it.r = SDL_Rect{x0, y, w, 14}; rp.push_back(it); y += 15;
+        };
+        auto gap = [&](int g) { y += g; };
+        auto button = [&](const std::string& t, bool active, std::function<void()> act, const std::string& tip, int x, int bw, bool enabled = true) {
+            PItem it; it.kind = 2; it.text = t; it.active = active; it.act = act; it.tip = tip; it.enabled = enabled;
+            it.r = SDL_Rect{x, y, bw, 26}; rp.push_back(it);
+        };
+        auto row2 = [&](const std::string& ta, bool aa, std::function<void()> fa, const std::string& tipA,
+                        const std::string& tb, bool ab, std::function<void()> fb, const std::string& tipB) {
+            int bw = (w - 4) / 2;
+            button(ta, aa, fa, tipA, x0, bw);
+            button(tb, ab, fb, tipB, x0 + bw + 4, bw);
+            y += 30;
+        };
+        auto toggle = [&](const std::string& t, bool on, std::function<void()> act, const std::string& tip) {
+            button(t, on, act, tip, x0, w);
+            y += 30;
+        };
+        auto stepper = [&](const std::string& label, const std::string& value, std::function<void()> minus, std::function<void()> plus, const std::string& tip) {
+            line(label, 0x8fa0c0);
+            PItem m; m.kind = 2; m.text = "-"; m.act = minus; m.tip = tip; m.r = SDL_Rect{x0, y, 34, 26}; rp.push_back(m);
+            PItem v; v.kind = 4; v.text = value; v.r = SDL_Rect{x0 + 38, y, w - 76, 26}; rp.push_back(v);
+            PItem p; p.kind = 2; p.text = "+"; p.act = plus; p.tip = tip; p.r = SDL_Rect{x0 + w - 34, y, 34, 26}; rp.push_back(p);
+            y += 32;
+        };
+        auto swatches = [&](const std::vector<uint8_t>& list, std::function<bool(uint8_t)> active, std::function<void(uint8_t)> click, int sz = 34) {
+            int per = std::max(1, (w + 3) / (sz + 3));
+            for (size_t i = 0; i < list.size(); ++i) {
+                uint8_t m = list[i];
+                PItem it; it.kind = 1; it.color = m == M_EMPTY ? 0xff5050 : MATS[m].color;
+                it.text = m == M_EMPTY ? "ERASER" : MATS[m].name;
+                it.active = active(m);
+                it.act = [click, m] { click(m); };
+                it.tip = std::string(it.text) + (m == M_EMPTY ? ": ERASES PARTICLES" : "");
+                it.r = SDL_Rect{x0 + (int)(i % per) * (sz + 3), y + (int)(i / per) * (sz + 3), sz, sz};
+                rp.push_back(it);
+            }
+            y += (int)((list.size() + per - 1) / per) * (sz + 3) + 2;
+        };
+        auto bodyInfo = [&](uint8_t m) {
+            const MatInfo& mi = MATS[m];
+            line(std::string(mi.name) + "  DENSITY " + fmt(mi.density), 0xe8eefc);
+            std::string melt = mi.hiT < 1e8f ? "MELTS " + fmt(mi.hiT) + "C" : "DOES NOT MELT";
+            line(melt + (mi.elec > 0.f ? "  CONDUCTS" : ""), 0x8fa0c0);
+        };
+
+        pruneSelection();
+        const bool haveSel = primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive;
+        const Body* pb = haveSel ? &phys.bodies[primary] : nullptr;
+        const bool creating = tool == T_BOX || tool == T_CIRCLE || tool == T_WHEEL || tool == T_ROCKET || tool == T_PIPE || tool == T_HOSE ||
+                              tool == T_FAN || tool == T_EMITTER;
+        const bool editing = tool == T_SELECT && haveSel;
+        const bool fanCtx = tool == T_FAN || (editing && pb->fan.strength != 0.f);
+        const bool emitCtx = tool == T_EMITTER || (editing && pb->src.on);
+
+        if (tool == T_MAT) {
+            header(mat == M_EMPTY ? "ERASER" : "PAINT PARTICLES");
+            for (auto& g : PAINT_GROUPS) {
+                if (std::string(g.name) == "DEVICES") header("DEVICES");
+                else line(g.name, 0x8fa0c0);
+                swatches(g.mats, [this](uint8_t m) { return mat == m; }, [this](uint8_t m) { selectMaterial(m); }, 30);
+            }
+            line(std::string("SELECTED: ") + (mat == M_EMPTY ? "ERASER" : MATS[mat].name), 0xe8eefc);
+            gap(4);
+            stepper("BRUSH SIZE", std::to_string(brush), [this] { brush = std::max(1, brush - 1); }, [this] { brush = std::min(24, brush + 1); }, "WHEEL ALSO CHANGES THE BRUSH SIZE");
+            if (mat == M_BATT_POS || mat == M_BATT_NEG)
+                button("BATTERY " + fmt(world.battV) + "V " + fmt(world.battA) + "A", formKind == FK_BATTERY, [this] { openBatteryForm(); },
+                       "SET THE VOLTS AND AMPS STAMPED INTO BATTERY CELLS YOU PAINT NEXT", x0, w), y += 30;
+        } else if (tool == T_CUT) {
+            header("CUT TOOL");
+            line("DRAG A SHAPE OVER BODIES:", 0xe8eefc);
+            line("THE AREA UNDER IT IS CUT OUT", 0xb0bcd4);
+            line("OF EVERY BODY IT TOUCHES.", 0xb0bcd4);
+            gap(6);
+            row2("BOX", !cutCircle, [this] { cutCircle = false; }, "CUT A RECTANGLE (DRAG CORNER TO CORNER)",
+                 "CIRCLE", cutCircle, [this] { cutCircle = true; }, "CUT A CIRCLE (DRAG FROM THE CENTRE OUT)");
+            gap(8);
+            line("TO CUT ONE BODY WITH ANOTHER:", 0xe8eefc);
+            line("SELECT BOTH; THE LAST CLICKED", 0xb0bcd4);
+            line("(RED) IS CUT OUT OF THE REST.", 0xb0bcd4);
+            line("THEN PRESS SUBTRACT.", 0xb0bcd4);
+            gap(4);
+            toggle("KEEP THE CUTTER", keepCutter, [this] { keepCutter = !keepCutter; },
+                   "KEEP THE RED BODY AFTER SUBTRACT, FOR EXAMPLE TO SCALE IT INTO A PLUG");
+            toggle("SUBTRACT SELECTION NOW", false, [this] { cutSelection(); }, "CUT THE LAST-CLICKED (RED) BODY OUT OF THE OTHER SELECTED BODIES");
+        } else if (tool == T_BOND) {
+            header("BOND: A TEMPORARY WELD");
+            line("CLICK WHERE TWO BODIES OVERLAP.", 0xb0bcd4);
+            line("IT LETS GO WHEN TOO HOT OR TOO", 0xb0bcd4);
+            line("STRONGLY LOADED.", 0xb0bcd4);
+            gap(4);
+            for (int i = 0; i < 4; i += 2)
+                row2(BOND_NAMES[i], bondType == i, [this, i] { bondType = i; bondT = BOND_TEMP[i]; bondF = BOND_FORCE[i]; }, "BOND MATERIAL",
+                     BOND_NAMES[i + 1], bondType == i + 1, [this, i] { bondType = i + 1; bondT = BOND_TEMP[i + 1]; bondF = BOND_FORCE[i + 1]; }, "BOND MATERIAL");
+            gap(4);
+            stepper("MELTS AT (C)", fmt(bondT), [this] { bondT = std::max(-50.f, bondT - 5.f); }, [this] { bondT = std::min(5000.f, bondT + 5.f); }, "TEMPERATURE AT WHICH THE BOND GIVES WAY");
+            stepper("BREAKS AT (KN)", fmt(bondF / 1000.f), [this] { bondF = std::max(1000.f, bondF - 50000.f); }, [this] { bondF = std::min(1e8f, bondF + 50000.f); }, "LOAD AT WHICH THE BOND GIVES WAY");
+        } else if (tool == T_PIN || tool == T_MOTOR || tool == T_AUTOMOTOR || tool == T_ROD || tool == T_SPRING || tool == T_SLIDER || tool == T_GRAB || tool == T_DELETE) {
+            header(TOOL_NAMES[tool]);
+            // plain-language help for the tool, wrapped to the panel
+            std::string h = TOOL_HINTS[tool];
+            size_t pos = 0;
+            while (pos < h.size()) {
+                size_t len = std::min<size_t>(34, h.size() - pos);
+                if (pos + len < h.size()) { size_t sp = h.rfind(' ', pos + len); if (sp != std::string::npos && sp > pos) len = sp - pos; }
+                line(h.substr(pos, len), 0xb0bcd4);
+                pos += len;
+                while (pos < h.size() && h[pos] == ' ') ++pos;
+            }
+        } else {
+            // body tools and selection: what the bodies are made of, and their machine settings
+            if (editing) {
+                header("SELECTED");
+                std::string kind = pb->shape == SHAPE_BOX ? "BOX " + fmt(pb->half.x * 2) + " X " + fmt(pb->half.y * 2) : "CIRCLE R " + fmt(pb->radius);
+                line(kind, 0xe8eefc);
+                line(std::to_string(sel.size()) + (sel.size() == 1 ? " BODY" : " BODIES") + (pb->group >= 0 ? ", GROUPED" : "") + ", " + fmt(pb->temp) + "C", 0x8fa0c0);
+                if (sel.size() >= 2) line("RED OUTLINE = LAST CLICKED", 0xff8c8c);
+                gap(4);
+            } else if (tool == T_SELECT) {
+                header("SELECT");
+                line("CLICK A BODY. CLICK AGAIN TO", 0xb0bcd4);
+                line("REACH THE ONE UNDER IT.", 0xb0bcd4);
+                line("DRAG A SELECTED BODY TO MOVE.", 0xb0bcd4);
+                line("DRAG EMPTY SPACE TO SELECT", 0xb0bcd4);
+                line("SEVERAL. CTRL+C / CTRL+V COPY.", 0xb0bcd4);
+                gap(8);
+            } else if (creating) {
+                header(std::string("NEW ") + TOOL_NAMES[tool]);
+            }
+            if (fanCtx) {
+                header("FAN");
+                const Body* f = nullptr;
+                std::vector<int> fans = selFans();
+                if (!fans.empty()) f = &phys.bodies[fans[0]];
+                float st = f ? f->fan.strength : lastFan;
+                stepper("AIRFLOW STRENGTH", fmt(std::fabs(st)) + (st < 0 ? "  (REVERSED)" : ""), [this] { adjustFan(-10.f); }, [this] { adjustFan(10.f); },
+                        "CELLS PER SECOND THE FAN MOVES GAS (+ AND - KEYS)");
+                bool vac = f ? f->fan.vacuum != 0 : fanVacuumDefault;
+                row2("BLOW", !vac, [this] { setFanVacuum(false); }, "DRAWS IN AMBIENT AIR AT THE BACK AND PUSHES IT OUT THE FRONT",
+                     "VACUUM", vac, [this] { setFanVacuum(true); }, "ONLY PULLS THE GAS ON THE INTAKE SIDE, ACCELERATING IT THROUGH THE FAN");
+                button("FLIP DIRECTION", false, [this] { flipFan(); }, "REVERSE THE AIRFLOW (BACKSLASH)", x0, w, !fans.empty()); y += 30;
+                gap(4);
+            }
+            if (emitCtx) {
+                header("EMITTER");
+                std::vector<int> em = selEmitters();
+                uint8_t curMat = em.empty() ? payload : phys.bodies[em[0]].src.mat;
+                line("ENDLESSLY MAKES THIS MATERIAL:", 0xb0bcd4);
+                swatches(std::vector<uint8_t>(EMIT_MATS, EMIT_MATS + sizeof EMIT_MATS), [curMat](uint8_t m) { return m == curMat; },
+                         [this](uint8_t m) { setEmitMaterial(m); }, 30);
+                line(std::string("EMITS ") + MATS[curMat].name, 0xe8eefc);
+                float rate = em.empty() ? lastRate : phys.bodies[em[0]].src.rate;
+                stepper("RATE (CELLS PER SECOND)", fmt(rate), [this] { adjustRate(-5.f); }, [this] { adjustRate(5.f); }, "HOW FAST IT PRODUCES THE MATERIAL");
+                gap(4);
+            }
+            if (!emitCtx && (creating || editing)) {
+                header("MATERIAL");
+                uint8_t cur = editing ? pb->mat : bodyMat;
+                swatches(std::vector<uint8_t>(BODY_MATS, BODY_MATS + sizeof BODY_MATS), [cur](uint8_t m) { return m == cur; },
+                         [this](uint8_t m) { setBodyMaterial(m); }, 34);
+                bodyInfo(cur);
+                gap(4);
+            }
+            if (creating || editing) {
+                bool fixed = editing ? pb->isStatic : anchored;
+                toggle("FIXED IN PLACE", fixed, [this, fixed] { setFixed(!fixed); },
+                       "A FIXED BODY STAYS WHERE IT IS: WALLS, CYLINDER BLOCKS, MOUNTS (T)");
+            }
+            if (tool == T_PIPE || tool == T_HOSE) {
+                stepper("DIAMETER (CELLS)", fmt(pipeD), [this] { pipeD = std::max(3.f, pipeD - 1.f); pipeWall = std::min(pipeWall, pipeD * 0.5f); },
+                        [this] { pipeD = std::min(60.f, pipeD + 1.f); }, "OUTER DIAMETER (MOUSE WHEEL ALSO CHANGES IT)");
+                stepper("WALL (CELLS)", fmt(pipeWall), [this] { pipeWall = std::max(0.5f, pipeWall - 0.5f); },
+                        [this] { pipeWall = std::min(pipeD * 0.5f, pipeWall + 0.5f); }, "WALL THICKNESS");
+            }
+        }
+
+        // settings that apply to everything, pinned to the bottom of the panel
+        int by = WIN_H - BOT_H - 118;
+        y = std::max(y + 6, by);
+        header("SETTINGS");
+        stepper("GRID SNAP (CELLS)", SNAPS[snapIdx] ? std::to_string(SNAPS[snapIdx]) : "OFF", [this] { snapIdx = (snapIdx + 4) % 5; }, [this] { snapIdx = (snapIdx + 1) % 5; },
+                "ROUND MOUSE-DRAWN SHAPES AND DRAGGED BODIES TO A GRID");
+        stepper("SPARK PLUG PERIOD", SPARK_RATES[sparkIdx] ? std::to_string(SPARK_RATES[sparkIdx]) + " FRAMES" : "OFF",
+                [this] { sparkIdx = (sparkIdx + 6) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; },
+                [this] { sparkIdx = (sparkIdx + 1) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; }, "HOW OFTEN SPARK PLUGS FIRE (HOLD E TO FIRE ONCE)");
+    }
+
+    // The scene picker: a card over the simulation view.
+    void buildModal() {
+        modal.clear();
+        if (!scenesOpen) return;
+        struct SceneDef { const char* name; void (Game::*fn)(); const char* tip; };
         static const SceneDef scenes[] = {
-            {"DEMO", &Game::buildDemo}, {"STEAM ENGINE", &Game::buildSteamEngine}, {"GAS ENGINE", &Game::buildGasEngine},
-            {"HYDRAULICS", &Game::buildHydraulics}, {"CONDUCTION", &Game::buildConduction}, {"FUELS", &Game::buildFuels},
-            {"DIESEL ENGINE", &Game::buildDieselEngine}, {"ELECTRIC", &Game::buildElectricTest},
-            {"BONDS", &Game::buildBondTest}, {"PRIMER", &Game::buildPrimerTest}, {"FANS", &Game::buildFanTest},
-            {"ROAD + FOCUS", &Game::buildRoadTest},
+            {"DEMO", &Game::buildDemo, "A LITTLE OF EVERYTHING"},
+            {"STEAM ENGINE", &Game::buildSteamEngine, "BOILER, VALVE, PISTON AND FLYWHEEL"},
+            {"GAS ENGINE", &Game::buildGasEngine, "SPARK-IGNITED GASOLINE VAPOUR ENGINE"},
+            {"DIESEL ENGINE", &Game::buildDieselEngine, "GLOW-PLUG DIESEL ENGINE"},
+            {"HYDRAULICS", &Game::buildHydraulics, "MASTER AND SLAVE CYLINDERS"},
+            {"CONDUCTION", &Game::buildConduction, "HEAT FLOW THROUGH DIFFERENT MATERIALS"},
+            {"FUELS", &Game::buildFuels, "THE LIQUID FUELS SIDE BY SIDE"},
+            {"ELECTRIC", &Game::buildElectricTest, "BATTERIES, FILAMENTS, FUSES AND A SPARK GAP"},
+            {"BONDS", &Game::buildBondTest, "WAX AND SHEAR-PIN BONDS"},
+            {"PRIMER", &Game::buildPrimerTest, "A FIRING PIN STRIKES A PRIMER"},
+            {"FANS", &Game::buildFanTest, "BLOWERS, A CLOSED DUCT AND A VACUUM FAN"},
+            {"ROAD + FOCUS", &Game::buildRoadTest, "A FAN-DRIVEN CAR AND THE FOLLOWING CAMERA"},
         };
-        for (int i = 0; i < 12; ++i) {
+        const int n = 12, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
+        int cw = cols * bw + (cols + 1) * gapx, ch = 70 + ((n + cols - 1) / cols) * (bh + gapy) + 16;
+        SDL_Rect card{(SIM_W - cw) / 2, (SIM_H - ch) / 2, cw, ch};
+        PItem bg; bg.kind = 5; bg.r = card; modal.push_back(bg);
+        PItem title; title.kind = 3; title.text = "LOAD A SCENE (REPLACES THE DRAWING - CTRL+Z BRINGS IT BACK)"; title.color = 0xffd27a; title.r = SDL_Rect{card.x + 14, card.y + 14, cw - 28, 14}; modal.push_back(title);
+        for (int i = 0; i < n; ++i) {
+            PItem b; b.kind = 2; b.text = scenes[i].name; b.tip = scenes[i].tip;
             auto fn = scenes[i].fn;
-            Button& b = mk(2, lit(scenes[i].name), "LOAD THIS EXAMPLE (REPLACES THE CURRENT DRAWING), THEN PRESS PLAY",
-                           [this, fn] { (this->*fn)(); currentFile.clear(); }, nullptr, [this] { return tab == TAB_SCENE; });
-            b.slot = i;
+            b.act = [this, fn] { scenesOpen = false; (this->*fn)(); currentFile.clear(); };
+            b.r = SDL_Rect{card.x + gapx + (i % cols) * (bw + gapx), card.y + 50 + (i / cols) * (bh + gapy), bw, bh};
+            modal.push_back(b);
         }
     }
 
-    // Flow-lay out the toolbar and tab strip from the current labels, grid-lay out the tab content, find the hover.
+    // Flow-lay out the toolbar from the current labels, rebuild the dynamic panels and find what the pointer is over.
     void layoutButtons() {
-        const int y0 = SIM_H + PAD, y1 = y0 + TB_H + 6, y2 = y1 + TAB_H + 6;
-        const int bw = (WIN_W - 2 * PAD - (COLS - 1) * BTN_GAP) / COLS;
-        int x0 = PAD, x1 = PAD, xr0 = WIN_W - PAD;
-        hoverBtn = -1;
+        int x0 = 10, xr0 = WIN_W - 10;
+        const int y0 = (TOP_H - 30) / 2;
+        hoverBtn = -1; hoverItem = -1;
         for (size_t i = 0; i < buttons.size(); ++i) {
             Button& b = buttons[i];
-            if (!b.visible()) continue;
-            int w = std::max(b.minW, font::textWidth(b.label(), 2) + (b.zone == 0 ? 12 : 16));
             if (b.zone == 0) {
-                if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, TB_H}; xr0 -= BTN_GAP; }
-                else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, TB_H}; x0 += w + BTN_GAP; }
-            } else if (b.zone == 1) {
-                x1 += b.gap; b.r = SDL_Rect{x1, y1, w, TAB_H}; x1 += w + BTN_GAP;
-            } else {
-                b.r = SDL_Rect{PAD + (b.slot % COLS) * (bw + BTN_GAP), y2 + (b.slot / COLS) * (BTN_H + BTN_GAP), bw, BTN_H};
+                int w = std::max(b.minW, font::textWidth(b.label(), 2) + 20);
+                if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, 30}; xr0 -= 4; }
+                else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, 30}; x0 += w + 4; }
             }
-            if (mousePx >= b.r.x && mousePx < b.r.x + b.r.w && mousePy >= b.r.y && mousePy < b.r.y + b.r.h) hoverBtn = (int)i;
+            if (b.zone != 2 && mousePx >= b.r.x && mousePx < b.r.x + b.r.w && mousePy >= b.r.y && mousePy < b.r.y + b.r.h) hoverBtn = (int)i;
+        }
+        buildRightPanel();
+        buildModal();
+        for (size_t i = 0; i < rp.size(); ++i) {
+            const PItem& it = rp[i];
+            if ((it.kind == 1 || it.kind == 2) && mousePx >= it.r.x && mousePx < it.r.x + it.r.w && mousePy >= it.r.y && mousePy < it.r.y + it.r.h) hoverItem = (int)i;
         }
     }
 
@@ -434,6 +692,7 @@ struct Game {
     }
 
     void resetWorld() {
+        pushUndo();
         clearBodies();
         world.clear();
         labels.clear();
@@ -794,7 +1053,7 @@ struct Game {
         return Vec2(std::round(p.x / g) * g, std::round(p.y / g) * g);
     }
     bool shapeTool(Tool t) const { return t == T_BOX || t == T_CIRCLE || t == T_WHEEL || t == T_ROCKET || t == T_PIPE || t == T_HOSE || t == T_EMITTER || t == T_FAN; }
-    Vec2 smouse() const { return shapeTool(tool) ? snap(mouse) : mouse; }
+    Vec2 smouse() const { return (shapeTool(tool) || tool == T_CUT) ? snap(mouse) : mouse; }
 
     static std::string fmt(float v) {
         char b[32];
@@ -841,6 +1100,7 @@ struct Game {
     void groupSelection() {
         pruneSelection();
         if (sel.size() < 2) { formMsg = "SELECT 2+ BODIES FIRST"; return; }
+        pushUndo();
         int g = phys.groupBodies(sel);
         sel = phys.groupMembers(g);
         partMode = false;
@@ -852,6 +1112,7 @@ struct Game {
         int n = 0;
         std::vector<int> gs;
         for (int id : sel) { int g = phys.bodies[id].group; if (g >= 0 && std::find(gs.begin(), gs.end(), g) == gs.end()) gs.push_back(g); }
+        if (!gs.empty()) pushUndo();
         for (int g : gs) { phys.ungroup(g); ++n; }
         partMode = false;
         formMsg = n ? "UNGROUPED" : "NOTHING GROUPED";
@@ -916,6 +1177,7 @@ struct Game {
 
     void applyForm() {
         pruneSelection();
+        if (formKind != FK_SAVE && formKind != FK_LOAD) pushUndo("form");
         switch (formKind) {
             case FK_BOX: {
                 lastW = std::max(1.f, fv(2)); lastH = std::max(1.f, fv(3));
@@ -1159,6 +1421,7 @@ struct Game {
         if (!f) return false;
         std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         playing = false; paused = false;
+        pushUndo();
         if (!restoreState(buf)) return false;
         clearSelection();
         focusBody = -1;
@@ -1208,27 +1471,30 @@ struct Game {
         formMsg = "";
     }
 
-    // Boolean subtract. The last-clicked (white-outlined) body is the cutter; every other selected body is cut by it.
+    // Boolean subtract with bodies you have selected: the primary (last-clicked, outlined in red) is cut out of the others.
     void cutSelection() {
         pruneSelection();
-        if (sel.size() < 2 || primary < 0) { notify("SELECT THE TARGET(S), THEN CLICK THE CUTTER LAST"); return; }
+        if (sel.size() < 2 || primary < 0) {
+            notify("SELECT 2+ BODIES: THE LAST ONE CLICKED (RED) IS CUT OUT OF THE OTHERS. OR USE THE CUT TOOL: DRAG A BOX/CIRCLE OVER THE BODY");
+            return;
+        }
         std::vector<int> cutters;
         const Body& pb = phys.bodies[primary];
         if (pb.group >= 0 && !partMode) cutters = phys.groupMembers(pb.group); else cutters = {primary};
-        int cutN = 0, goneN = 0, pieces = 0, skipped = 0;
+        pushUndo();
+        int cutN = 0, pieces = 0;
         for (int t : std::vector<int>(sel)) {
             if (std::find(cutters.begin(), cutters.end(), t) != cutters.end()) continue;
             int r = phys.cutBody(t, cutters);
-            if (r < 0) { ++skipped; continue; }
+            if (r < 0) continue;
             ++cutN; pieces += r;
-            if (r == 0) ++goneN;
         }
-        sel = cutters;
+        if (cutN && !keepCutter) for (int c : cutters) phys.removeBody(c);
+        clearSelection();
         phys.stampBodies();
-        if (cutN) notify("CUT " + std::to_string(cutN) + " BODIES INTO " + std::to_string(pieces) + " PIECES. CUTTER KEPT: DELETE OR SCALE IT");
-        else notify("NOTHING CUT (NO OVERLAP, OR WHEEL/ROCKET/EMITTER)");
-        (void)goneN; (void)skipped;
-        if (formKind >= FK_EDIT_BOX) openForm();
+        if (cutN) notify("CUT " + std::to_string(cutN) + " BODIES INTO " + std::to_string(pieces) + " PIECES" + (keepCutter ? " (CUTTER KEPT)" : "") + ". CTRL+Z UNDOES");
+        else notify("NOTHING CUT: THE RED BODY MUST OVERLAP THE OTHERS (WHEELS, ROCKETS, FANS AND EMITTERS CAN'T BE CUT)");
+        if (formKind >= FK_EDIT_BOX) closeForm();
     }
     int autoSegs(Vec2 a, Vec2 b) const { return std::clamp((int)std::ceil(length(b - a) / std::max(4.f, pipeD * 1.2f)), 2, 60); }
 
@@ -1499,7 +1765,214 @@ struct Game {
     }
 
     // ---------------------------------------------------------------- input
-    Vec2 toWorld(int mx, int my) const { return Vec2((float)mx / S + (float)camX, (float)my / S); }
+    // window pixel -> world cell
+    Vec2 toWorld(int mx, int my) const { return Vec2((float)(mx - SIM_X) / S + (float)camX, (float)(my - SIM_Y) / S); }
+    static bool inSimPx(int x, int y) { return x >= SIM_X && x < SIM_X + SIM_W && y >= SIM_Y && y < SIM_Y + SIM_H; }
+
+    // ---------------------------------------------------------------- undo / redo
+    static std::vector<uint8_t> packState(const std::vector<uint8_t>& in) {
+        // run-length coding over 16-byte records: a mostly empty world collapses to almost nothing
+        std::vector<uint8_t> out;
+        Writer w{out};
+        w.pod((uint32_t)in.size());
+        size_t n = in.size(), i = 0;
+        while (i < n) {
+            size_t rec = std::min<size_t>(16, n - i);
+            uint32_t run = 1;
+            if (rec == 16)
+                while (i + 16 * (size_t)(run + 1) <= n && run < 0xffffff && std::memcmp(&in[i], &in[i + 16 * (size_t)run], 16) == 0) ++run;
+            w.pod(run);
+            w.pod((uint8_t)rec);
+            out.insert(out.end(), in.begin() + (long)i, in.begin() + (long)(i + rec));
+            i += rec * run;
+        }
+        return out;
+    }
+    static std::vector<uint8_t> unpackState(const std::vector<uint8_t>& in) {
+        Reader r(in);
+        uint32_t n = r.pod<uint32_t>();
+        std::vector<uint8_t> out;
+        out.reserve(n);
+        while (r.ok && out.size() < n) {
+            uint32_t run = r.pod<uint32_t>();
+            uint8_t rec = r.pod<uint8_t>();
+            if (!r.ok || rec > 16 || (size_t)(r.end - r.p) < rec) break;
+            for (uint32_t k = 0; k < run; ++k) out.insert(out.end(), r.p, r.p + rec);
+            r.p += rec;
+        }
+        return out;
+    }
+    // Remember the drawing as it is NOW, just before an edit changes it. A burst of the same kind of edit (dragging a
+    // stepper, painting strokes) shares one undo step.
+    void pushUndo(const char* key = nullptr) {
+        if (playing) return;
+        Uint32 now = SDL_GetTicks();
+        if (key && lastUndoKey == key && now - lastUndoTick < 1500) { lastUndoTick = now; return; }
+        std::vector<uint8_t> raw;
+        captureState(raw);
+        undoStack.push_back(packState(raw));
+        undoBytes += undoStack.back().size();
+        while (!undoStack.empty() && (undoStack.size() > 60 || undoBytes > (size_t)120 << 20)) {
+            undoBytes -= undoStack.front().size();
+            undoStack.erase(undoStack.begin());
+        }
+        redoStack.clear();
+        lastUndoKey = key ? key : "";
+        lastUndoTick = now;
+    }
+    void undo() {
+        if (playing) { notify("UNDO WORKS IN EDIT MODE - PRESS STOP FIRST (STOP RESTORES THE DRAWING)"); return; }
+        if (undoStack.empty()) { notify("NOTHING TO UNDO"); return; }
+        std::vector<uint8_t> raw;
+        captureState(raw);
+        redoStack.push_back(packState(raw));
+        std::vector<uint8_t> prev = unpackState(undoStack.back());
+        undoBytes -= undoStack.back().size();
+        undoStack.pop_back();
+        if (!restoreState(prev)) { notify("UNDO FAILED"); return; }
+        lastUndoKey.clear();
+        notify("UNDO (CTRL+Y REDOES)");
+    }
+    void redo() {
+        if (playing) { notify("REDO WORKS IN EDIT MODE"); return; }
+        if (redoStack.empty()) { notify("NOTHING TO REDO"); return; }
+        std::vector<uint8_t> raw;
+        captureState(raw);
+        undoStack.push_back(packState(raw));
+        undoBytes += undoStack.back().size();
+        std::vector<uint8_t> next = unpackState(redoStack.back());
+        redoStack.pop_back();
+        if (!restoreState(next)) { notify("REDO FAILED"); return; }
+        lastUndoKey.clear();
+        notify("REDO");
+    }
+
+    // ---------------------------------------------------------------- copy / paste
+    void copySelection() {
+        pruneSelection();
+        if (sel.empty()) { notify("SELECT BODIES FIRST, THEN CTRL+C"); return; }
+        std::vector<int> ids = sel;
+        std::sort(ids.begin(), ids.end());
+        std::vector<int> index(phys.bodies.size(), -1);
+        clip = Clip{};
+        float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+        for (int id : ids) {
+            index[id] = (int)clip.bodies.size();
+            clip.bodies.push_back(phys.bodies[id]);
+            const Body& b = phys.bodies[id];
+            x0 = std::min(x0, b.pos.x - b.bound); x1 = std::max(x1, b.pos.x + b.bound);
+            y0 = std::min(y0, b.pos.y - b.bound); y1 = std::max(y1, b.pos.y + b.bound);
+        }
+        clip.center = Vec2((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+        for (auto& j : phys.joints) {
+            if (!j.alive || j.group >= 0 || j.type == J_MOUSE || j.a < 0 || j.b < 0 || index[j.a] < 0 || index[j.b] < 0) continue;
+            Joint c = j;
+            c.a = index[j.a]; c.b = index[j.b];
+            clip.joints.push_back(c);
+        }
+        notify("COPIED " + std::to_string(clip.bodies.size()) + " BODIES (CTRL+V PASTES AT THE CURSOR)");
+    }
+    void pasteClipboard() {
+        if (clip.bodies.empty()) { notify("NOTHING COPIED YET (SELECT, THEN CTRL+C)"); return; }
+        pushUndo();
+        Vec2 target = inSim ? snap(mouse) : Vec2((float)camX + VIEW_W * 0.5f, World::H * 0.4f);
+        Vec2 delta = target - clip.center;
+        std::vector<int> ids;
+        std::vector<std::pair<int, int>> groupMap, bondMap;
+        auto mapped = [](std::vector<std::pair<int, int>>& m, int old, int fresh) {
+            for (auto& p : m) if (p.first == old) return p.second;
+            m.push_back({old, fresh});
+            return fresh;
+        };
+        for (const Body& src : clip.bodies) {
+            Body b = src;
+            b.pos += delta;
+            int id = phys.addBodyCopy(b);
+            if (src.group >= 0) {
+                int g = -1;
+                for (auto& p : groupMap) if (p.first == src.group) g = p.second;
+                if (g < 0) { g = phys.newGroupId(); groupMap.push_back({src.group, g}); }
+                phys.bodies[id].group = g;
+            }
+            ids.push_back(id);
+        }
+        for (const Joint& src : clip.joints) {
+            Joint j = src;
+            j.a = ids[src.a]; j.b = ids[src.b];
+            if (j.bondId >= 0) {
+                int fresh = -1;
+                for (auto& p : bondMap) if (p.first == j.bondId) fresh = p.second;
+                if (fresh < 0) { fresh = phys.newBondId(); bondMap.push_back({j.bondId, fresh}); }
+                j.bondId = fresh;
+            }
+            phys.addJointCopy(j);
+        }
+        for (auto& p : groupMap) phys.rebuildGroup(p.second);
+        (void)mapped;
+        sel = ids; primary = ids[0]; partMode = false;
+        phys.stampBodies();
+        notify("PASTED " + std::to_string(ids.size()) + " BODIES - DRAG THEM INTO PLACE");
+    }
+    void selectAll() {
+        sel.clear();
+        for (auto& b : phys.bodies) if (b.alive) sel.push_back(b.id);
+        primary = sel.empty() ? -1 : sel[0];
+        partMode = false;
+        notify("SELECTED " + std::to_string(sel.size()) + " BODIES");
+    }
+
+    // ---------------------------------------------------------------- picking, moving, cutting
+    // Clicking the same spot again steps down through the bodies stacked under the cursor.
+    int pickCycling(Vec2 p) {
+        std::vector<int> ids = phys.bodiesAt(p);   // ascending: the last one is on top
+        if (ids.empty()) return -1;
+        Uint32 now = SDL_GetTicks();
+        bool same = length(p - lastClickPos) < 2.f && ids.size() == lastClickCount && now - lastClickTick < 2500;
+        cycleIdx = same ? (cycleIdx + (int)ids.size() - 1) % (int)ids.size() : (int)ids.size() - 1;
+        lastClickPos = p; lastClickTick = now; lastClickCount = ids.size();
+        if (ids.size() > 1) notify("BODY " + std::to_string((int)ids.size() - cycleIdx) + " OF " + std::to_string(ids.size()) + " UNDER THE CURSOR - CLICK AGAIN FOR THE NEXT");
+        return ids[cycleIdx];
+    }
+    int topBodyAt(Vec2 p, bool preferSelected) {
+        std::vector<int> ids = phys.bodiesAt(p);
+        if (ids.empty()) return -1;
+        if (preferSelected)
+            for (int k = (int)ids.size() - 1; k >= 0; --k)
+                if (std::find(sel.begin(), sel.end(), ids[k]) != sel.end()) return ids[k];
+        return ids.back();
+    }
+    void moveSelectionBy(Vec2 delta) {
+        if (sel.empty() || (delta.x == 0.f && delta.y == 0.f)) return;
+        phys.translateBodies(sel, delta);
+    }
+
+    // The CUT tool: a box or circle dragged over the picture is cut out of every body it touches.
+    void applyCutShape(Vec2 a, Vec2 b) {
+        std::vector<int> targets;
+        for (auto& bd : phys.bodies) if (bd.alive) targets.push_back(bd.id);
+        int cutter;
+        if (cutCircle) {
+            float r = length(b - a);
+            if (r < 1.5f) { notify("DRAG TO SIZE THE CIRCLE YOU WANT TO CUT OUT"); return; }
+            cutter = phys.addCircle(a, r, M_STEEL, true, false);
+        } else {
+            Vec2 half = Vec2(std::fabs(b.x - a.x), std::fabs(b.y - a.y)) * 0.5f;
+            if (half.x < 0.75f || half.y < 0.75f) { notify("DRAG TO SIZE THE BOX YOU WANT TO CUT OUT"); return; }
+            cutter = phys.addBox((a + b) * 0.5f, half, 0, M_STEEL, true);
+        }
+        pushUndo();
+        int bodiesCut = 0, pieces = 0;
+        for (int t : targets) {
+            if (t == cutter) continue;
+            int r = phys.cutBody(t, {cutter});
+            if (r >= 0) { ++bodiesCut; pieces += r; }
+        }
+        phys.removeBody(cutter);
+        clearSelection();
+        phys.stampBodies();
+        if (bodiesCut) notify("CUT " + std::to_string(bodiesCut) + (bodiesCut == 1 ? " BODY" : " BODIES") + " (" + std::to_string(pieces) + " PIECES). CTRL+Z UNDOES");
+        else notify("NOTHING TO CUT THERE: THE SHAPE MUST OVERLAP A BOX OR CIRCLE (WHEELS, ROCKETS, FANS AND EMITTERS CAN'T BE CUT)");
+    }
 
     // ---------------------------------------------------------------- camera
     void setCam(float x) {
@@ -1532,7 +2005,7 @@ struct Game {
         updateCamera(true);
         notify("FOCUS ON: THE CAMERA FOLLOWS THIS BODY. PRESS Z AGAIN TO RELEASE");
     }
-    bool inScrollStrip(int my) const { return my >= SIM_H - 12 && my < SIM_H; }
+    bool inScrollStrip(int localY) const { return localY >= SIM_H - 12 && localY < SIM_H; }
     void scrubTo(int mx) { setCam((float)mx / SIM_W * World::W - VIEW_W * 0.5f); }
 
     void createCircle(Vec2 c, float r, bool wheel) {
@@ -1621,13 +2094,35 @@ struct Game {
         notify(std::string("BONDED: LETS GO ABOVE ") + fmt(bondT) + "C OR " + fmt(bondF / 1000.f) + " KN");
     }
 
+    // Starts moving the selected bodies once the pointer has really dragged; also called on release so that a quick
+    // press-drag-release inside one frame still moves them.
+    void updateMoveDrag() {
+        if (!lmb || tool != T_SELECT || !moveArmed) return;
+        Vec2 total = mouse - dragStart;
+        if (!moving) {
+            if (length(total) < 2.5f) return;
+            const Uint8* ks = SDL_GetKeyboardState(nullptr);
+            bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+            if (std::find(sel.begin(), sel.end(), moveHit) == sel.end()) selectBody(moveHit, add, false);
+            if (sel.empty()) return;
+            pushUndo();
+            moving = true;
+            moveApplied = Vec2();
+        }
+        Vec2 target = snapIdx ? snap(total) : total;
+        moveSelectionBy(target - moveApplied);
+        moveApplied = target;
+    }
+
     void handleSimDown(int button) {
-        if (button == SDL_BUTTON_RIGHT) { rmb = true; return; }
+        if (button == SDL_BUTTON_RIGHT) { pushUndo("erase"); rmb = true; return; }
         lmb = true;
         dragStart = smouse();
+        moving = false; moveArmed = false;
         switch (tool) {
-            case T_BOND: clickBond(mouse); break;
-            case T_PIN: case T_MOTOR: case T_AUTOMOTOR: clickJoint(mouse); break;
+            case T_MAT: pushUndo("paint"); break;
+            case T_BOND: pushUndo(); clickBond(mouse); break;
+            case T_PIN: case T_MOTOR: case T_AUTOMOTOR: pushUndo(); clickJoint(mouse); break;
             case T_ROD: case T_SPRING: case T_SLIDER: {
                 std::vector<int> ids = phys.bodiesAt(mouse);
                 dragBody = ids.empty() ? -1 : ids.back();
@@ -1638,9 +2133,14 @@ struct Game {
                 if (id >= 0) { dragBody = id; grabJoint = phys.addMouse(id, mouse); }
                 break;
             }
-            case T_SELECT: break;
+            case T_SELECT:
+                dragStart = mouse;
+                moveHit = topBodyAt(mouse, true);   // a press on a selected body drags the whole selection
+                moveArmed = moveHit >= 0;
+                break;
             case T_DELETE: {
                 int id = phys.pickBody(mouse, true);
+                pushUndo();
                 if (id >= 0) phys.removeBody(id);
                 else {
                     int j = phys.nearestJoint(mouse, 6.f);
@@ -1656,27 +2156,36 @@ struct Game {
     void handleSimUp(int button) {
         if (button == SDL_BUTTON_RIGHT) { rmb = false; return; }
         if (!lmb) return;
-        lmb = false;
         switch (tool) {
-            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: case T_EMITTER: case T_FAN: createShape(dragStart, smouse()); break;
+            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: case T_EMITTER: case T_FAN:
+                pushUndo();
+                createShape(dragStart, smouse());
+                break;
+            case T_CUT: applyCutShape(dragStart, smouse()); break;
             case T_SELECT: {
                 const Uint8* ks = SDL_GetKeyboardState(nullptr);
                 bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
                 bool part = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
-                if (length(mouse - dragStart) < 3.f) selectBody(phys.pickBody(mouse, true), add, part);
+                if (moveArmed) updateMoveDrag();
+                if (moving) { moving = false; moveArmed = false; phys.stampBodies(); break; }
+                moveArmed = false;
+                if (length(mouse - dragStart) < 3.f) selectBody(pickCycling(mouse), add, part);
                 else boxSelect(dragStart, mouse, add, part);
                 break;
             }
             case T_ROD: case T_SPRING: {
                 std::vector<int> ids = phys.bodiesAt(mouse);
                 int endBody = ids.empty() ? -1 : ids.back();
-                if (length(mouse - dragStart) > 3.f && (dragBody >= 0 || endBody >= 0) && dragBody != endBody)
+                if (length(mouse - dragStart) > 3.f && (dragBody >= 0 || endBody >= 0) && dragBody != endBody) {
+                    pushUndo();
                     phys.addDistance(dragBody, dragStart, endBody, mouse, tool == T_SPRING ? 2.5f : 0.f);
+                }
                 dragBody = -1;
                 break;
             }
             case T_SLIDER:
                 if (dragBody >= 0 && !phys.bodies[dragBody].isStatic) {
+                    pushUndo();
                     Vec2 axis = mouse - dragStart;
                     phys.addSlider(dragBody, length(axis) > 3.f ? axis : Vec2(1, 0));
                 }
@@ -1689,6 +2198,15 @@ struct Game {
                 break;
             default: break;
         }
+        lmb = false;
+    }
+
+    void clickPanels(int x, int y) {
+        layoutButtons();
+        for (auto& b : buttons)
+            if (b.zone != 2 && b.enabled() && x >= b.r.x && x < b.r.x + b.r.w && y >= b.r.y && y < b.r.y + b.r.h) { b.action(); return; }
+        for (auto& it : rp)
+            if ((it.kind == 1 || it.kind == 2) && it.enabled && it.act && x >= it.r.x && x < it.r.x + it.r.w && y >= it.r.y && y < it.r.y + it.r.h) { it.act(); return; }
     }
 
     void handleEvents() {
@@ -1697,42 +2215,46 @@ struct Game {
             switch (e.type) {
                 case SDL_QUIT: running = false; break;
                 case SDL_MOUSEMOTION:
-                    mouse = toWorld(e.motion.x, e.motion.y);
                     mousePx = e.motion.x; mousePy = e.motion.y;
-                    inSim = e.motion.y < SIM_H;
+                    mouse = toWorld(e.motion.x, e.motion.y);
+                    inSim = inSimPx(e.motion.x, e.motion.y);
                     if (panning) setCam(panStartCam - (float)(e.motion.x - panStartPx) / S);
-                    if (scrubbing) scrubTo(e.motion.x);
+                    if (scrubbing) scrubTo(e.motion.x - SIM_X);
                     break;
-                case SDL_MOUSEBUTTONDOWN:
-                    mouse = toWorld(e.button.x, e.button.y);
-                    if (e.button.button == SDL_BUTTON_LEFT && formClick(e.button.x, e.button.y)) break;
+                case SDL_MOUSEBUTTONDOWN: {
                     mousePx = e.button.x; mousePy = e.button.y;
-                    if (e.button.button == SDL_BUTTON_MIDDLE && e.button.y < SIM_H) {
-                        panning = true; panStartPx = e.button.x; panStartCam = camXf;
-                        if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU PANNED THE CAMERA)"); }
-                        break;
-                    }
-                    if (e.button.button == SDL_BUTTON_LEFT && inScrollStrip(e.button.y) && !helpOn && formKind == FK_NONE) {
-                        scrubbing = true; scrubTo(e.button.x);
-                        if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU MOVED THE CAMERA)"); }
-                        break;
-                    }
-                    if (e.button.y >= SIM_H) {
+                    mouse = toWorld(e.button.x, e.button.y);
+                    const int lx = e.button.x - SIM_X, ly = e.button.y - SIM_Y;
+                    const bool inS = inSimPx(e.button.x, e.button.y);
+                    const bool left = e.button.button == SDL_BUTTON_LEFT;
+                    if (scenesOpen && left) {   // the scene picker takes the click
                         layoutButtons();
-                        if (e.button.button == SDL_BUTTON_LEFT)
-                            for (auto& b : buttons)
-                                if (b.visible() && b.enabled() && e.button.x >= b.r.x && e.button.x < b.r.x + b.r.w && e.button.y >= b.r.y &&
-                                    e.button.y < b.r.y + b.r.h) {
-                                    b.action();
-                                    break;
-                                }
-                    } else if (helpOn) {
-                        helpOn = false;   // a click anywhere on the help card closes it
-                    } else {
+                        bool hit = false;
+                        for (auto& it : modal)
+                            if (it.kind == 2 && it.act && lx >= it.r.x && lx < it.r.x + it.r.w && ly >= it.r.y && ly < it.r.y + it.r.h) { it.act(); hit = true; break; }
+                        if (!hit && inS) { scenesOpen = false; }
+                        if (hit || inS) break;
+                    }
+                    if (left && inS && formClick(lx, ly)) break;
+                    if (inS) {
+                        if (e.button.button == SDL_BUTTON_MIDDLE) {
+                            panning = true; panStartPx = e.button.x; panStartCam = camXf;
+                            if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU PANNED THE CAMERA)"); }
+                            break;
+                        }
+                        if (left && inScrollStrip(ly) && !helpOn && formKind == FK_NONE) {
+                            scrubbing = true; scrubTo(lx);
+                            if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU MOVED THE CAMERA)"); }
+                            break;
+                        }
+                        if (helpOn) { helpOn = false; break; }   // a click anywhere on the help card closes it
                         lastMouse = mouse;
                         handleSimDown(e.button.button);
+                    } else if (left) {
+                        clickPanels(e.button.x, e.button.y);
                     }
                     break;
+                }
                 case SDL_MOUSEBUTTONUP:
                     mouse = toWorld(e.button.x, e.button.y);
                     if (e.button.button == SDL_BUTTON_MIDDLE) { panning = false; break; }
@@ -1740,6 +2262,7 @@ struct Game {
                     if (lmb || e.button.button == SDL_BUTTON_RIGHT) handleSimUp(e.button.button);
                     break;
                 case SDL_MOUSEWHEEL:
+                    if (!inSimPx(mousePx, mousePy)) break;
                     if (tool == T_PIPE || tool == T_HOSE) {
                         pipeD = std::clamp(pipeD + (e.wheel.y > 0 ? 1.f : -1.f), 3.f, 60.f);
                         pipeWall = std::min(pipeWall, pipeD * 0.5f);
@@ -1751,68 +2274,69 @@ struct Game {
         }
     }
 
+    void deleteSelection() {
+        pruneSelection();
+        if (sel.empty()) {
+            int id = phys.pickBody(mouse, true);
+            if (id < 0) return;
+            pushUndo();
+            phys.removeBody(id);
+        } else {
+            pushUndo();
+            for (int id : std::vector<int>(sel)) phys.removeBody(id);
+            clearSelection();
+        }
+        phys.stampBodies();
+    }
+
     void handleKey(SDL_Keycode k) {
         if (formKey(k, SDL_GetModState())) return;
+        const Uint16 mod = SDL_GetModState();
+        const bool ctrl = (mod & KMOD_CTRL) != 0, shift = (mod & KMOD_SHIFT) != 0;
+        if (ctrl) {
+            switch (k) {
+                case SDLK_c: copySelection(); break;
+                case SDLK_v: pasteClipboard(); break;
+                case SDLK_z: if (shift) redo(); else undo(); break;
+                case SDLK_y: redo(); break;
+                case SDLK_a: selectAll(); break;
+                case SDLK_s: saveQuick(); break;
+                case SDLK_o: openFileForm(false); break;
+                case SDLK_n: newFile(); break;
+                case SDLK_g: groupSelection(); break;
+                case SDLK_u: ungroupSelection(); break;
+                default: break;
+            }
+            return;
+        }
         switch (k) {
             case SDLK_RETURN: case SDLK_KP_ENTER: openForm(); break;
             case SDLK_F1: helpOn = !helpOn; break;
-            case SDLK_z: toggleFocus(); break;
+            case SDLK_f: toggleFocus(); break;
             case SDLK_m: toggleFanMode(); break;
             case SDLK_HOME: if (focusBody >= 0) focusBody = -1; setCam(0); break;
             case SDLK_END: if (focusBody >= 0) focusBody = -1; setCam((float)World::W); break;
             case SDLK_PAGEUP: if (focusBody >= 0) focusBody = -1; setCam(camXf - VIEW_W * 0.5f); break;
             case SDLK_PAGEDOWN: if (focusBody >= 0) focusBody = -1; setCam(camXf + VIEW_W * 0.5f); break;
-            case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: case SDLK_MINUS: case SDLK_KP_MINUS: case SDLK_BACKSLASH: {
-                if (primary < 0 || !phys.bodies[primary].alive || phys.bodies[primary].fan.strength == 0.f) break;
-                float& st = phys.bodies[primary].fan.strength;
-                if (k == SDLK_BACKSLASH) st = -st;
-                else {
-                    float mag = std::clamp(std::fabs(st) + ((k == SDLK_MINUS || k == SDLK_KP_MINUS) ? -10.f : 10.f), 5.f, 300.f);
-                    st = st < 0 ? -mag : mag;
-                }
-                lastFan = std::fabs(st);
-                notify("FAN STRENGTH " + fmt(st) + (st < 0 ? " (REVERSED)" : ""));
-                if (formKind == FK_EDIT_BOX) openForm();
+            case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: adjustFan(10.f); break;
+            case SDLK_MINUS: case SDLK_KP_MINUS: adjustFan(-10.f); break;
+            case SDLK_BACKSLASH: flipFan(); break;
+            case SDLK_ESCAPE:
+                if (scenesOpen) scenesOpen = false;
+                else if (helpOn) helpOn = false;
+                else if (!sel.empty()) clearSelection();
                 break;
-            }
-            case SDLK_ESCAPE: if (helpOn) helpOn = false; else if (!sel.empty()) clearSelection(); else running = false; break;
-            case SDLK_g: if (SDL_GetModState() & KMOD_CTRL) { groupSelection(); break; } phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; break;
-            case SDLK_u: if (SDL_GetModState() & KMOD_CTRL) ungroupSelection(); break;
             case SDLK_SPACE: if (!playing) play(); else togglePause(); break;
-            case SDLK_n: if (SDL_GetModState() & KMOD_CTRL) newFile(); else stepFrame(); break;
-            case SDLK_s: if (SDL_GetModState() & KMOD_CTRL) saveQuick(); break;
-            case SDLK_o: if (SDL_GetModState() & KMOD_CTRL) openFileForm(false); break;
-            case SDLK_c: world.clear(); phys.stampBodies(); break;
-            case SDLK_x: clearBodies(); break;
-            case SDLK_r: buildDemo(); break;
-            case SDLK_t: anchored = !anchored; break;
-            case SDLK_f: cycleBodyMat(); break;
+            case SDLK_n: stepFrame(); break;
+            case SDLK_t: setFixed(!anchored); break;
+            case SDLK_g: phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; notify(phys.gravity.y > 0 ? "GRAVITY DOWN" : "GRAVITY UP"); break;
             case SDLK_h: heatView = !heatView; break;
-            case SDLK_v: spawnCar(mouse); break;
+            case SDLK_p: pressureView = !pressureView; break;
             case SDLK_COMMA: sparkIdx = (sparkIdx + 6) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
             case SDLK_PERIOD: sparkIdx = (sparkIdx + 1) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
             case SDLK_LEFTBRACKET: brush = std::max(1, brush - 1); break;
             case SDLK_RIGHTBRACKET: brush = std::min(24, brush + 1); break;
-            case SDLK_TAB: {
-                const uint8_t* list = PALETTE[tab < TAB_MATS ? tab : TAB_POWDER];
-                int n = 0;
-                while (n < 18 && (list[n] || (tab == TAB_DEVICE && n < 6))) ++n;
-                if (n == 0) break;
-                int idx = 0;
-                for (int i = 0; i < n; ++i) if (list[i] == mat) idx = i + 1;
-                selectMaterial(list[idx % n]);
-                break;
-            }
-            case SDLK_DELETE: case SDLK_BACKSPACE: {
-                if (!sel.empty()) {
-                    for (int id : std::vector<int>(sel)) phys.removeBody(id);
-                    clearSelection(); phys.stampBodies();
-                    break;
-                }
-                int id = phys.pickBody(mouse, true);
-                if (id >= 0) { phys.removeBody(id); phys.stampBodies(); }
-                break;
-            }
+            case SDLK_DELETE: case SDLK_BACKSPACE: deleteSelection(); break;
             default: break;
         }
     }
@@ -1832,6 +2356,7 @@ struct Game {
             world.paintLine(lx, ly, cx, cy, brush, mat, mat == M_EMPTY ? 1.f : 0.45f, payload);
         if (rmb) world.paintLine(lx, ly, cx, cy, brush, M_EMPTY, 1.f);
         if (lmb && tool == T_GRAB && grabJoint >= 0) phys.setMouseTarget(grabJoint, mouse);
+        updateMoveDrag();
         lastMouse = mouse;
     }
 
@@ -1934,9 +2459,9 @@ struct Game {
 
     SDL_FPoint sp(Vec2 p) const { return SDL_FPoint{(p.x - (float)camX) * S, p.y * S}; }
 
-    void fillPoly(const std::vector<Vec2>& pts, uint32_t color) {
+    void fillPoly(const std::vector<Vec2>& pts, uint32_t color) { fillPolyC(pts, rgb(color)); }
+    void fillPolyC(const std::vector<Vec2>& pts, SDL_Color c) {
         std::vector<SDL_Vertex> v;
-        SDL_Color c = rgb(color);
         Vec2 cen;
         for (auto& p : pts) cen += p;
         cen = cen / (float)pts.size();
@@ -2023,7 +2548,7 @@ struct Game {
                 Vec2 c[4] = {{-b.half.x, -b.half.y}, {b.half.x, -b.half.y}, {b.half.x, b.half.y}, {-b.half.x, b.half.y}};
                 for (auto& p : c) pts.push_back(b.toWorld(p));
                 fillPoly(pts, fill);
-                outlinePoly(pts, edge);
+                if (b.group < 0) outlinePoly(pts, edge);   // pieces of a group read as one solid shape
                 if (b.isRocket) {
                     Vec2 tip = b.toWorld(Vec2(0, -b.half.y - 5));
                     fillPoly({b.toWorld(Vec2(-b.half.x, -b.half.y)), b.toWorld(Vec2(b.half.x, -b.half.y)), tip}, 0xf0e0d0);
@@ -2077,19 +2602,26 @@ struct Game {
     }
 
     void renderSelection() {
-        for (auto& b : phys.bodies)
-            if (b.alive && b.group >= 0) outlinePoly(bodyOutline(b, 0.7f), SDL_Color{70, 220, 255, 55});
+        const bool several = sel.size() >= 2;
         for (int id : sel) {
             if (id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive) continue;
+            const Body& b = phys.bodies[id];
             bool pri = id == primary;
-            outlinePoly(bodyOutline(phys.bodies[id], 1.2f), pri ? SDL_Color{255, 255, 255, 255} : SDL_Color{255, 220, 80, 230});
+            std::vector<Vec2> o = bodyOutline(b, 0.f);
+            fillPolyC(o, SDL_Color{255, 220, 80, 70});   // a warm tint over everything selected
+            if (pri) outlinePoly(bodyOutline(b, 1.2f), several ? SDL_Color{255, 90, 90, 255} : SDL_Color{255, 255, 255, 255});
+            else if (b.group < 0) outlinePoly(bodyOutline(b, 1.2f), SDL_Color{255, 220, 80, 230});
         }
-        if (primary >= 0) {
+        if (primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive) {
             Vec2 p = phys.bodies[primary].pos;
             lineWorld(p + Vec2(-3, 0), p + Vec2(3, 0), SDL_Color{255, 255, 255, 255});
             lineWorld(p + Vec2(0, -3), p + Vec2(0, 3), SDL_Color{255, 255, 255, 255});
+            if (several && (tool == T_SELECT || tool == T_CUT)) {
+                SDL_FPoint q = sp(p);
+                font::draw(ren, "CUTTER", (int)q.x - 36, (int)q.y - 22, 1, SDL_Color{255, 120, 120, 255});
+            }
         }
-        if (tool == T_SELECT && lmb && length(mouse - dragStart) >= 3.f) {
+        if (tool == T_SELECT && lmb && !moveArmed && !moving && length(mouse - dragStart) >= 3.f) {
             Vec2 a = dragStart, b = mouse;
             outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, SDL_Color{255, 220, 80, 200});
         }
@@ -2270,7 +2802,7 @@ struct Game {
         int y = 36 + (int)fields.size() * 20 + 4;
         if (formKind == FK_SCALE) font::draw(ren, "SCALES ALL SELECTED ABOUT THEIR CENTRE", 16, y, 1, SDL_Color{255, 220, 120, 255}), y += 12;
         if (emitterFormActive()) {
-            font::draw(ren, std::string("EMITS: ") + MATS[fPayload].name + " (CLICK PALETTE)  FACE: " + faceName(fFace) + " (F)", 16, y + (formKind >= FK_EDIT_BOX ? 12 : 0), 1, SDL_Color{255, 160, 255, 255});
+            font::draw(ren, std::string("EMITS: ") + MATS[fPayload].name + " (CHOOSE IN THE PANEL)  FACE: " + faceName(fFace) + " (F)", 16, y + (formKind >= FK_EDIT_BOX ? 12 : 0), 1, SDL_Color{255, 160, 255, 255});
             if (formKind == FK_EMITTER) y += 12;
         }
         if (formKind >= FK_EDIT_BOX) {
@@ -2342,43 +2874,79 @@ struct Game {
     }
 
     void renderButton(const Button& b, bool hovered) {
+        if (b.style == 3) {   // section header in the tool panel
+            font::draw(ren, b.label(), b.r.x + 2, b.r.y + 2, 1, SDL_Color{120, 140, 178, 255});
+            SDL_SetRenderDrawColor(ren, 44, 52, 70, 255);
+            SDL_RenderDrawLine(ren, b.r.x + font::textWidth(b.label(), 1) + 8, b.r.y + 6, b.r.x + b.r.w, b.r.y + 6);
+            return;
+        }
         bool act = b.active(), en = b.enabled();
         SDL_Color fill{46, 52, 68, 255}, line{78, 88, 110, 255}, text{232, 236, 245, 255};
-        if (b.style == 3) {   // tab
-            fill = SDL_Color{32, 36, 48, 255}; line = SDL_Color{50, 56, 74, 255}; text = SDL_Color{160, 172, 196, 255};
-            if (act) { fill = SDL_Color{52, 62, 88, 255}; line = SDL_Color{110, 130, 180, 255}; text = SDL_Color{255, 255, 255, 255}; }
-            else if (hovered) { fill = SDL_Color{42, 48, 64, 255}; text = SDL_Color{215, 224, 240, 255}; }
-        } else {
-            if (hovered && en) { fill = SDL_Color{62, 72, 96, 255}; line = SDL_Color{120, 138, 180, 255}; }
-            if (act) { fill = SDL_Color{52, 100, 172, 255}; line = SDL_Color{150, 190, 255, 255}; text = SDL_Color{255, 255, 255, 255}; }
-            if (b.style == 1 && act) { fill = SDL_Color{36, 132, 78, 255}; line = SDL_Color{120, 230, 160, 255}; }
-            if (b.style == 1 && !act) { fill = hovered ? SDL_Color{44, 112, 74, 255} : SDL_Color{36, 88, 62, 255}; line = SDL_Color{90, 170, 120, 255}; }
-            if (b.style == 2 && en) { fill = hovered ? SDL_Color{190, 70, 70, 255} : SDL_Color{150, 56, 56, 255}; line = SDL_Color{230, 130, 130, 255}; }
-            if (!en) { fill = SDL_Color{34, 38, 48, 255}; line = SDL_Color{48, 54, 68, 255}; text = SDL_Color{98, 106, 124, 255}; }
-        }
+        if (hovered && en) { fill = SDL_Color{62, 72, 96, 255}; line = SDL_Color{120, 138, 180, 255}; }
+        if (act) { fill = SDL_Color{52, 100, 172, 255}; line = SDL_Color{150, 190, 255, 255}; text = SDL_Color{255, 255, 255, 255}; }
+        if (b.style == 1 && act) { fill = SDL_Color{36, 132, 78, 255}; line = SDL_Color{120, 230, 160, 255}; }
+        if (b.style == 1 && !act) { fill = hovered ? SDL_Color{44, 112, 74, 255} : SDL_Color{36, 88, 62, 255}; line = SDL_Color{90, 170, 120, 255}; }
+        if (b.style == 2 && en) { fill = hovered ? SDL_Color{190, 70, 70, 255} : SDL_Color{150, 56, 56, 255}; line = SDL_Color{230, 130, 130, 255}; }
+        if (!en) { fill = SDL_Color{34, 38, 48, 255}; line = SDL_Color{48, 54, 68, 255}; text = SDL_Color{98, 106, 124, 255}; }
         rrect(b.r, fill);
         rrectLine(b.r, line);
-        if (b.style == 3 && act) {
-            SDL_Rect bar{b.r.x + 3, b.r.y + b.r.h - 3, b.r.w - 6, 3};
-            SDL_Color ac = rgb(b.accent);
-            SDL_SetRenderDrawColor(ren, ac.r, ac.g, ac.b, 255);
-            SDL_RenderFillRect(ren, &bar);
-        }
         std::string lab = b.label();
-        int tw = font::textWidth(lab, 2), tx;
-        if (b.hasSwatch) {
-            SDL_Rect sw{b.r.x + 7, b.r.y + 6, 9, b.r.h - 12};
-            rrect(sw, rgb(b.swatch));
-            tx = b.r.x + 22;
-        } else tx = b.r.x + (b.r.w - tw) / 2;
-        if (tx + tw > b.r.x + b.r.w - 3) lab = lab.substr(0, std::max<size_t>(1, (size_t)(b.r.x + b.r.w - 3 - tx) / 12));
+        int tw = font::textWidth(lab, 2);
+        int tx = b.r.x + (b.r.w - tw) / 2;
+        if (tw > b.r.w - 6) { lab = lab.substr(0, std::max<size_t>(1, (size_t)(b.r.w - 6) / 12)); tx = b.r.x + 3; }
         font::draw(ren, lab, tx, b.r.y + (b.r.h - 14) / 2, 2, text);
     }
 
+    void renderPItem(const PItem& it, bool hovered) {
+        switch (it.kind) {
+            case 0:   // header
+                font::draw(ren, it.text, it.r.x, it.r.y + 2, 2, SDL_Color{255, 214, 120, 255});
+                SDL_SetRenderDrawColor(ren, 52, 60, 80, 255);
+                SDL_RenderDrawLine(ren, it.r.x, it.r.y + 18, it.r.x + it.r.w, it.r.y + 18);
+                break;
+            case 1: {   // swatch
+                SDL_Rect r = it.r;
+                rrect(r, SDL_Color{22, 26, 36, 255});
+                SDL_Rect in{r.x + 3, r.y + 3, r.w - 6, r.h - 6};
+                SDL_Color c = rgb(it.color);
+                SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 255);
+                SDL_RenderFillRect(ren, &in);
+                if (it.text == "ERASER") { SDL_SetRenderDrawColor(ren, 255, 255, 255, 255); SDL_RenderDrawLine(ren, in.x + 3, in.y + 3, in.x + in.w - 4, in.y + in.h - 4); SDL_RenderDrawLine(ren, in.x + in.w - 4, in.y + 3, in.x + 3, in.y + in.h - 4); }
+                rrectLine(r, it.active ? SDL_Color{255, 255, 255, 255} : (hovered ? SDL_Color{170, 190, 235, 255} : SDL_Color{60, 68, 90, 255}));
+                if (it.active) { SDL_Rect r2{r.x + 1, r.y + 1, r.w - 2, r.h - 2}; rrectLine(r2, SDL_Color{255, 255, 255, 255}); }
+                break;
+            }
+            case 2: {   // button
+                SDL_Color fill{46, 52, 68, 255}, line{78, 88, 110, 255}, text{232, 236, 245, 255};
+                if (hovered && it.enabled) { fill = SDL_Color{62, 72, 96, 255}; line = SDL_Color{120, 138, 180, 255}; }
+                if (it.active) { fill = SDL_Color{52, 100, 172, 255}; line = SDL_Color{150, 190, 255, 255}; text = SDL_Color{255, 255, 255, 255}; }
+                if (!it.enabled) { fill = SDL_Color{34, 38, 48, 255}; line = SDL_Color{48, 54, 68, 255}; text = SDL_Color{98, 106, 124, 255}; }
+                rrect(it.r, fill); rrectLine(it.r, line);
+                std::string lab = it.text;
+                int tw = font::textWidth(lab, 2);
+                int tx = it.r.x + (it.r.w - tw) / 2;
+                if (tw > it.r.w - 6) { lab = lab.substr(0, std::max<size_t>(1, (size_t)(it.r.w - 6) / 12)); tx = it.r.x + 3; }
+                font::draw(ren, lab, tx, it.r.y + (it.r.h - 14) / 2, 2, text);
+                break;
+            }
+            case 3:   // text line
+                font::draw(ren, it.text, it.r.x, it.r.y, 1, rgb(it.color));
+                break;
+            case 4: {  // value box
+                rrect(it.r, SDL_Color{22, 26, 36, 255});
+                rrectLine(it.r, SDL_Color{52, 60, 80, 255});
+                int tw = font::textWidth(it.text, 2);
+                font::draw(ren, it.text, it.r.x + std::max(4, (it.r.w - tw) / 2), it.r.y + 6, 2, SDL_Color{255, 255, 255, 255});
+                break;
+            }
+            default: break;
+        }
+    }
+
     void renderHelp() {
-        SDL_Rect card{WIN_W / 2 - 520, 40, 1040, SIM_H - 80};
+        SDL_Rect card{(SIM_W - 1040) / 2, 40, 1040, SIM_H - 80};
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 150);
-        SDL_Rect all{0, 0, WIN_W, SIM_H};
+        SDL_Rect all{0, 0, SIM_W, SIM_H};
         SDL_RenderFillRect(ren, &all);
         rrect(card, SDL_Color{22, 26, 36, 250});
         rrectLine(card, SDL_Color{120, 150, 210, 255});
@@ -2404,115 +2972,143 @@ struct Game {
         font::draw(ren, "F1 / ESC / CLICK TO CLOSE", card.x + card.w - font::textWidth("F1 / ESC / CLICK TO CLOSE", 2) - 24, y + 4, 2, SDL_Color{150, 165, 195, 255});
         y += 38;
         head("WORKFLOW");
-        line("1. DRAW IN EDIT MODE - NOTHING MOVES, SO YOU CAN BUILD CALMLY.");
-        line("2. PRESS PLAY (SPACE). THE DRAWING IS SNAPSHOT FIRST.  PAUSE / STEP WHILE IT RUNS.");
-        line("3. PRESS STOP TO GO BACK TO EXACTLY WHAT YOU DREW.   SAVE / LOAD KEEP YOUR MACHINES.");
-        y += 8;
-        head("THE BOTTOM PANEL");
-        line("TOOLBAR: RUN CONTROL | FILES | VIEWS (HEAT, ELECTRIC), SNAP, SPARK-PLUG RATE.");
-        line("POWDER..DEVICE: MATERIALS TO PAINT.  SHAPES: BODIES, PIPES, HOSES, EMITTERS.  JOINTS: PINS, MOTORS, BONDS.");
-        line("EDIT: SELECT, GROUP, CUT, SCALE, EXACT VALUES.  SCENES: READY-MADE MACHINES.  HOVER A BUTTON FOR A TIP.");
-        y += 8;
-        head("MOUSE");
-        line("LMB USES THE TOOL (PAINT / DRAG A SHAPE / CLICK A JOINT)    RMB ERASES CELLS    WHEEL = BRUSH SIZE (PIPE DIAMETER)");
-        line("SELECT: CLICK, SHIFT ADDS, CTRL PICKS ONE PART OF A GROUP, DRAG = BOX SELECT.  THE LAST-CLICKED BODY IS THE PRIMARY.");
-        y += 8;
-        head("KEYS");
-        line("SPACE PLAY / PAUSE     N STEP     ENTER EXACT-VALUE FORM     F1 THIS HELP");
-        line("CTRL+S SAVE     CTRL+O LOAD     CTRL+N NEW     DEL DELETE SELECTION");
-        line("TAB NEXT MATERIAL     [ ] BRUSH SIZE     T ANCHOR     F BODY MATERIAL     H HEAT VIEW");
-        line("CTRL+G GROUP     CTRL+U UNGROUP     C CLEAR CELLS     X CLEAR BODIES     R RELOAD DEMO");
-        line("E HOLD = SPARK     , . SPARK RATE     V DROP A CAR     G FLIP GRAVITY");
-        line("ARROWS OR A / D DRIVE MOTORS     UP OR W FIRE ROCKETS");
-        line("FAN SELECTED: + / - STRENGTH     BACKSLASH FLIPS DIRECTION     M BLOW / VACUUM     PRESSURE BUTTON SHOWS GAS PRESSURE");
-        line("CAMERA: Z FOCUS ON THE SELECTED BODY (FOLLOWS IT)     MIDDLE-DRAG, THE STRIP AT THE BOTTOM, HOME / END / PAGE UP / PAGE DOWN SCROLL");
+        line("1. DRAW IN EDIT MODE - NOTHING MOVES, SO YOU CAN BUILD CALMLY. CTRL+Z UNDOES ANY EDIT.");
+        line("2. PRESS PLAY (SPACE). THE DRAWING IS SNAPSHOT FIRST. PAUSE / STEP WHILE IT RUNS.");
+        line("3. PRESS STOP TO GO BACK TO EXACTLY WHAT YOU DREW. SAVE / OPEN KEEP YOUR MACHINES.");
         y += 6;
-        head("GOOD TO KNOW");
-        line("ENGINES NEED A HOT GAS CYCLE: FUEL VAPOUR IN, SPARK OR GLOW PLUG, VALVES TIMED BY AN ECCENTRIC - SEE THE SCENES.");
-        line("THE MATERIAL OF A BODY SETS ITS DENSITY, FRICTION, HEAT CONDUCTION AND ELECTRICAL CONDUCTION.");
+        head("THE WINDOW");
+        line("LEFT: TOOLS, GROUPED. PICK ONE AND DRAW IN THE MIDDLE.   RIGHT: PROPERTIES OF THE TOOL OR SELECTION - MATERIALS ARE SWATCHES YOU CLICK, NOTHING TO SCROLL THROUGH.");
+        line("TOP: PLAY / STOP, FILES, UNDO, VIEWS, FOCUS AND SCENES.   BOTTOM: A HINT FOR THE TOOL OR FOR WHATEVER YOU HOVER.");
+        y += 6;
+        head("EDITING BODIES");
+        line("SELECT: CLICK A BODY (CLICK AGAIN TO REACH THE ONE UNDER IT, SHIFT ADDS), DRAG EMPTY SPACE TO BOX-SELECT, DRAG A SELECTED BODY TO MOVE IT.");
+        line("CLICKING A MATERIAL SWATCH WHILE BODIES ARE SELECTED CHANGES THEIR MATERIAL. CTRL+C / CTRL+V COPY AND PASTE; DEL DELETES.");
+        line("CUT TOOL: DRAG A BOX OR CIRCLE OVER A BODY AND THAT AREA IS CUT OUT OF IT. SUBTRACT: CUT ONE SELECTED BODY (THE RED, LAST-CLICKED ONE) OUT OF THE OTHERS.");
+        line("EMITTER: A BODY THAT ENDLESSLY MAKES THE MATERIAL YOU PICK IN THE PANEL. PIN IT, OR LET IT TRAVEL WITH A MACHINE.");
+        y += 6;
+        head("KEYS");
+        line("SPACE PLAY / PAUSE    N STEP    ENTER EXACT-VALUE FORM    F1 HELP    F FOCUS ON THE SELECTED BODY    DEL DELETE");
+        line("CTRL+Z UNDO    CTRL+Y REDO    CTRL+C COPY    CTRL+V PASTE    CTRL+A SELECT ALL    CTRL+S SAVE    CTRL+O OPEN    CTRL+N NEW");
+        line("CTRL+G GROUP    CTRL+U UNGROUP    T FIXED IN PLACE    H HEAT VIEW    P PRESSURE VIEW    G FLIP GRAVITY    [ ] BRUSH SIZE");
+        line("FAN SELECTED: + / - STRENGTH    BACKSLASH FLIPS    M BLOW / VACUUM       E HOLD = SPARK PLUG    , . SPARK PLUG PERIOD");
+        line("ARROWS OR A / D DRIVE MOTORS    UP OR W FIRE ROCKETS       MIDDLE-DRAG, THE STRIP UNDER THE VIEW, HOME / END / PAGE UP / PAGE DOWN SCROLL");
     }
 
-    void renderUI() {
-        layoutButtons();
-        // panel
-        SDL_SetRenderDrawColor(ren, 20, 23, 31, 255);
-        SDL_Rect panel{0, SIM_H, WIN_W, UI_H};
-        SDL_RenderFillRect(ren, &panel);
-        SDL_SetRenderDrawColor(ren, 70, 82, 112, 255);
-        SDL_RenderDrawLine(ren, 0, SIM_H, WIN_W, SIM_H);
-        SDL_SetRenderDrawColor(ren, 30, 35, 47, 255);
-        SDL_Rect tb{0, SIM_H + 1, WIN_W, PAD + TB_H + 3};
-        SDL_RenderFillRect(ren, &tb);
-        for (size_t i = 0; i < buttons.size(); ++i)
-            if (buttons[i].visible()) renderButton(buttons[i], (int)i == hoverBtn);
+    // things drawn over the simulation view (the viewport is already the view): messages, mode, readouts
+    void renderSimOverlays() {
+        if (noteFrames > 0) {
+            int w = font::textWidth(note, 2) + 16;
+            rrect(SDL_Rect{8, SIM_H - 34, std::min(w, SIM_W - 16), 24}, SDL_Color{16, 20, 28, 225});
+            font::draw(ren, note.substr(0, (size_t)(SIM_W - 40) / 12), 16, SIM_H - 29, 2, SDL_Color{255, 214, 140, 255});
+        } else if (phys.eventFrames > 0) {
+            int w = font::textWidth(phys.lastEvent, 2) + 16;
+            rrect(SDL_Rect{8, SIM_H - 34, w, 24}, SDL_Color{16, 20, 28, 225});
+            font::draw(ren, phys.lastEvent, 16, SIM_H - 29, 2, SDL_Color{255, 130, 100, 255});
+        }
+        std::string mode = playing ? (paused ? "PAUSED" : "RUNNING") : "EDIT MODE";
+        SDL_Color mc = playing ? (paused ? SDL_Color{255, 190, 90, 255} : SDL_Color{110, 240, 150, 255}) : SDL_Color{130, 190, 255, 255};
+        int w = font::textWidth(mode, 2) + 36;
+        SDL_Rect pill{SIM_W - w - 8, 8, w, 24};
+        rrect(pill, SDL_Color{16, 20, 28, 215});
+        rrectLine(pill, mc);
+        rrect(SDL_Rect{pill.x + 9, pill.y + 8, 8, 8}, mc);
+        font::draw(ren, mode, pill.x + 24, pill.y + 5, 2, mc);
+        if (!playing) {
+            std::string hint = "PRESS PLAY (SPACE) TO RUN";
+            font::draw(ren, hint, SIM_W - font::textWidth(hint, 1) - 10, 38, 1, SDL_Color{140, 160, 200, 255});
+        }
+        if (focusBody >= 0) {
+            std::string f = "FOCUS ON (F RELEASES)";
+            font::draw(ren, f, SIM_W - font::textWidth(f, 1) - 10, 50, 1, SDL_Color{255, 214, 90, 255});
+        }
+        if (world.vMax > 0.f) {
+            char eb[96];
+            std::snprintf(eb, sizeof eb, "PEAK %.4g V   SOURCE %.3g A   ARCS %ld", world.vMax, world.iSource, world.arcCount);
+            font::draw(ren, eb, SIM_W - font::textWidth(eb, 1) - 10, 62, 1, SDL_Color{255, 240, 140, 255});
+        }
+    }
 
-        // status area
-        const int sy = SIM_H + PAD + TB_H + 6 + TAB_H + 6 + CONTENT_ROWS * (BTN_H + BTN_GAP) + 6;
-        SDL_SetRenderDrawColor(ren, 36, 42, 56, 255);
-        SDL_RenderDrawLine(ren, PAD, sy - 3, WIN_W - PAD, sy - 3);
+    void renderModal() {
+        if (!scenesOpen) return;
+        SDL_SetRenderDrawColor(ren, 0, 0, 0, 140);
+        SDL_Rect all{0, 0, SIM_W, SIM_H};
+        SDL_RenderFillRect(ren, &all);
+        int lx = mousePx - SIM_X, ly = mousePy - SIM_Y;
+        for (auto& it : modal) {
+            if (it.kind == 5) { rrect(it.r, SDL_Color{22, 26, 36, 250}); rrectLine(it.r, SDL_Color{120, 150, 210, 255}); }
+            else if (it.kind == 3) font::draw(ren, it.text, it.r.x, it.r.y, 2, rgb(it.color));
+            else if (it.kind == 2) {
+                bool hov = lx >= it.r.x && lx < it.r.x + it.r.w && ly >= it.r.y && ly < it.r.y + it.r.h;
+                rrect(it.r, hov ? SDL_Color{62, 82, 120, 255} : SDL_Color{46, 52, 68, 255});
+                rrectLine(it.r, hov ? SDL_Color{150, 190, 255, 255} : SDL_Color{78, 88, 110, 255});
+                int tw = font::textWidth(it.text, 2);
+                font::draw(ren, it.text, it.r.x + (it.r.w - tw) / 2, it.r.y + 10, 2, SDL_Color{236, 240, 248, 255});
+                if (hov) font::draw(ren, it.tip, 20 + 0, SIM_H - 30, 1, SDL_Color{190, 205, 230, 255});
+            }
+        }
+    }
+
+    // the toolbar, the tool panel, the properties panel and the status bar (window coordinates)
+    void renderPanels() {
+        layoutButtons();
+        SDL_SetRenderDrawColor(ren, 26, 30, 40, 255);
+        SDL_Rect topBar{0, 0, WIN_W, TOP_H};
+        SDL_RenderFillRect(ren, &topBar);
+        SDL_SetRenderDrawColor(ren, 20, 23, 31, 255);
+        SDL_Rect left{0, TOP_H, LEFT_W, WIN_H - TOP_H}, right{LEFT_W + SIM_W, TOP_H, RIGHT_W, WIN_H - TOP_H}, bottom{LEFT_W, TOP_H + SIM_H, SIM_W, BOT_H};
+        SDL_RenderFillRect(ren, &left); SDL_RenderFillRect(ren, &right); SDL_RenderFillRect(ren, &bottom);
+        SDL_SetRenderDrawColor(ren, 62, 72, 100, 255);
+        SDL_RenderDrawLine(ren, 0, TOP_H - 1, WIN_W, TOP_H - 1);
+        SDL_RenderDrawLine(ren, LEFT_W - 1, TOP_H, LEFT_W - 1, WIN_H);
+        SDL_RenderDrawLine(ren, LEFT_W + SIM_W, TOP_H, LEFT_W + SIM_W, WIN_H);
+        for (size_t i = 0; i < buttons.size(); ++i) renderButton(buttons[i], (int)i == hoverBtn);
+        for (size_t i = 0; i < rp.size(); ++i) renderPItem(rp[i], (int)i == hoverItem);
+
+        // status bar under the view
+        const int bx = LEFT_W + 10, sy = TOP_H + SIM_H + 6;
         const SDL_Color gold{255, 214, 120, 255}, dim{118, 128, 150, 255}, cyan{150, 228, 255, 255}, white{236, 240, 248, 255};
         std::vector<std::pair<std::string, SDL_Color>> segs;
-        auto sep = [&] { segs.push_back({"  |  ", dim}); };
+        auto sep = [&] { segs.push_back({"   |   ", dim}); };
         segs.push_back({"TOOL ", dim});
         segs.push_back({tool == T_MAT ? (mat == M_EMPTY ? "ERASER" : MATS[mat].name) : TOOL_NAMES[tool], gold});
-        if (tool == T_MAT && (mat == M_BATT_POS || mat == M_BATT_NEG)) segs.push_back({" " + fmt(world.battV) + "V " + fmt(world.battA) + "A", white});
-        if (tool == T_MAT && mat == M_SOURCE) segs.push_back({" EMITS " + std::string(MATS[payload].name), white});
         sep();
-        segs.push_back({"BODY ", dim}); segs.push_back({MATS[bodyMat].name, white});
-        sep();
-        if (tool == T_PIPE || tool == T_HOSE) { segs.push_back({"DIA ", dim}); segs.push_back({fmt(pipeD) + " WALL " + fmt(pipeWall), white}); }
-        else { segs.push_back({"BRUSH ", dim}); segs.push_back({std::to_string(brush), white}); }
+        if (tool == T_MAT) { segs.push_back({"BRUSH ", dim}); segs.push_back({std::to_string(brush), white}); }
+        else if (tool == T_PIPE || tool == T_HOSE) { segs.push_back({"DIAMETER ", dim}); segs.push_back({fmt(pipeD), white}); }
+        else { segs.push_back({"MATERIAL ", dim}); segs.push_back({MATS[bodyMat].name, white}); }
         if (!sel.empty()) { sep(); segs.push_back({"SELECTED ", dim}); segs.push_back({std::to_string(sel.size()), white}); }
         sep();
         segs.push_back({"X ", dim}); segs.push_back({std::to_string((int)smouse().x), white});
         segs.push_back({"  Y ", dim}); segs.push_back({std::to_string((int)smouse().y), white});
         if (!currentFile.empty()) { sep(); segs.push_back({"FILE ", dim}); segs.push_back({currentFile, white}); }
-        drawSegments(segs, PAD + 2, sy + 2, 2);
+        drawSegments(segs, bx, sy, 2);
         std::string fpsS = "FPS " + std::to_string((int)fps);
-        font::draw(ren, fpsS, WIN_W - font::textWidth(fpsS, 2) - PAD - 2, sy + 2, 2, dim);
+        font::draw(ren, fpsS, LEFT_W + SIM_W - font::textWidth(fpsS, 2) - 10, sy, 2, dim);
 
-        std::string tip = hoverBtn >= 0 && !buttons[hoverBtn].tip.empty() ? buttons[hoverBtn].tip : TOOL_HINTS[tool];
-        font::draw(ren, tip, PAD + 2, sy + 24, 1, SDL_Color{176, 190, 214, 255});
+        std::string tip;
+        if (hoverBtn >= 0 && !buttons[hoverBtn].tip.empty()) tip = buttons[hoverBtn].tip;
+        else if (hoverItem >= 0 && !rp[hoverItem].tip.empty()) tip = rp[hoverItem].tip;
+        else tip = TOOL_HINTS[tool];
+        // wrap the hint over two lines
+        const size_t per = (size_t)(SIM_W - 20) / 6;
+        std::string l1 = tip.substr(0, per), l2;
+        if (tip.size() > per) {
+            size_t cut = tip.rfind(' ', per);
+            if (cut == std::string::npos) cut = per;
+            l1 = tip.substr(0, cut); l2 = tip.substr(cut + 1);
+        }
+        font::draw(ren, l1, bx, sy + 26, 1, SDL_Color{190, 202, 226, 255});
+        if (!l2.empty()) font::draw(ren, l2, bx, sy + 38, 1, SDL_Color{190, 202, 226, 255});
         std::string hover = hoverText();
-        if (!hover.empty()) font::draw(ren, hover, WIN_W - font::textWidth(hover, 2) - PAD - 2, sy + 22, 2, cyan);
-        font::draw(ren, "SPACE PLAY/PAUSE   ENTER EXACT VALUES   F1 HELP", PAD + 2, sy + 38, 1, SDL_Color{90, 100, 124, 255});
-
-        // overlays on the simulation: transient message, mode pill, electrical readout
-        if (noteFrames > 0) {
-            int w = font::textWidth(note, 2) + 16;
-            rrect(SDL_Rect{8, SIM_H - 30, w, 24}, SDL_Color{16, 20, 28, 215});
-            font::draw(ren, note, 16, SIM_H - 25, 2, SDL_Color{255, 214, 140, 255});
-        } else if (phys.eventFrames > 0) {
-            int w = font::textWidth(phys.lastEvent, 2) + 16;
-            rrect(SDL_Rect{8, SIM_H - 30, w, 24}, SDL_Color{16, 20, 28, 215});
-            font::draw(ren, phys.lastEvent, 16, SIM_H - 25, 2, SDL_Color{255, 130, 100, 255});
-        }
-        {
-            std::string mode = playing ? (paused ? "PAUSED" : "RUNNING") : "EDIT MODE";
-            SDL_Color mc = playing ? (paused ? SDL_Color{255, 190, 90, 255} : SDL_Color{110, 240, 150, 255}) : SDL_Color{130, 190, 255, 255};
-            int w = font::textWidth(mode, 2) + 36;
-            SDL_Rect pill{WIN_W - w - 8, 8, w, 24};
-            rrect(pill, SDL_Color{16, 20, 28, 215});
-            rrectLine(pill, mc);
-            SDL_Rect dot{pill.x + 9, pill.y + 8, 8, 8};
-            rrect(dot, mc);
-            font::draw(ren, mode, pill.x + 24, pill.y + 5, 2, mc);
-            if (!playing) {
-                std::string hint = "PRESS PLAY (SPACE) TO RUN";
-                font::draw(ren, hint, WIN_W - font::textWidth(hint, 1) - 10, 38, 1, SDL_Color{140, 160, 200, 255});
-            }
-        }
-        if (world.vMax > 0.f) {
-            char eb[96];
-            std::snprintf(eb, sizeof eb, "PEAK %.4g V   SOURCE %.3g A   ARCS %ld", world.vMax, world.iSource, world.arcCount);
-            font::draw(ren, eb, WIN_W - font::textWidth(eb, 1) - 10, 52, 1, SDL_Color{255, 240, 140, 255});
-        }
-        if (helpOn) renderHelp();
+        if (!hover.empty()) font::draw(ren, hover, LEFT_W + SIM_W - font::textWidth(hover, 2) - 10, sy + 26, 2, cyan);
+        font::draw(ren, "CTRL+Z UNDO   CTRL+C / CTRL+V COPY, PASTE   F1 HELP", bx, sy + 54, 1, SDL_Color{90, 100, 124, 255});
     }
 
     void render() {
+        layoutButtons();
         SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
         SDL_RenderClear(ren);
+        SDL_Rect simRect{SIM_X, SIM_Y, SIM_W, SIM_H};
+        SDL_RenderSetViewport(ren, &simRect);      // from here on (0,0) is the corner of the view, and drawing is clipped to it
         renderParticles();
         renderBodies();
         renderJoints();
@@ -2523,7 +3119,11 @@ struct Game {
         renderGhost();
         renderScrollStrip();
         renderForm();
-        renderUI();
+        renderSimOverlays();
+        if (helpOn) renderHelp();
+        renderModal();
+        SDL_RenderSetViewport(ren, nullptr);
+        renderPanels();
     }
 
     void shutdown() {
@@ -2552,6 +3152,7 @@ int main(int argc, char** argv) {
     int shotFrames = 300, scene = 0;
     bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false;
     int camFlag = -1;
+    bool scenesFlag = false;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
@@ -2565,7 +3166,8 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--help-card")) helpFlag = true;
         else if (!std::strcmp(argv[i], "--pressure")) pressureFlag = true;
         else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc) camFlag = std::atoi(argv[++i]);
-        else if (!std::strcmp(argv[i], "--tab") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--tool") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--scenes")) scenesFlag = true;
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
     }
@@ -2597,56 +3199,97 @@ int main(int argc, char** argv) {
                 g.focusBody = -1;
                 auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
                 SDL_Event e{};
-                e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = 600; e.button.y = 300; push(e);
-                e = SDL_Event{}; e.type = SDL_MOUSEMOTION; e.motion.x = 300; e.motion.y = 300; push(e);
-                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = 300; e.button.y = 300; push(e);
+                e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = SIM_X + 600; e.button.y = SIM_Y + 300; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEMOTION; e.motion.x = SIM_X + 300; e.motion.y = SIM_Y + 300; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = SIM_X + 300; e.button.y = SIM_Y + 300; push(e);
                 std::printf("middle-drag 300px left: camera at %d (expected 100)\n", g.camX);
-                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = 900; e.button.y = SIM_H - 4; push(e);
-                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = 900; e.button.y = SIM_H - 4; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + 900; e.button.y = SIM_Y + SIM_H - 4; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = SIM_X + 900; e.button.y = SIM_Y + SIM_H - 4; push(e);
                 std::printf("scroll strip click at 900px: camera at %d (expected %d)\n", g.camX, (int)std::lround(900.f / SIM_W * World::W - VIEW_W * 0.5f));
                 e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_HOME; push(e);
                 std::printf("Home: camera at %d\n", g.camX);
                 g.selectBody(g.phys.bodies.size() > 0 ? 0 : -1, false, false);
-                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_z; push(e);
-                std::printf("Z with a selection: focus body %d\n", g.focusBody);
+                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_f; push(e);
+                std::printf("F with a selection: focus body %d\n", g.focusBody);
                 g.play();
                 for (int i = 0; i < 600; ++i) g.update();
                 bool ok; Vec2 f = g.focusPoint(ok);
                 std::printf("after 600 frames the car is at x=%.0f and the camera at %d (view centre %d)\n", f.x, g.camX, g.camX + VIEW_W / 2);
-                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_z; push(e);
-                std::printf("Z again: focus body %d\n", g.focusBody);
+                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_f; push(e);
+                std::printf("F again: focus body %d\n", g.focusBody);
                 break;
             }
-            case 18: g.buildBondTest(); break;
-            case 19: g.buildPrimerTest(); break;
-            case 20: {   // run-mode and file round trips
-                g.buildGasEngine();
-                std::vector<uint8_t> a, b, c;
-                g.captureState(a);
-                g.play();
-                for (int i = 0; i < 200; ++i) g.update();
-                g.captureState(b);
-                std::printf("after 200 frames of play the state differs from the drawing: %s (playing=%d)\n", a != b ? "yes" : "NO", (int)g.playing);
-                g.stopPlay();
-                g.captureState(c);
-                std::printf("STOP restored the drawn state exactly: %s (playing=%d)\n", a == c ? "yes" : "NO", (int)g.playing);
-                bool w = g.writeFile("selftest");
-                g.buildDemo();
-                bool r = g.readFile("selftest");
-                g.captureState(c);
-                std::printf("save+load round trip: write=%d read=%d identical=%s\n", (int)w, (int)r, a == c ? "yes" : "NO");
-                g.play();
-                for (int i = 0; i < 60; ++i) g.update();
-                g.captureState(b);
-                std::printf("save while playing stores the drawn design: ");
-                bool w2 = g.writeFile("selftest2");
-                g.stopPlay();
-                bool r2 = g.readFile("selftest2");
-                g.captureState(c);
-                std::printf("write=%d read=%d identical=%s\n", (int)w2, (int)r2, a == c ? "yes" : "NO");
+            case 25: {   // editing through real mouse and keyboard events: select, cycle, move, copy/paste, undo, cut
+                g.resetWorld();
+                g.undoStack.clear();
+                auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
+                auto px = [&](float x) { return SIM_X + (int)std::lround((x - g.camX) * S); };
+                auto py = [&](float y) { return SIM_Y + (int)std::lround(y * S); };
+                auto mouseTo = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = px(x); e.motion.y = py(y); push(e); };
+                auto down = [&](float x, float y) { mouseTo(x, y); SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
+                auto up = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
+                auto drag = [&](float x0, float y0, float x1, float y1) { down(x0, y0); mouseTo((x0 + x1) / 2, (y0 + y1) / 2); g.update(); mouseTo(x1, y1); g.update(); up(x1, y1); };
+                auto key = [&](SDL_Keycode k, Uint16 mod = 0) { SDL_SetModState((SDL_Keymod)mod); SDL_Event e{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = k; push(e); SDL_SetModState(KMOD_NONE); };
+                auto alive = [&]() { int n = 0; for (auto& b : g.phys.bodies) n += b.alive; return n; };
+                g.tool = T_BOX;
+                drag(100, 100, 160, 130);                       // a box 60 x 30
+                g.tool = T_CIRCLE;
+                drag(130, 115, 130, 125);                       // a circle of radius 10 on top of it
+                std::printf("drew a box and a circle: %d bodies\n", alive());
+                g.tool = T_SELECT;
+                down(130, 115); up(130, 115);
+                int first = g.primary;
+                down(130, 115); up(130, 115);
+                int second = g.primary;
+                std::printf("click on the overlap twice selects two different bodies: %s (%d then %d)\n", first != second && first >= 0 && second >= 0 ? "yes" : "NO", first, second);
+                Vec2 before = g.phys.bodies[g.primary].pos;
+                drag(130, 115, 190, 135);                       // drag the selected body
+                Vec2 after = g.phys.bodies[g.primary].pos;
+                std::printf("dragging the selection moved it by (%.0f, %.0f) (expected 60, 20)\n", after.x - before.x, after.y - before.y);
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("ctrl+z undoes the move: back at (%.0f, %.0f)\n", g.phys.bodies[g.primary].pos.x, g.phys.bodies[g.primary].pos.y);
+                key(SDLK_y, KMOD_CTRL);
+                std::printf("ctrl+y redoes it: (%.0f, %.0f)\n", g.phys.bodies[g.primary].pos.x, g.phys.bodies[g.primary].pos.y);
+                int n0 = alive();
+                key(SDLK_c, KMOD_CTRL);
+                mouseTo(300, 150);
+                key(SDLK_v, KMOD_CTRL);
+                std::printf("ctrl+c / ctrl+v: %d -> %d bodies, pasted body at (%.0f, %.0f)\n", n0, alive(), g.phys.bodies[g.primary].pos.x, g.phys.bodies[g.primary].pos.y);
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("ctrl+z removes the paste: %d bodies\n", alive());
+                g.clearSelection();
+                g.tool = T_BOX;
+                drag(200, 60, 260, 90);                         // a fresh box to cut: x 200..260, y 60..90
+                g.cutCircle = true;
+                g.tool = T_CUT;
+                drag(230, 75, 230, 67);                         // cut a radius-8 circle out of its middle
+                int cutPieces = 0;
+                for (auto& b : g.phys.bodies) if (b.alive && b.group >= 0) ++cutPieces;
+                auto covered = [&](float x, float y) { for (auto& b : g.phys.bodies) if (b.alive && b.contains(Vec2(x, y))) return true; return false; };
+                std::printf("cut tool: the box became %d welded pieces; centre of the circle is empty: %s; just outside it is solid: %s\n",
+                            cutPieces, !covered(230, 75) ? "yes" : "NO", covered(230, 63) && covered(242, 75) ? "yes" : "NO");
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("ctrl+z restores the box: centre solid again: %s\n", covered(230, 75) ? "yes" : "NO");
+                key(SDLK_y, KMOD_CTRL);
+                std::printf("ctrl+y cuts it again: centre empty: %s\n", !covered(230, 75) ? "yes" : "NO");
+                // subtract with two selected bodies (the circle laid on a box), cutter removed by default
+                g.clearSelection();
+                g.tool = T_BOX; drag(280, 60, 340, 90);
+                g.tool = T_CIRCLE; drag(310, 75, 310, 67);
+                g.tool = T_SELECT;
+                down(310, 75); up(310, 75);                    // the circle (top) first...
+                down(295, 65); up(295, 65);                    // ...then the box; the box is last-clicked, so make the circle the cutter:
+                key(SDLK_z, 0);
+                std::vector<int> two;
+                for (auto& b : g.phys.bodies) if (b.alive && b.pos.x > 275 && b.pos.x < 345) two.push_back(b.id);
+                g.sel = two;
+                for (int id : two) if (g.phys.bodies[id].shape == SHAPE_CIRCLE) g.primary = id;
+                int before2 = 0; for (auto& b : g.phys.bodies) before2 += b.alive;
+                g.cutSelection();
+                std::printf("subtract selection: circle %s, centre of the hole empty: %s\n", g.keepCutter ? "kept" : "consumed", !covered(310, 75) ? "yes" : "NO");
+                (void)before2;
                 break;
             }
-            case 21: g.buildGasEngine(); g.writeFile("engine1"); g.currentFile = "engine1"; g.openFileForm(false); break;
             case 13: g.buildPrecisionTest(); g.tool = Tool::T_HOSE; g.clearSelection(); g.openForm(); break;
             default: g.buildTestScene(scene); break;
         }
@@ -2655,7 +3298,8 @@ int main(int argc, char** argv) {
         if (helpFlag) g.helpOn = true;
         if (pressureFlag) g.pressureView = true;
         if (camFlag >= 0) g.setCam((float)camFlag);
-        if (tabFlag >= 0) g.tab = (Tab)tabFlag;
+        if (tabFlag >= 0) g.tool = (Tool)tabFlag;
+        if (scenesFlag) g.scenesOpen = true;
         if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; }
         if (g0) g.phys.gravity = Vec2(0, 0);
         for (int f = 0; f < shotFrames; ++f) {

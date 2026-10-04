@@ -163,6 +163,70 @@ int Physics::addCircle(Vec2 c, float r, uint8_t mat, bool stat, bool wheel) {
     return id;
 }
 
+int Physics::addBodyCopy(const Body& src) {
+    int id = allocBody();
+    Body& b = bodies[id];
+    int seq = b.seq;
+    b = src;
+    b.id = id; b.seq = seq; b.alive = true;
+    b.vel = Vec2(); b.w = 0.f;
+    b.group = -1;
+    b.fluidF = Vec2(); b.fluidT = b.fluidC = 0.f;
+    b.touching = b.hasJoint = false;
+    b.wetFrac = b.granFrac = b.fluidRho = 0.f;
+    b.src.accum = 0.f;
+    finalize(b);
+    return id;
+}
+
+int Physics::addJointCopy(const Joint& src) {
+    int id = allocJoint();
+    Joint& j = joints[id];
+    j = src;
+    j.id = id; j.alive = true;
+    j.accP = Vec2(); j.accImp = 0.f; j.peak = 0.f;
+    return id;
+}
+
+// Move bodies by delta. A joint reaching a body that stays behind keeps its world anchor (so nothing snaps when the
+// simulation next runs); a pin to the world travels with its body. Groups split by the move are re-welded.
+void Physics::translateBodies(const std::vector<int>& ids, Vec2 delta) {
+    std::vector<char> in(bodies.size(), 0);
+    std::vector<int> groups;
+    for (int id : ids) {
+        if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive) continue;
+        in[id] = 1;
+        Body& b = bodies[id];
+        b.pos += delta;
+        b.vel = Vec2(); b.w = 0.f;
+        if (b.group >= 0 && std::find(groups.begin(), groups.end(), b.group) == groups.end()) groups.push_back(b.group);
+    }
+    for (auto& j : joints) {
+        if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+        bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
+        if (!ia && !ib) continue;
+        if (ia && ib) continue;
+        if (j.type == J_SLIDER) { if (ia) j.lb += delta; continue; }
+        if (ia) {
+            if (j.b < 0) j.lb += delta;
+            else { const Body& B2 = bodies[j.a]; j.la = B2.toLocal((B2.pos - delta) + rotate(j.la, B2.angle)); }
+        }
+        if (ib) {
+            const Body& B2 = bodies[j.b];
+            j.lb = B2.toLocal((B2.pos - delta) + rotate(j.lb, B2.angle));
+        }
+        if (j.type == J_DISTANCE && j.a >= 0) {
+            Vec2 pa = jointAnchorA(j), pb = jointAnchorB(j);
+            j.length = length(pb - pa);
+        }
+    }
+    for (int g : groups) {
+        bool whole = true;
+        for (auto& b : bodies) if (b.alive && b.group == g && !in[b.id]) { whole = false; break; }
+        if (!whole) rebuildGroup(g);
+    }
+}
+
 int Physics::addRocket(Vec2 c, float angle) {
     int id = addBox(c, Vec2(4.f, 8.f), angle, M_ALUMINUM, false);
     bodies[id].isRocket = true;
@@ -1490,7 +1554,7 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
     Vec2 ext = tc.shape == SHAPE_BOX ? tc.half : Vec2(tc.radius, tc.radius);
     std::vector<R> rects;
     long removed = 0;
-    for (float res : {0.5f, 1.f, 2.f, 4.f}) {
+    for (float res : {0.5f, 1.f, 2.f, 4.f, 8.f}) {
         int nx = std::max(1, (int)std::ceil(ext.x * 2 / res)), ny = std::max(1, (int)std::ceil(ext.y * 2 / res));
         float cx = ext.x * 2 / nx, cy = ext.y * 2 / ny;
         std::vector<char> keep((size_t)nx * ny, 0);
@@ -1526,7 +1590,7 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
             }
             open = nextOpen;
         }
-        if (rects.size() <= 150) {
+        if (rects.size() <= 300) {
             // convert cell rects to local boxes below
             std::vector<int> pieces;
             for (const R& r : rects) {

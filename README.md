@@ -47,30 +47,37 @@ cmake --build build -j
 ./build/sandbots --selftest # optional: headless regression checks, prints PASS/FAIL
 ```
 
-The window is 1200 pixels wide and about 920 tall. Press **F1** in the program for a quick tour.
+The window is 1532 x 840. Press **F1** in the program for a quick tour.
 
 Troubleshooting: if CMake says it cannot find SDL2, the development package is missing (`libsdl2-dev` / `SDL2-devel`, not just the runtime library); run `./install_deps.sh`. If you change compilers or move the folder, delete `build/` and configure again. On a machine with no display, use the headless `--shot` mode below.
+
+## The screen
+
+* **Top bar** – PLAY / PAUSE / STEP / STOP, file buttons (NEW, OPEN, SAVE, SAVE AS), UNDO / REDO, view toggles (HEAT, PRESSURE, ELECTRIC), FOCUS, SCENES and HELP.
+* **Left panel** – the tools, grouped: Tools (SELECT, GRAB), Shapes, Machines (FAN, EMITTER), Joints, Edit (CUT, SCALE, EXACT, DELETE, GROUP, COPY, PASTE, SUBTRACT...), Particles (PAINT, ERASER) and Clear.
+* **Right panel** – the properties of whatever you are doing. Painting shows swatches of every particle material, grouped (powders, liquids, gases, metals, building, devices) with no scrolling. Drawing a shape shows the swatches for the shape's material. A selection shows its position/size, material, fixed/free, and fan or emitter settings.
+* **Bottom bar** – current tool, material, selection, cursor coordinates and a one-line hint for whatever is under the mouse.
 
 ## Controls
 
 | Input | Action |
 |---|---|
-| Palette buttons (bottom) | Pick a material or tool |
-| LMB / RMB | Use tool / erase particles |
-| Mouse wheel, `[` `]` | Brush size |
+| `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) | Undo / redo (edit mode) |
+| `Ctrl+C` / `Ctrl+V` | Copy / paste the selected bodies, with the joints between them; paste lands at the cursor |
+| `Ctrl+A` | Select all bodies |
+| `Ctrl+G` / `Ctrl+U` | Group / ungroup |
+| `Ctrl+S` / `Ctrl+O` / `Ctrl+N` | Save / open / new |
 | `Space` | Play (from edit mode) / pause / resume |
-| `N` | Single step (starts paused play from edit mode) |
-| `Ctrl+S` / `Ctrl+O` / `Ctrl+N` | Save / load / new file |
-| `C` / `X` | Clear particles / clear bodies |
-| `R` | Reload the demo scene |
-| `T` | Toggle "anchored" (new bodies are static) |
-| `F` | Cycle mass of new bodies (light floats, heavy sinks) |
-| `V` | Drop a car at the cursor |
-| `G` | Flip gravity |
-| `Tab` | Next material |
-| `Left`/`Right` (or `A`/`D`) | Drive keyed motors |
-| `Up` (or `W`) | Fire rockets |
-| `Del` | Delete body under the cursor |
+| `N` | Single step |
+| `Del` / `Backspace` | Delete the selection |
+| `Enter` | Numeric form for the tool or selection |
+| `F` | Focus the camera on the selected body |
+| `Esc` | Close dialogs / clear the selection |
+| `M`, `+`, `-`, `\` | Fan mode, strength, flip direction |
+| `H`, `P`, `G`, `T` | Heat view, pressure view, flip gravity, fixed toggle |
+| `[` `]` / mouse wheel | Brush size |
+| Middle-drag, `Home`/`End`/`PgUp`/`PgDn` | Pan the camera |
+| Arrow keys / `W` | Drive motors / fire rockets |
 
 ### Edit mode, play and stop, files
 
@@ -86,22 +93,22 @@ The game starts in **edit mode**: nothing moves, so you can draw, place bodies a
 * **Motor** – a pin whose angular velocity is driven by the arrow keys. **Auto motor** always spins (windmills, conveyors).
 * **Rod / Spring** – drag from one body (or empty space = world) to another.
 * **Rocket** – drag to choose the thrust direction; hold `Up` to fire.
-* **Select** – click a body (Shift adds, Ctrl picks a single part of a group), or drag a box around several. Enter edits the selection numerically.
-* **Group / Ungroup** (`Ctrl+G` / `Ctrl+U`) – welds the selected bodies into one rigid object. Every part stays individually editable (Ctrl+click it, then Enter), while grabbing, moving or rotating the group treats it as one thing. Parts of a group never collide with each other. Grouped bodies are outlined in cyan.
+* **Select** – click a body to select it; clicking the same spot again cycles through the bodies stacked there (including parts of a group). Shift adds/removes, dragging on empty space draws a selection box. **Drag a selected body to move it** (the whole selection moves together; joints to bodies outside the selection keep their anchors). With two or more selected, one is the red "cutter" (the last one clicked).
+* **Group / Ungroup** – welds the selected bodies into one rigid object; parts stay individually selectable by click-cycling. Parts of a group never collide with each other.
 * **Pipe** – hollow tube between two points (two welded walls). **Hose** – a chain of pipe segments hinged together so it bends; the mouse wheel sets the diameter.
 * **Exact** (`Enter`) – a numeric form for precise work, in grid cells and degrees. With nothing selected it creates a box (X, Y, width, height, angle), circle/wheel (X, Y, radius), pipe or hose (both end points, diameter, wall, segments) at exactly those values and shows a green preview outline. With a body selected it edits that body's position, size, angle, material (`M`) and static flag (`S`); with a group selected it moves/rotates the whole group. `Tab`/click move between fields.
 * **Snap** – the SNAP button rounds mouse-drawn shapes to a 1/2/5/10 cell grid. While dragging, the exact dimensions are shown next to the cursor and the cursor coordinates are in the status line, so mouse drawing stays available and can be made precise too.
-* **Cut** – boolean subtract. Select the target body(ies), then click the cutter *last* (it has the white outline) and press `CUT`. The cutter's area is removed from every other selected body (a group target is cut part by part). The remainder becomes a welded group of rectangular pieces (steps of 0.5 cell, so curves are fine staircases and the hole is never smaller than the cutter). The cutter is kept and left selected so you can delete it or `SCALE` it. Wheels, rockets and emitters can't be cut.
+* **Cut** – the CUT tool: choose box or circle, drag over any part of the drawing and that area is removed from every body it touches. Each damaged body becomes a welded group of small rectangles (steps down to 0.5 cell; the hole is never smaller than the cut). Undo brings it back. **Subtract** is the selection version: select the target(s), make the cutter the red primary, press SUBTRACT; the cutter is consumed unless KEEP THE CUTTER is on. Wheels, rockets and emitters can't be cut.
 * **Scale** – with bodies selected, `SCALE` opens a percentage form (default 98) that resizes the whole selection about its centre, groups included; joints follow. Cut a hole with a shape, scale that shape to 98 % and you have a tight-fitting plug, valve ball or piston.
-* **Emitter** – a body that endlessly produces the powder, liquid or gas you picked in the palette, in free cells beside its surface. Drag one out with `EMITTER` (or use `Enter`), then select it and press `Enter` to change the **rate** (cells per second; 0 switches it off), which side it emits from (`F`) and the material (click a palette material while the form is open). Because it is an ordinary body it can be anchored, pinned, welded into a group, or left to travel with a machine; if its outlet is blocked it simply waits instead of building up a burst. Use it as an endless fuel or water supply.
+* **Emitter** – a body that endlessly produces the powder, liquid or gas chosen in its panel swatches. Select it to set rate (cells/s, 0 = off), side and material. Because it is an ordinary body it can be anchored, welded into a group or travel with a machine. Use it as an endless fuel or water supply. (The old grid "SOURCE" cell survives only inside scenes as FUEL SUPPLY; it is no longer in the palette.)
 * **Bond** – a temporary connection. Click where two bodies overlap (or one body, to bond it to the world): a weld that lets go when the bodies/cells at the joint exceed a **melt temperature** or the joint load exceeds a **breaking force**. The `PARAFFIN / SOLDER / EPOXY / SHEAR PIN` button cycles presets (55 °C, 190 °C, 260 °C, force-only); `Enter` with the Bond tool sets both numbers exactly (°C and kN). Broken bonds drop out and the bodies collide normally again. Bonded bodies don't collide while the bond holds.
 * **Grab** – drag bodies around with a soft spring. **Delete** – click a body or joint.
 
-### Materials and tabs
+### Materials
 
-The palette is split into tabs: **Powder** (sand, ash, gunpowder, coal), **Liquid** (water, oil, gasoline, diesel, kerosene, jet fuel, ethanol, hydraulic fluid, acid, lava), **Gas** (steam, fire, smoke, exhaust, fuel vapour, propane, hydrogen, air), **Metal** (steel, iron, copper, aluminum, lead, gold, titanium, tungsten, solder), **Struct** (wall, stone, concrete, brick, ceramic, glass, wood, rubber, plastic, ice, plant, TNT, paraffin), **Device** (heater, cooler, spark plug/igniter, fluid source, void drain, battery+ and battery-, primer), **Scenes** (ready-made machines) and a **Heat view** toggle that colours cells by temperature.
+The PAINT panel groups particle materials: **Powder** (sand, ash, gunpowder, coal), **Liquid** (water, oil, gasoline, diesel, kerosene, jet fuel, ethanol, hydraulic fluid, acid, lava), **Gas** (steam, fire, smoke, exhaust, fuel vapour, propane, hydrogen, air), **Metal** (steel, iron, copper, aluminum, lead, gold, titanium, tungsten, solder), **Struct** (wall, stone, concrete, brick, ceramic, glass, wood, rubber, plastic, ice, plant, TNT, paraffin), **Device** (heater, cooler, spark plug/igniter, fluid source, void drain, battery+ and battery-, primer), **Scenes** (ready-made machines) and a **Heat view** toggle that colours cells by temperature.
 
-Every material has density, friction, restitution, **thermal conductivity** and heat capacity. Solid materials drawn as cells use those properties, and the `BODY:` button picks the material for box/circle bodies (density, friction, bounce, heat conduction, melting and burning all follow from it).
+Every material has density, friction, restitution, **thermal conductivity** and heat capacity. Solid materials drawn as cells use those properties, and the material swatches shown in the right panel while a shape tool is active (or a body is selected) pick the material for bodies (density, friction, bounce, heat conduction, melting and burning all follow from it).
 
 * **Fuels differ** – flash point, autoignition temperature, volatility, burn rate and energy: gasoline flashes below freezing and evaporates fast, ethanol burns clean, kerosene/jet fuel/diesel need heat (diesel autoignites under compression/hot surfaces – glow plug), hydraulic fluid barely burns.
 * **Heat** flows by conduction through everything (copper moves it quickly, ceramic and plastic insulate), phase changes (water↔steam↔ice, metals↔molten, fuel↔vapour) absorb latent heat, and gases heat when compressed.

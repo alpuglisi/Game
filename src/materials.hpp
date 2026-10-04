@@ -147,9 +147,9 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
     // ---- devices
     { auto& m = def(M_HEATER, "HEATER", 0xff6a3a, K_SOLID, 100.f); th(m, 0.2f, 50.f); m.initT = 900.f; m.acidK = 0.f; }
     { auto& m = def(M_COOLER, "COOLER", 0x4aa8ff, K_SOLID, 100.f); th(m, 0.2f, 50.f); m.initT = -60.f; m.acidK = 0.f; }
-    { auto& m = def(M_IGNITER, "IGNITER", 0xffe94a, K_SOLID, 100.f); th(m, 0.2f, 0.3f); m.acidK = 0.f; }
-    { auto& m = def(M_SOURCE, "SOURCE", 0xff40ff, K_SOLID, 100.f); th(m, 0.02f, 3.0f); m.acidK = 0.f; }
-    { auto& m = def(M_VOID, "VOID", 0x2a0a3a, K_SOLID, 100.f); m.acidK = 0.f; }
+    { auto& m = def(M_IGNITER, "SPARK PLUG", 0xffe94a, K_SOLID, 100.f); th(m, 0.2f, 0.3f); m.acidK = 0.f; }
+    { auto& m = def(M_SOURCE, "FUEL SUPPLY", 0xff40ff, K_SOLID, 100.f); th(m, 0.02f, 3.0f); m.acidK = 0.f; }
+    { auto& m = def(M_VOID, "DRAIN", 0x2a0a3a, K_SOLID, 100.f); m.acidK = 0.f; }
 
     // ---- electrical, frangible and impact-sensitive
     { auto& m = def(M_BATT_POS, "BATTERY+", 0xd23a3a, K_SOLID, 100.f); th(m, 0.05f, 10.f); m.elec = 400.f; m.acidK = 0.f; }

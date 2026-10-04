@@ -140,6 +140,12 @@ public:
     // scale bodies about a pivot by factor s; joints and welds follow
     void scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot);
     void emitSources(float dt);
+    // editor helpers: clone a body / joint (clipboard), move bodies keeping the joints that reach outside intact
+    int addBodyCopy(const Body& src);
+    int addJointCopy(const Joint& src);
+    int newGroupId() { return groupCounter++; }
+    int newBondId() { return bondCounter++; }
+    void translateBodies(const std::vector<int>& ids, Vec2 delta);
     void applyFans(float dt);   // directed airflow, suction/stall, thrust and wind on bodies
     // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
     int addBond(Vec2 anchor, int a, int b, float breakT, float breakF);
