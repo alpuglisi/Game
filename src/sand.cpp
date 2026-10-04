@@ -94,6 +94,7 @@ void World::setCell(int x, int y, uint8_t t) {
     c.life = initialLife(*this, t);
     if (t == M_VAPOR) c.life = M_GASOLINE;
     if (t == M_BATT_POS || t == M_BATT_NEG) { c.life = encV(battV); c.aux = encA(battA); }
+    if (t == M_SOURCE) c.amt = sourceAmt;
     c.temp = MATS[t].initT;
 }
 

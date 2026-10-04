@@ -47,6 +47,7 @@ public:
 
     // ---- electricity (see elec.cpp): battery cells fix a potential, conductors form a resistor network
     float battV = 12.f, battA = 20.f;            // settings stamped into battery cells as they are painted
+    float sourceAmt = 1.f;                       // gas amount a SOURCE cell emits, stamped into sources as they are painted (not saved)
     std::vector<float> volt, curr;               // per-cell potential (V) and current (A), for display and arcs
     std::vector<float> bodyHeat;                 // joule heat (energy units) dissipated in each rigid body this frame
     std::vector<float> bodySigma;                // conductance of each rigid body (set by the physics step)

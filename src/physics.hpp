@@ -47,8 +47,9 @@ struct Body {
     // pressure of adjacent gas/liquid, refreshed once per frame
     Vec2 fluidF;
     float fluidT = 0, fluidC = 0;
-    // fluid coupling, refreshed once per frame
-    float wetFrac = 0, granFrac = 0, fluidRho = 0;
+    // fluid coupling, refreshed once per frame: wetFrac = wetted share of the outline (drag), subFrac = submerged share of
+    // the area (buoyancy, which acts at wetCentroid)
+    float wetFrac = 0, granFrac = 0, fluidRho = 0, subFrac = 0;
     Vec2 wetCentroid;
 
     Vec2 toWorld(Vec2 l) const { return pos + rotate(l, angle); }

@@ -64,7 +64,7 @@ void buoyancy() {
     }
     char d[96];
     std::snprintf(d, sizeof d, "single y=%.2f, welded strips y=%.2f", y[0], y[1]);
-    check(std::fabs(y[0] - y[1]) < 1.0f, "grouped plate floats at the same level as the single block", d);
+    check(std::fabs(y[0] - y[1]) < 0.5f, "grouped plate floats at the same level as the single block", d);
 }
 
 // 2. gas pressure on a piston face: same force whether the piston is one box, strips, or has a pocket cut in it
@@ -774,6 +774,100 @@ void rigidReview() {
     }
 }
 
+// buoyancy by submerged area: a body floats at the Archimedes depth whatever the shape of its outline, and sinks when it is
+// heavier than the liquid; also the rod rest length after scaling and the source density setting
+void buoyancyArea() {
+    std::printf("buoyancy by submerged area\n");
+    auto pool = [](Rig& r) {   // a pool of water 157 cells wide and 40 deep, its floor at y=150
+        r.world.fillRect(40, 150, 200, 153, M_WALL);
+        r.world.fillRect(40, 100, 41, 153, M_WALL);
+        r.world.fillRect(199, 100, 200, 153, M_WALL);
+        r.world.fillRect(42, 110, 198, 149, M_WATER);
+    };
+    auto surfaceY = [](Rig& r) {   // the liquid level away from the body: the floor less the liquid cells per column, averaged
+        float sum = 0; int cols = 0;
+        for (int x = 50; x <= 190; ++x) {
+            if (x > 80 && x < 160) continue;
+            int n = 0; for (int y = 100; y < 150; ++y) n += MATS[r.world.at(x, y).t].kind == K_LIQUID;
+            sum += 150.f - n; ++cols;
+        }
+        return sum / cols;
+    };
+    auto settle = [&](Rig& r, int id, float& by, float& ly) {   // let the body settle, then average two seconds of bobbing
+        r.step(400);
+        by = ly = 0;
+        for (int i = 0; i < 120; ++i) { r.step(1); by += r.phys.bodies[id].pos.y / 120.f; ly += surfaceY(r) / 120.f; }
+    };
+    {   // a 28x8 wood plate (density 0.6) floats with 40% of its height out of the water, not one cell; dropped tilted, it rights itself
+        Rig r; pool(r);
+        int id = r.phys.addBox(Vec2(120, 100), Vec2(14, 4), 0.3f, M_WOOD, false);
+        r.phys.stampBodies();
+        float by, ly; settle(r, id, by, ly);
+        float above = (ly - (by - 4.f)) / 8.f;
+        char d[96]; std::snprintf(d, sizeof d, "%.0f%% of its height above the water (Archimedes: 40%%), tilt %.3f rad", above * 100, r.phys.bodies[id].angle);
+        check(above > 0.35f && above < 0.45f && std::fabs(r.phys.bodies[id].angle) < 0.05f, "a wood plate floats at the Archimedes depth, level", d);
+    }
+    {   // a steel box sinks to the bottom and is submerged there
+        Rig r; pool(r);
+        int id = r.phys.addBox(Vec2(120, 100), Vec2(5, 5), 0, M_STEEL, false);
+        r.phys.stampBodies();
+        r.step(400);
+        char d[96]; std::snprintf(d, sizeof d, "resting at y=%.1f (the floor is at 150), submerged fraction %.2f", r.phys.bodies[id].pos.y, r.phys.bodies[id].subFrac);
+        check(r.phys.bodies[id].pos.y > 143.f && r.phys.bodies[id].subFrac > 0.99f, "a steel box sinks to the floor of the pool", d);
+    }
+    {   // a wood disc: the segment below the surface is 0.6 of the disc when the centre is 0.158 R under water
+        Rig r; pool(r);
+        const float R = 6.f;
+        int id = r.phys.addCircle(Vec2(120, 100), R, M_WOOD, false, false);
+        r.phys.stampBodies();
+        float by, ly; settle(r, id, by, ly);
+        float depth = by - ly;
+        char d[96]; std::snprintf(d, sizeof d, "centre %.2f cells below the surface (Archimedes: %.2f)", depth, 0.158f * R);
+        check(std::fabs(depth - 0.158f * R) < 1.f, "a wood disc floats at about its Archimedes depth", d);
+    }
+    {   // scaling one end of a rigid rod leaves its rest length equal to the distance between its anchors (so nothing snaps);
+        // a spring keeps its natural length
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int c = r.phys.addBox(Vec2(100, 60), Vec2(5, 5), 0.3f, M_STEEL, true);
+        int a = r.phys.addBox(Vec2(100, 100), Vec2(5, 5), 0.5f, M_STEEL, false);
+        int rod = r.phys.addDistance(c, Vec2(100, 65), a, Vec2(97, 96), 0.f);
+        int tie = r.phys.addDistance(a, Vec2(104, 103), -1, Vec2(140, 130), 0.f);
+        int spring = r.phys.addDistance(c, Vec2(105, 60), a, Vec2(103, 97), 2.f);
+        float s0 = r.phys.joints[spring].length;
+        r.phys.scaleBodies({a}, 1.6f, Vec2(90, 120));
+        auto slack = [&](int j) { const Joint& jt = r.phys.joints[j]; return std::fabs(jt.length - length(r.phys.jointAnchorB(jt) - r.phys.jointAnchorA(jt))); };
+        float e1 = slack(rod), e2 = slack(tie);
+        r.phys.stampBodies();
+        Vec2 p0 = r.phys.bodies[a].pos;
+        r.step(60);
+        float moved = length(r.phys.bodies[a].pos - p0);
+        char d[128];
+        std::snprintf(d, sizeof d, "rod and tie rest length off their anchor distance by %.4f / %.4f, spring %.2f -> %.2f, body moved %.3f in 1 s",
+                      e1, e2, s0, r.phys.joints[spring].length, moved);
+        check(e1 < 1e-3f && e2 < 1e-3f && std::fabs(r.phys.joints[spring].length - s0) < 1e-4f && moved < 0.05f,
+              "scaling one end of a rod keeps its rest length at the anchor distance", d);
+    }
+    {   // the source density setting is stamped into painted sources, which emit at it
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        r.world.sourceAmt = 0.7f;
+        for (int x = 100; x <= 111; ++x) for (int y = 100; y <= 107; ++y) if (x == 100 || x == 111 || y == 100 || y == 107) r.world.setCell(x, y, M_WALL);
+        r.world.fillRect(105, 103, 106, 104, M_SOURCE, M_VAPOR);
+        bool stamped = true;
+        for (int x = 105; x <= 106; ++x)
+            for (int y = 103; y <= 104; ++y) { const Cell& c = r.world.at(x, y); stamped &= c.t == M_SOURCE && c.life == M_VAPOR && std::fabs(c.amt - 0.7f) < 1e-6f; }
+        r.step(300);
+        float mx = 0, sum = 0; int n = 0;
+        for (int x = 101; x <= 110; ++x)
+            for (int y = 101; y <= 106; ++y) { const Cell& c = r.world.at(x, y); if (MATS[c.t].kind == K_GAS) { mx = std::max(mx, c.amt); sum += c.amt; ++n; } }
+        char d[128];
+        std::snprintf(d, sizeof d, "source cells stamped at 0.7: %d; after 5 s the sealed chamber holds %d gas cells, densest %.3f, mean %.3f",
+                      (int)stamped, n, mx, n ? sum / n : 0.f);
+        check(stamped && n >= 50 && mx < 0.8f && sum / std::max(1, n) > 0.6f, "a painted source takes the source density setting and fills its chamber to it", d);
+    }
+}
+
 // fixes from the second review of the rigid-body engine
 void rigidReview2() {
     std::printf("rigid-body review fixes, round two\n");
@@ -999,6 +1093,7 @@ int runSelfTests() {
     liquids();
     emitters();
     rigidReview();
+    buoyancyArea();
     rigidReview2();
     gridReview();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);

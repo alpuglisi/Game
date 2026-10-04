@@ -776,6 +776,7 @@ struct Game {
         labels.clear();
         phys.gravity = Vec2(0, 260.f);
         phys.motorInput = 0;
+        world.sourceAmt = 1.f;
         heatView = false;
         focusBody = -1;
         setCam(0);
@@ -944,9 +945,8 @@ struct Game {
         crankSlider(91, 16, 100, 156, 18, 24, M_IRON);
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
-        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel/air supply on the left of the chest
-        float dens = 0.8f;
-        for (int y = 136; y <= 145; ++y) world.at(76, y).amt = dens;   // (gasoline vapour by default)
+        world.sourceAmt = 0.8f;
+        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel/air supply on the left of the chest (gasoline vapour by default)
         rect(90, 152, 90, 156, M_IGNITER);                     // spark plug set into the head wall
         sparkIdx = 5;
         world.sparkPeriod = SPARK_RATES[sparkIdx];
@@ -966,9 +966,9 @@ struct Game {
         crankSlider(91, 16, 100, 156, 18, 24, M_IRON);
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
+        world.sourceAmt = 0.8f;
         rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // diesel vapour supply on the left of the chest
-        float dens = 0.8f;
-        for (int y = 136; y <= 145; ++y) { world.at(76, y).amt = dens; world.at(76, y).aux = M_DIESEL; }
+        for (int y = 136; y <= 145; ++y) world.at(76, y).aux = M_DIESEL;
         rect(90, 152, 90, 156, M_HEATER);                      // glow plug: diesel needs heat, not a spark, to light
         sparkIdx = 0;
         world.sparkPeriod = 0;

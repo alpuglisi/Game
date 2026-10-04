@@ -223,7 +223,7 @@ int Physics::addBodyCopy(const Body& src) {
     b.group = -1;
     b.fluidF = Vec2(); b.fluidT = b.fluidC = 0.f;
     b.touching = b.hasJoint = false;
-    b.wetFrac = b.granFrac = b.fluidRho = 0.f;
+    b.wetFrac = b.granFrac = b.fluidRho = b.subFrac = 0.f;
     b.src.accum = 0.f;
     finalize(b);
     return id;
@@ -786,26 +786,44 @@ void Physics::dissolve(Body& b) {
 }
 
 void Physics::sampleFluids() {
-    // Exposure of a body to liquid / grains is read from points just outside its outline. Members of a rigid
-    // group are one object: points that fall inside a sibling's cover are interior and ignored, and the group's
-    // totals are shared by every member, so a welded plate floats like the single box it replaces.
-    // Each sample stands for the stretch of the body's own outline it sits on and is weighted by it, so a short edge
-    // with one sample and a long one with ten contribute in proportion to their length: a plate welded from thin strips
-    // (many short side edges) then floats where the single block does.
-    struct Acc { float wet = 0, gran = 0, n = 0, rho = 0; Vec2 cen; };
+    // Exposure of a body to liquid / grains is read from points 1.5 cells outside its outline, each weighted by the stretch
+    // of the body's own outline it stands for. Members of a rigid group are one object: points that fall inside a sibling's
+    // cover are interior and ignored, and the group's wetted fraction (which scales the drag) is shared by every member.
+    // Buoyancy wants the submerged area, not the wetted outline: a flat plate has little outline under water for a lot of
+    // area and used to float far too deep. Where the wet samples lie below the ones in open air (measured along gravity)
+    // the liquid has a flat surface; its level is read off the grid at the body's sides, and each body's shape is clipped at
+    // that level (a group member by member, so the parts add up to the group's displaced area). Liquid on several sides, a
+    // wave, or a piston whose sides sit against its bore give no readable surface: then the wetted fraction stands in.
+    struct Acc { float wet = 0, gran = 0, n = 0, rho = 0; Vec2 cen; int s0 = 0, s1 = 0; };   // s0..s1: this body's samples
+    // s: position along gravity; w: outline stretch; side: on an edge running along gravity; kind: 0 open air (empty or gas),
+    // 1 liquid, 2 solid, grains or a body
+    struct Sample { Vec2 p; float s, w; bool side; int kind; };
+    std::vector<Sample> smp;
     std::vector<Acc> groupAcc;
+    std::vector<std::vector<int>> members;
     std::vector<Acc> own(bodies.size());
+    const float gl = length(gravity);
+    const Vec2 g = gl > 1e-3f ? gravity / gl : Vec2(0, 1);   // "down"
+    auto cellKind = [&](Vec2 q) {
+        int ix = (int)std::floor(q.x), iy = (int)std::floor(q.y);
+        if (!world->inb(ix, iy)) return 2;
+        int i = iy * World::W + ix;
+        if (world->bodyMask[i] >= 0) return 2;
+        Kind k = MATS[world->cells[i].t].kind;
+        return k == K_LIQUID ? 1 : (k == K_EMPTY || k == K_GAS) ? 0 : 2;
+    };
     for (auto& b : bodies) {
-        b.wetFrac = b.granFrac = b.fluidRho = 0;
+        b.wetFrac = b.granFrac = b.fluidRho = b.subFrac = 0;
         if (!b.alive || b.isStatic) continue;
-        struct SP { Vec2 p; float w; };
+        struct SP { Vec2 p; float w; bool side; };
         std::vector<SP> pts;
         if (b.shape == SHAPE_CIRCLE) {
             int n = std::clamp((int)(2 * PI * (b.radius + 1.5f) / 3.f), 8, 48);
             float w = 2 * PI * b.radius / n;
             for (int i = 0; i < n; ++i) {
                 float a = 2 * PI * i / n;
-                pts.push_back({b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f), w});
+                Vec2 d(std::cos(a), std::sin(a));
+                pts.push_back({b.pos + d * (b.radius + 1.5f), w, std::fabs(dot(d, g)) < 0.7f});
             }
         } else {
             float hx = b.half.x + 1.5f, hy = b.half.y + 1.5f;
@@ -813,39 +831,133 @@ void Physics::sampleFluids() {
             for (int e = 0; e < 4; ++e) {
                 Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
                 float len = (e & 1) ? 2.f * b.half.y : 2.f * b.half.x;   // the body's own edge length
+                bool side = std::fabs(dot(rotate(normalize(p1 - p0), b.angle), g)) > 0.5f;
                 int n = std::max(1, (int)(length(p1 - p0) / 3.f));
-                for (int i = 0; i < n; ++i) pts.push_back({b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)), len / n});
+                for (int i = 0; i < n; ++i) pts.push_back({b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)), len / n, side});
             }
         }
         Acc& ac = own[b.id];
+        ac.s0 = (int)smp.size();
         for (const SP& sp : pts) {
             Vec2 p = sp.p;
             int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
             if (!world->inb(ix, iy)) continue;
-            if (b.group >= 0) {
-                int m = world->bodyMask[iy * World::W + ix];
-                if (m >= 0 && m < (int)bodies.size() && bodies[m].group == b.group) continue;  // interior to the group
-            }
+            int m = world->bodyMask[iy * World::W + ix];
+            if (b.group >= 0 && m >= 0 && m < (int)bodies.size() && bodies[m].group == b.group) continue;  // interior to the group
             ac.n += sp.w;
             uint8_t t = world->at(ix, iy).t;
             Kind k = MATS[t].kind;
             if (k == K_LIQUID) { ac.wet += sp.w; ac.rho += MATS[t].density * sp.w; ac.cen += p * sp.w; }
             else if (k == K_POWDER) ac.gran += sp.w;
+            smp.push_back({p, dot(p, g), sp.w, sp.side, k == K_LIQUID ? 1 : (m < 0 && (k == K_EMPTY || k == K_GAS)) ? 0 : 2});
         }
+        ac.s1 = (int)smp.size();
         if (b.group >= 0) {
-            if ((int)groupAcc.size() <= b.group) groupAcc.resize(b.group + 1);
-            Acc& g = groupAcc[b.group];
-            g.wet += ac.wet; g.gran += ac.gran; g.n += ac.n; g.rho += ac.rho; g.cen += ac.cen;
+            if ((int)groupAcc.size() <= b.group) { groupAcc.resize(b.group + 1); members.resize(b.group + 1); }
+            Acc& ga = groupAcc[b.group];
+            ga.wet += ac.wet; ga.gran += ac.gran; ga.n += ac.n; ga.rho += ac.rho; ga.cen += ac.cen;
+            members[b.group].push_back(b.id);
         }
     }
+    // The liquid surface seen by one body or by a whole group. 0: nothing wet; 1: nothing but liquid around it; 2: a flat
+    // surface at `level` (a coordinate along gravity); 3: no readable surface, the wetted fraction stands in.
+    auto surface = [&](const std::vector<int>& ids, float& level) {
+        float sMinWet = 1e9f, wetW = 0, airW = 0, blockedW = 0;
+        for (int id : ids)
+            for (int i = own[id].s0; i < own[id].s1; ++i) {
+                const Sample& sm = smp[i];
+                if (sm.kind == 1) { wetW += sm.w; sMinWet = std::min(sMinWet, sm.s); }
+                else if (sm.kind == 0) airW += sm.w;
+                else blockedW += sm.w;
+            }
+        if (wetW <= 0.f) return 0;
+        if (airW <= 0.f) return wetW >= blockedW ? 1 : 3;   // sunk to the floor: submerged; a piston at the end of its bore: mostly wall, not a pool
+        // Read the level off the grid at the sides: up from the wet side samples nearest the waterline until the liquid ends,
+        // down from the air side samples just above them until liquid starts, then bisect for the cell edge. The top and bottom
+        // faces do not count: a pocket of air left under a rising plate, or a stream falling on top, says nothing about where
+        // the pool's surface is. A wall or a body in the way spoils a walk.
+        float sum = 0; int cnt = 0;
+        auto walk = [&](Vec2 from, int have) {
+            Vec2 step = g * (have ? -0.5f : 0.5f);
+            Vec2 q = from;
+            for (int i = 0; i < 12; ++i) {
+                Vec2 nq = q + step;
+                int k = cellKind(nq);
+                if (k == have) { q = nq; continue; }
+                if (k != 1 - have) return;
+                for (int it = 0; it < 3; ++it) { Vec2 mid = (q + nq) * 0.5f; if (cellKind(mid) == have) q = mid; else nq = mid; }
+                sum += dot((q + nq) * 0.5f, g); ++cnt;
+                return;
+            }
+        };
+        for (int id : ids)
+            for (int i = own[id].s0; i < own[id].s1; ++i) {
+                const Sample& sm = smp[i];
+                if (!sm.side) continue;
+                if (sm.kind == 1 && sm.s < sMinWet + 3.5f) walk(sm.p, 1);
+                else if (sm.kind == 0 && sm.s <= sMinWet + 0.5f && sm.s > sMinWet - 7.5f) walk(sm.p, 0);
+            }
+        if (cnt == 0) return 3;
+        level = sum / cnt;
+        // the samples that disagree with that surface (liquid above it, air below it) must be a small minority: an air pocket
+        // or a splash, not liquid against one face of a piston or a wave washing over the body
+        float wrong = 0;
+        for (int id : ids)
+            for (int i = own[id].s0; i < own[id].s1; ++i) {
+                const Sample& sm = smp[i];
+                if ((sm.kind == 1 && sm.s < level - 1.f) || (sm.kind == 0 && sm.s > level + 1.f)) wrong += sm.w;
+            }
+        return wrong > 0.2f * (wetW + airW) ? 3 : 2;
+    };
+    // the part of a body below the surface: its share of the body's area, and its centroid, where the buoyancy acts
+    auto clip = [&](const Body& b, float level, float& frac, Vec2& cen) {
+        frac = 0.f; cen = b.pos;
+        if (b.shape == SHAPE_CIRCLE) {   // a circular segment: the disc less the dry cap above the chord
+            float R = b.radius, u = std::clamp(dot(b.pos, g) - level, -R, R);   // how far the centre lies below the surface
+            float q = std::sqrt(std::max(0.f, R * R - u * u));
+            float dry = R * R * std::acos(std::clamp(u / R, -1.f, 1.f)) - u * q, wet = b.area - dry;
+            if (wet <= 1e-3f) return;
+            frac = std::min(1.f, wet / b.area);
+            cen = b.pos + g * (2.f / 3.f * q * q * q / wet);
+            return;
+        }
+        Vec2 v[4], nrm[4];
+        boxPoly(b, v, nrm);
+        Vec2 poly[8]; int m = 0;   // the box cut along the surface: up to six corners
+        for (int i = 0; i < 4; ++i) {
+            Vec2 a = v[i], c = v[(i + 1) & 3];
+            float da = dot(a, g) - level, dc = dot(c, g) - level;
+            if (da >= 0) poly[m++] = a;
+            if ((da >= 0) != (dc >= 0)) poly[m++] = a + (c - a) * (da / (da - dc));
+        }
+        if (m < 3) return;
+        float a2 = 0; Vec2 cs;
+        for (int i = 0; i < m; ++i) { Vec2 p = poly[i], q = poly[(i + 1) % m]; float w = cross(p, q); a2 += w; cs += (p + q) * w; }
+        if (std::fabs(a2) <= 1e-6f) return;
+        frac = std::min(1.f, std::fabs(a2) * 0.5f / b.area);
+        cen = cs / (3.f * a2);
+    };
+    auto resolve = [&](const std::vector<int>& ids, const Acc& ac) {
+        if (ac.n <= 0.f) return;
+        float level = 0.f;
+        int mode = ac.wet > 0.f ? surface(ids, level) : 0;
+        for (int id : ids) {
+            Body& b = bodies[id];
+            b.wetFrac = ac.wet / ac.n;
+            b.granFrac = ac.gran / ac.n;
+            if (ac.wet > 0.f) { b.fluidRho = ac.rho / ac.wet; b.wetCentroid = ac.cen / ac.wet; }
+            b.subFrac = b.wetFrac;
+            if (mode == 1) { b.subFrac = 1.f; b.wetCentroid = b.pos; }
+            else if (mode == 2) clip(b, level, b.subFrac, b.wetCentroid);
+        }
+    };
+    std::vector<int> one(1);
     for (auto& b : bodies) {
-        if (!b.alive || b.isStatic) continue;
-        const Acc& ac = b.group >= 0 ? groupAcc[b.group] : own[b.id];
-        if (ac.n <= 0.f) continue;
-        b.wetFrac = ac.wet / ac.n;
-        b.granFrac = ac.gran / ac.n;
-        if (ac.wet > 0.f) { b.fluidRho = ac.rho / ac.wet; b.wetCentroid = ac.cen / ac.wet; }
+        if (!b.alive || b.isStatic || b.group >= 0) continue;
+        one[0] = b.id;
+        resolve(one, own[b.id]);
     }
+    for (int gi = 0; gi < (int)members.size(); ++gi) if (!members[gi].empty()) resolve(members[gi], groupAcc[gi]);
 }
 
 void Physics::applyBlasts() {
@@ -1250,8 +1362,8 @@ void Physics::substep(float h) {
         if (!b.alive || b.isStatic) continue;
         b.vel += gravity * h;
         if (b.wetFrac > 0) {
-            // buoyancy: force of displaced fluid applied at the wetted centroid
-            Vec2 F = -gravity * (b.fluidRho * b.area * b.wetFrac);
+            // buoyancy: the weight of the displaced liquid, applied at the centroid of the submerged part; drag scales with the wetted outline
+            Vec2 F = -gravity * (b.fluidRho * b.area * b.subFrac);
             b.vel += F * (b.invMass * h);
             b.w += b.invI * cross(b.wetCentroid - b.pos, F) * h;
             b.vel *= 1.f / (1.f + 2.5f * b.wetFrac * h);
@@ -1768,6 +1880,8 @@ void Physics::scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot) {
         }
         if (ia) j.la = bodies[j.a].toLocal(old[j.a].toWorld(j.la));   // one end fixed: keep the joint in place
         if (ib) j.lb = bodies[j.b].toLocal(old[j.b].toWorld(j.lb));
+        // a rod keeps the length between its (unmoved) anchors; a spring keeps its natural one
+        if (j.type == J_DISTANCE && j.freq <= 0.f) j.length = length(jointAnchorB(j) - jointAnchorA(j));
     }
     for (int g : groups) rebuildGroup(g);
 }
