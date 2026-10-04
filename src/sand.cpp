@@ -912,23 +912,7 @@ void World::gasFlux() {
     for (int x = 0; x < W; ++x) { for (int y : {0, H - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
     for (int y = 0; y < H; ++y) { for (int x : {0, W - 1}) { Cell& c = cells[y * W + x]; if (MATS[c.t].kind == K_GAS && c.t != M_FIRE && bodyMask[y * W + x] < 0) c = Cell{}; } }
     // which empty and gas cells are open air (connected to the edge of the world); inside a sealed machine the empty cells are vacuum
-    if (outside.size() != (size_t)W * H || tick - outsideTick >= 20u || outsideTick > tick) {
-        outside.assign((size_t)W * H, 0);
-        outsideTick = tick;
-        std::vector<int> st;
-        auto open_ = [&](int i) { return bodyMask[i] < 0 && (cells[i].t == M_EMPTY || MATS[cells[i].t].kind == K_GAS); };
-        auto seed = [&](int i) { if (!outside[i] && open_(i)) { outside[i] = 1; st.push_back(i); } };
-        for (int x = 0; x < W; ++x) { seed(x); seed((H - 1) * W + x); }
-        for (int y = 0; y < H; ++y) { seed(y * W); seed(y * W + W - 1); }
-        while (!st.empty()) {
-            int p = st.back(); st.pop_back();
-            int px = p % W, py = p / W;
-            if (px + 1 < W) seed(p + 1);
-            if (px > 0) seed(p - 1);
-            if (py + 1 < H) seed(p + W);
-            if (py > 0) seed(p - W);
-        }
-    }
+    refreshOutside();   // (the combustion code keeps it fresher than the 20 frames this used to allow itself)
     for (int i = 0; i < W * H; ++i) {
         Cell& c = cells[i];
         if (MATS[c.t].kind != K_GAS || c.t == M_FIRE) continue;
