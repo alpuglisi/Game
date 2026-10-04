@@ -17,6 +17,11 @@ struct Emitter {
     uint8_t face = 0;    // 0 = all sides, else 1:+x 2:-x 3:+y 4:-y of the body's own frame
 };
 
+// A fan / blower: pushes gas along the body's +x axis (negative strength = the other way).
+struct Fan {
+    float strength = 0.f;  // airflow speed in cells per second; 0 = not a fan
+};
+
 struct Body {
     int id = -1;
     int seq = 0;  // creation order (higher = on top)
@@ -33,6 +38,7 @@ struct Body {
     bool isStatic = false, isWheel = false, isRocket = false;
     bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
     Emitter src;
+    Fan fan;
     bool spent = false;  // a fired primer
     int group = -1;     // rigid group (weld-linked bodies act as one object); -1 = none
     uint32_t color = 0xe0b060;
@@ -133,6 +139,7 @@ public:
     // scale bodies about a pivot by factor s; joints and welds follow
     void scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot);
     void emitSources(float dt);
+    void applyFans(float dt);   // directed airflow, suction/stall, thrust and wind on bodies
     // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
     int addBond(Vec2 anchor, int a, int b, float breakT, float breakF);
     long bondsBroken = 0;

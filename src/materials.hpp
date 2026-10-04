@@ -9,7 +9,7 @@ enum Mat : uint8_t {
     // liquids
     M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA, M_MOLTEN,
     // gases
-    M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN,
+    M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN, M_AIR,
     // metals
     M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN,
     // structural / other solids
@@ -113,6 +113,8 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
       burn(m, 470, -100, 1900, 8, 0.9f); m.buoy = -0.12f; }
     { auto& m = def(M_HYDROGEN, "HYDROGEN", 0xe6ffe6, K_GAS, 0.0005f); th(m, 0.0015f, 0.25f);
       burn(m, 500, -100, 2000, 8, 1.0f); m.buoy = 1.2f; }
+
+    { auto& m = def(M_AIR, "AIR", 0xa8c8e8, K_GAS, 0.001f); th(m, 0.0006f, 0.25f); }
 
     // ---- metals
     { auto& m = def(M_STEEL, "STEEL", 0x9aa4b2, K_SOLID, 7.8f); th(m, 0.06f, 3.8f); fr(m, 0.12f, 0.15f); hi(m, 1450, M_MOLTEN); m.acidK = 0.4f;  m.elec = 40.f;}

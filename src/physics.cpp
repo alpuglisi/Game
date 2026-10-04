@@ -1126,6 +1126,7 @@ void Physics::substep(float h) {
 
 void Physics::step(float dt) {
     emitSources(dt);
+    applyFans(dt);
     applyBlasts();
     fluidForces();
     sampleFluids();
@@ -1247,6 +1248,128 @@ void Physics::processEvents(float dt) {
     }
 }
 
+// ------------------------------------------------------------------ fans
+// Gas has no velocity of its own in the grid model, so a fan moves gas explicitly: along lanes of cells that run
+// out of the body's exhaust face and back from its intake face, each frame some gas hops one cell down the lane
+// (through the fan itself). Pressure dynamics come from the rest of the gas model: the moved gas piles up
+// ahead of the fan and drains from behind it, and a fan curve lowers the flow as the pressure it works
+// against approaches its stall pressure. The intake draws in fresh ambient air.
+void Physics::applyFans(float dt) {
+    constexpr float THRUST_K = 300.f, WIND_K = 40.f;
+    World& w = *world;
+    auto psi = [&](const Cell& c) { return MATS[c.t].kind == K_GAS ? c.amt * (c.temp + 273.f) / 293.f : 0.f; };
+    for (size_t bi = 0; bi < bodies.size(); ++bi) {
+        Body& b = bodies[bi];
+        if (!b.alive || b.shape != SHAPE_BOX || b.fan.strength == 0.f) continue;
+        const float s = b.fan.strength, mag = std::fabs(s);
+        const Vec2 axis = rotate(Vec2(s > 0 ? 1.f : -1.f, 0.f), b.angle);
+        const Vec2 lat(-axis.y, axis.x);
+        const float R = std::clamp(10.f + mag * 0.25f, 10.f, 60.f);   // reach of the stream
+        const int Rin = std::clamp((int)(R * 0.6f), 6, 36);   // suction reaches back behind the fan
+        const float tFace = b.half.x + 0.5f;
+        const int lanes = std::max(1, (int)std::floor(2.f * b.half.y));
+
+        // lane cells, behind-most first, ahead-most last
+        std::vector<std::vector<int>> lane(lanes);
+        std::vector<int> split(lanes, 0);  // index of the first cell ahead of the fan
+        for (int l = 0; l < lanes; ++l) {
+            float off = ((float)l + 0.5f) - (float)lanes * 0.5f;
+            auto cellAt = [&](float t) { Vec2 p = b.pos + axis * t + lat * off; return Vec2(std::floor(p.x), std::floor(p.y)); };
+            std::vector<int> behind, ahead;
+            auto walk = [&](bool fwd, int count, std::vector<int>& out) {
+                int last = -1;
+                for (int j = 0; j < count; ++j) {
+                    Vec2 c = cellAt(fwd ? tFace + j : -(tFace + j));
+                    int ix = (int)c.x, iy = (int)c.y;
+                    if (!w.inb(ix, iy)) break;
+                    int i = iy * World::W + ix;
+                    if (i == last) continue;
+                    int m = w.bodyMask[i];
+                    if (m >= 0 && m != b.id) break;                       // another body blocks the stream
+                    Kind k = MATS[w.cells[i].t].kind;
+                    if (m < 0 && k != K_EMPTY && k != K_GAS) break;       // solids, powders and liquids block it
+                    if (m == b.id) continue;                              // the fan's own cover cells
+                    out.push_back(i);
+                    last = i;
+                }
+            };
+            walk(true, (int)R, ahead);
+            walk(false, Rin, behind);
+            for (int i = (int)behind.size() - 1; i >= 0; --i) lane[l].push_back(behind[i]);
+            split[l] = (int)lane[l].size();
+            for (int i : ahead) lane[l].push_back(i);
+        }
+
+        // fan curve: the flow falls to zero as the pressure rise it works against reaches the stall pressure
+        float pIn = 0, pOut = 0; int nIn = 0, nOut = 0;
+        for (int l = 0; l < lanes; ++l) {
+            for (int k = std::max(0, split[l] - 3); k < split[l]; ++k) { pIn += psi(w.cells[lane[l][k]]); ++nIn; }
+            for (int k = split[l]; k < std::min((int)lane[l].size(), split[l] + 4); ++k) { pOut += psi(w.cells[lane[l][k]]); ++nOut; }
+        }
+        pIn = nIn ? pIn / nIn : 0.f;
+        pOut = nOut ? pOut / nOut : 0.f;
+        const float stall = 0.02f * mag;
+        const float flow = std::clamp(1.f - (pOut - pIn) / std::max(0.05f, stall), 0.f, 1.f);
+
+        const float v = mag / 60.f * flow;                 // cells per frame
+        const int hops = std::max(1, (int)std::ceil(v));
+        const float pHop = std::min(1.f, v / hops);
+        for (int l = 0; l < lanes; ++l) {
+            std::vector<int>& L = lane[l];
+            if (L.empty()) continue;
+            for (int h = 0; h < hops; ++h) {
+                // intake: ambient air appears at the back end of the lane and is drawn towards the fan
+                if (split[l] > 0 && w.chance(pHop)) {
+                    int i = L[0];
+                    Cell& in = w.cells[i];
+                    if (in.t == M_EMPTY) {
+                        w.setCell(i % World::W, i / World::W, M_AIR);
+                        w.cells[i].amt = 1.f;
+                    } else if (in.t == M_AIR && in.amt < 1.f) {   // the intake is open to ambient air: it tops the cell up
+                        in.temp = (in.temp * in.amt + AMBIENT_T * (1.f - in.amt)) ;
+                        in.temp = std::clamp(in.temp, -100.f, 2000.f);
+                        in.amt = 1.f;
+                    }
+                }
+                for (int k = (int)L.size() - 2; k >= 0; --k) {
+                    Cell& a = w.cells[L[k]];
+                    if (MATS[a.t].kind != K_GAS || !w.chance(pHop)) continue;
+                    Cell& c = w.cells[L[k + 1]];
+                    if (c.t == M_EMPTY) { c = a; a = Cell{}; }
+                    else if (MATS[c.t].kind == K_GAS) {
+                        if (c.t == a.t) {   // same gas: carry half over, mixing the temperatures
+                            float m = a.amt * 0.5f;
+                            c.temp = (c.temp * c.amt + a.temp * m) / std::max(1e-4f, c.amt + m);
+                            c.amt += m; a.amt -= m;
+                            if (a.amt < 0.02f) a = Cell{};
+                        } else std::swap(a, c);
+                    }
+                }
+            }
+        }
+
+        // reaction on the fan, and wind on bodies in the stream
+        if (!b.isStatic) b.vel += axis * (-THRUST_K * mag * flow) * (b.invMass * dt);
+        for (auto& o : bodies) {
+            if (!o.alive || o.isStatic || o.id == b.id) continue;
+            Vec2 rel = o.pos - b.pos;
+            float t = dot(rel, axis), u = dot(rel, lat), reach = o.bound;
+            if (std::fabs(u) > b.half.y + reach) continue;
+            float d, sign;
+            if (t > b.half.x && t < b.half.x + R) { d = (t - b.half.x) / R; sign = 1.f; }
+            else if (t < -b.half.x && t > -b.half.x - R * 0.5f) { d = (-t - b.half.x) / (R * 0.5f); sign = -0.35f; }  // suction
+            else continue;
+            Vec2 p = o.pos - axis * (sign > 0 ? reach + 1.5f : -(reach + 1.5f));
+            int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
+            float dens = 0.2f;
+            if (w.inb(ix, iy) && MATS[w.cells[iy * World::W + ix].t].kind == K_GAS) dens = std::clamp(w.cells[iy * World::W + ix].amt, 0.2f, 1.5f);
+            // sideways drift towards the axis keeps light bodies in the stream
+            float F = WIND_K * mag * flow * (1.f - d) * 2.f * reach * dens;
+            o.vel += (axis * (F * sign) + lat * (-u * 0.4f * F * 0.05f)) * (o.invMass * dt);
+        }
+    }
+}
+
 // ------------------------------------------------------------------ emitters
 bool Physics::emitOne(Body& b) {
     const Emitter& e = b.src;
@@ -1331,7 +1454,7 @@ void Physics::scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot) {
 int Physics::cutBody(int target, const std::vector<int>& cutters) {
     if (target < 0 || target >= (int)bodies.size() || !bodies[target].alive) return -1;
     const Body tc = bodies[target];
-    if (tc.isWheel || tc.isRocket || tc.src.on) return -1;
+    if (tc.isWheel || tc.isRocket || tc.src.on || tc.fan.strength != 0.f) return -1;
     std::vector<const Body*> cut;
     for (int c : cutters)
         if (c >= 0 && c < (int)bodies.size() && bodies[c].alive && c != target) cut.push_back(&bodies[c]);

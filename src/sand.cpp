@@ -221,6 +221,23 @@ void World::updateCell(int x, int y) {
         case M_PLANT: plantCell(x, y); break;
         case M_TNT: tntCell(x, y); break;
         case M_PRIMER: primerCell(x, y); break;
+        case M_AIR: {
+            // ambient air thins out where it meets the empty void around a machine, so a fan in the open makes a
+            // plume rather than slowly filling the whole world; inside a closed volume nothing is lost
+            int empty = 0;
+            for (int k = 0; k < 4; ++k) {
+                int nx = x + DX4[k], ny = y + DY4[k];
+                if (!inb(nx, ny) || bodyMask[ny * W + nx] >= 0) continue;
+                const Cell& n = cells[ny * W + nx];
+                if (n.t == M_EMPTY || (MATS[n.t].kind == K_GAS && n.amt < 0.12f)) ++empty;   // void, or gas too thin to matter
+            }
+            if (empty && c.amt < 0.6f) {   // dense air is contained (a duct, a chamber); only thin edge air leaks away
+                c.amt *= 1.f - 0.05f * (float)empty;
+                if (c.amt < 0.03f) { c.t = M_EMPTY; return; }
+            }
+            gasMove(x, y);
+            break;
+        }
         case M_VOID: voidCell(x, y); break;
         case M_SOURCE: sourceCell(x, y); break;
         default:

@@ -28,13 +28,13 @@ constexpr int WIN_W = SIM_W, WIN_H = SIM_H + UI_H;
 constexpr float PI = 3.14159265f;
 
 enum Tool {
-    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND
+    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND, T_FAN
 };
 enum Tab { TAB_POWDER, TAB_LIQUID, TAB_GAS, TAB_METAL, TAB_STRUCT, TAB_DEVICE, TAB_SHAPES, TAB_JOINTS, TAB_EDIT, TAB_SCENE, TAB_COUNT };
 constexpr int TAB_MATS = 6;  // the first six tabs are material palettes
 
 const char* TOOL_NAMES[] = {"PARTICLES", "BOX", "CIRCLE", "WHEEL", "ROCKET", "PIN JOINT", "MOTOR (ARROWS)",
-                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND"};
+                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND", "FAN"};
 const char* TOOL_HINTS[] = {
     "LMB: PAINT  RMB: ERASE  WHEEL: BRUSH SIZE",
     "DRAG TO SIZE A BOX OF THE SELECTED SOLID (CLICK = DEFAULT)",
@@ -54,12 +54,13 @@ const char* TOOL_HINTS[] = {
     "DRAG ALONG THE HOSE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/SEGMENTS",
     "DRAG A SMALL BOX THAT ENDLESSLY PRODUCES THE SELECTED POWDER/LIQUID/GAS. PIN IT, OR LEAVE IT FREE TO TRAVEL. ENTER = RATE",
     "CLICK WHERE TWO BODIES OVERLAP (OR ONE = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO ABOVE ITS MELT TEMPERATURE OR BREAKING FORCE. ENTER = SET BOTH",
+    "DRAG A FAN: THE ARROW SHOWS WHICH WAY IT BLOWS. SELECT IT, THEN + / - CHANGE STRENGTH AND \\ FLIPS IT. ENTER = EXACT VALUES",
 };
 
 const uint8_t PALETTE[TAB_COUNT][18] = {
     {M_SAND, M_ASH, M_GUNPOWDER, M_COAL},
     {M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA},
-    {M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN},
+    {M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN, M_AIR},
     {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN, M_SOLDER},
     {M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT, M_PARAFFIN},
     {M_HEATER, M_COOLER, M_IGNITER, M_SOURCE, M_VOID, M_EMPTY, M_BATT_POS, M_BATT_NEG, M_PRIMER},
@@ -152,7 +153,7 @@ struct Game {
     float pipeD = 12.f, pipeWall = 2.f;
     int hoseSegs = 0;          // 0 = automatic
     Tool lastTool = T_MAT;
-    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_SCALE, FK_BATTERY, FK_BOND, FK_SAVE, FK_LOAD, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
+    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_FAN, FK_SCALE, FK_BATTERY, FK_BOND, FK_SAVE, FK_LOAD, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
     struct Field { std::string name, text; };
     FormKind formKind = FK_NONE;
     std::vector<Field> fields;
@@ -171,7 +172,9 @@ struct Game {
     int newArmed = 0;
     int bondType = 0;
     float bondT = 55.f, bondF = 100000.f;
-    bool elecView = false;
+    bool elecView = false, pressureView = false;
+    float fanPhase = 0.f;
+    float lastFan = 60.f;
     uint8_t fPayload = M_WATER;
     uint8_t fFace = 0;
     float lastRate = 30.f, lastScale = 98.f;
@@ -262,12 +265,13 @@ struct Game {
             b.style = 2; b.enabled = [this] { return playing; };
         }
         mk(0, [this] { return std::string(newArmed > 0 ? "SURE?" : "NEW"); }, "CLEAR EVERYTHING (PRESS TWICE) - CTRL+N",
-           [this] { newFile(); }, [this] { return newArmed > 0; }).gap = 14;
+           [this] { newFile(); }, [this] { return newArmed > 0; }).gap = 10;
         mk(0, lit("SAVE"), "SAVE TO THE CURRENT FILE (CTRL+S)", [this] { saveQuick(); });
         mk(0, lit("SAVE AS"), "SAVE UNDER A NEW NAME", [this] { openFileForm(true); }, [this] { return formKind == FK_SAVE; });
         mk(0, lit("LOAD"), "OPEN A SAVED FILE (CTRL+O)", [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
-        mk(0, lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 14;
-        mk(0, lit("ELECTRIC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
+        mk(0, lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 10;
+        mk(0, lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
+        mk(0, lit("ELEC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
         mk(0, [this] { return std::string("SNAP ") + (SNAPS[snapIdx] ? std::to_string(SNAPS[snapIdx]) : "OFF"); },
            "ROUND MOUSE-DRAWN SHAPES TO A GRID OF THIS MANY CELLS", [this] { snapIdx = (snapIdx + 1) % 5; }, [this] { return snapIdx > 0; });
         mk(0, [this] { return std::string("SPARK ") + (SPARK_RATES[sparkIdx] ? std::to_string(SPARK_RATES[sparkIdx]) + "F" : "OFF"); },
@@ -334,6 +338,7 @@ struct Game {
         toolBtn(TAB_SHAPES, 4, "PIPE", T_PIPE);
         toolBtn(TAB_SHAPES, 5, "HOSE", T_HOSE);
         toolBtn(TAB_SHAPES, 6, "EMITTER", T_EMITTER);
+        toolBtn(TAB_SHAPES, 7, "FAN", T_FAN);
         actBtn(TAB_SHAPES, 8, [this] { return std::string(anchored ? "ANCHOR: ON" : "ANCHOR: OFF"); },
                "ANCHORED SHAPES ARE FIXED IN PLACE (T)", [this] { anchored = !anchored; }, [this] { return anchored; });
         actBtn(TAB_SHAPES, 9, [this] { return std::string("BODY: ") + MATS[bodyMat].name; },
@@ -366,9 +371,9 @@ struct Game {
             {"DEMO", &Game::buildDemo}, {"STEAM ENGINE", &Game::buildSteamEngine}, {"GAS ENGINE", &Game::buildGasEngine},
             {"HYDRAULICS", &Game::buildHydraulics}, {"CONDUCTION", &Game::buildConduction}, {"FUELS", &Game::buildFuels},
             {"DIESEL ENGINE", &Game::buildDieselEngine}, {"ELECTRIC", &Game::buildElectricTest},
-            {"BONDS", &Game::buildBondTest}, {"PRIMER", &Game::buildPrimerTest},
+            {"BONDS", &Game::buildBondTest}, {"PRIMER", &Game::buildPrimerTest}, {"FANS", &Game::buildFanTest},
         };
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < 11; ++i) {
             auto fn = scenes[i].fn;
             Button& b = mk(2, lit(scenes[i].name), "LOAD THIS EXAMPLE (REPLACES THE CURRENT DRAWING), THEN PRESS PLAY",
                            [this, fn] { (this->*fn)(); currentFile.clear(); }, nullptr, [this] { return tab == TAB_SCENE; });
@@ -385,7 +390,7 @@ struct Game {
         for (size_t i = 0; i < buttons.size(); ++i) {
             Button& b = buttons[i];
             if (!b.visible()) continue;
-            int w = std::max(b.minW, font::textWidth(b.label(), 2) + 22);
+            int w = std::max(b.minW, font::textWidth(b.label(), 2) + 16);
             if (b.zone == 0) {
                 if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, TB_H}; xr0 -= BTN_GAP; }
                 else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, TB_H}; x0 += w + BTN_GAP; }
@@ -770,7 +775,7 @@ struct Game {
         if (g <= 0) return p;
         return Vec2(std::round(p.x / g) * g, std::round(p.y / g) * g);
     }
-    bool shapeTool(Tool t) const { return t == T_BOX || t == T_CIRCLE || t == T_WHEEL || t == T_ROCKET || t == T_PIPE || t == T_HOSE || t == T_EMITTER; }
+    bool shapeTool(Tool t) const { return t == T_BOX || t == T_CIRCLE || t == T_WHEEL || t == T_ROCKET || t == T_PIPE || t == T_HOSE || t == T_EMITTER || t == T_FAN; }
     Vec2 smouse() const { return shapeTool(tool) ? snap(mouse) : mouse; }
 
     static std::string fmt(float v) {
@@ -856,6 +861,7 @@ struct Game {
             }
             fMat = b.mat; fStatic = b.isStatic;
             fields.push_back({"RATE", fmt(b.src.on ? b.src.rate : 0.f)});
+            if (b.shape == SHAPE_BOX) fields.push_back({"FAN", fmt(b.fan.strength)});
             fPayload = b.src.on ? b.src.mat : payload; fFace = b.src.face;
             return;
         }
@@ -865,6 +871,10 @@ struct Game {
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"RADIUS", fmt(lastR)}};
                 break;
             case T_BOND: openBondForm(); return;
+            case T_FAN:
+                formKind = FK_FAN;
+                fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"THICKNESS", "6"}, {"DIAMETER", "24"}, {"ANGLE", "0"}, {"STRENGTH", fmt(lastFan)}};
+                break;
             case T_EMITTER:
                 formKind = FK_EMITTER; fPayload = payload;
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"WIDTH", "6"}, {"HEIGHT", "6"}, {"RATE", fmt(lastRate)}};
@@ -945,6 +955,14 @@ struct Game {
                 bondT = std::clamp(fv(0), -50.f, 5000.f); bondF = std::clamp(fv(1), 1.f, 1e5f) * 1000.f;
                 formMsg = "NEXT BOND: MELTS " + fmt(bondT) + "C / BREAKS " + fmt(bondF / 1000.f) + " KN";
                 break;
+            case FK_FAN: {
+                lastFan = std::clamp(std::fabs(fv(5)), 1.f, 300.f);
+                int id = phys.addBox(Vec2(fv(0), fv(1)), Vec2(std::max(1.f, fv(2)), std::max(2.f, fv(3))) * 0.5f, fv(4) * PI / 180.f, bodyMat, anchored);
+                phys.bodies[id].fan.strength = fv(5) < 0 ? -lastFan : lastFan;
+                sel = {id}; primary = id; partMode = false;
+                formMsg = "CREATED FAN " + fmt(phys.bodies[id].fan.strength) + " (ARROW = AIRFLOW)";
+                break;
+            }
             case FK_SCALE: {
                 if (sel.empty()) { formMsg = "NOTHING SELECTED"; break; }
                 float pct = std::clamp(fv(0), 5.f, 1000.f);
@@ -962,6 +980,7 @@ struct Game {
             case FK_EDIT_BOX:
                 phys.reshape(primary, Vec2(fv(0), fv(1)), Vec2(fv(2), fv(3)) * 0.5f, 0, fv(4) * PI / 180.f, fMat, fStatic);
                 setEmitter(fv(5));
+                if (fields.size() > 6) setFan(fv(6));
                 formMsg = "UPDATED";
                 break;
             case FK_EDIT_CIRCLE:
@@ -979,6 +998,11 @@ struct Game {
         rate = std::clamp(rate, 0.f, 1000.f);
         b.src.on = rate > 0; b.src.rate = rate; b.src.mat = fPayload; b.src.face = fFace;
         if (rate > 0) lastRate = rate;
+    }
+    void setFan(float strength) {
+        Body& b = phys.bodies[primary];
+        b.fan.strength = std::clamp(strength, -300.f, 300.f);
+        if (b.fan.strength != 0.f) lastFan = std::fabs(b.fan.strength);
     }
     static const char* faceName(int f) { static const char* n[] = {"ALL SIDES", "+X SIDE", "-X SIDE", "+Y SIDE", "-Y SIDE"}; return n[f % 5]; }
 
@@ -1352,6 +1376,35 @@ struct Game {
         label(230, 138, "PRIMER CELLS: IMPACT FLASHES THROUGH THE ROD");
         phys.stampBodies();
     }
+    void buildFanTest() {
+        resetWorld();
+        rect(0, 200, 399, 203, M_WALL);
+        // 1: a wind tunnel: the fan blows a smoke stream and keeps light blocks aloft
+        int f1 = phys.addBox(Vec2(30, 100), Vec2(3, 14), 0, M_STEEL, true);
+        phys.bodies[f1].fan.strength = 90.f;
+        phys.addBox(Vec2(95, 104), Vec2(5, 5), 0, M_WOOD, false);
+        phys.addBox(Vec2(130, 98), Vec2(4, 4), 0, M_WOOD, false);
+        int smoke = phys.addBox(Vec2(14, 100), Vec2(2, 2), 0, M_STEEL, true);
+        phys.bodies[smoke].src = Emitter{true, M_SMOKE, 60.f, 0.f, 0};
+        label(10, 74, "FAN BLOWS SMOKE AND LIFTS LIGHT BLOCKS");
+        // 2: a closed duct: pressure builds ahead of the fan up to its stall pressure (try the PRESSURE view)
+        rect(190, 120, 290, 122, M_WALL); rect(190, 142, 290, 144, M_WALL);
+        rect(190, 123, 192, 141, M_WALL); rect(288, 123, 290, 141, M_WALL);
+        int f2 = phys.addBox(Vec2(240, 132), Vec2(2, 8.5f), 0, M_STEEL, true);
+        phys.bodies[f2].fan.strength = 80.f;
+        label(196, 108, "CLOSED DUCT: PRESSURE RISES AHEAD, FALLS BEHIND");
+        // 3: a free fan recoils: a car with a fan welded on its tail blows backwards and drives itself
+        int chassis = phys.addBox(Vec2(80, 190), Vec2(24, 5), 0, M_ALUMINUM, false);
+        for (int sx = -1; sx <= 1; sx += 2) {   // free-rolling wheels (no motor, so no brake)
+            int wh = phys.addCircle(Vec2(80.f + 16.f * sx, 196), 4.f, M_RUBBER, false, true);
+            phys.addPin(Vec2(80.f + 16.f * sx, 196), chassis, wh, false, false);
+        }
+        int tail = phys.addBox(Vec2(54, 183), Vec2(2, 7), 0, M_ALUMINUM, false);
+        phys.bodies[tail].fan.strength = -250.f;
+        phys.groupBodies({chassis, tail});
+        label(30, 160, "A FAN ON A CAR RECOILS: IT DRIVES ITSELF");
+        phys.stampBodies();
+    }
     void buildEmitterTest() {
         resetWorld();
         rect(0, 200, 399, 203, M_WALL);
@@ -1401,6 +1454,18 @@ struct Game {
                 if (r < 3) r = 8;
                 createCircle(a, r, tool == T_WHEEL);
                 lastR = r;
+                break;
+            }
+            case T_FAN: {
+                Vec2 half = Vec2(std::fabs(d.x), std::fabs(d.y)) * 0.5f;
+                Vec2 c = (a + b) * 0.5f;
+                if (half.x < 1.5f || half.y < 1.5f) { half = Vec2(3, 10); c = a; }
+                float ang = 0.f;
+                if (half.x > half.y) { std::swap(half.x, half.y); ang = PI * 0.5f; }   // the long side is the blade span
+                int id = phys.addBox(c, half, ang, bodyMat, anchored);
+                phys.bodies[id].fan.strength = lastFan;
+                sel = {id}; primary = id; partMode = false;
+                notify("FAN " + fmt(lastFan) + ". + / - CHANGE STRENGTH, \\ FLIPS DIRECTION, ENTER = EXACT VALUES");
                 break;
             }
             case T_EMITTER: {
@@ -1485,7 +1550,7 @@ struct Game {
         if (!lmb) return;
         lmb = false;
         switch (tool) {
-            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: case T_EMITTER: createShape(dragStart, smouse()); break;
+            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: case T_EMITTER: case T_FAN: createShape(dragStart, smouse()); break;
             case T_SELECT: {
                 const Uint8* ks = SDL_GetKeyboardState(nullptr);
                 bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
@@ -1569,6 +1634,19 @@ struct Game {
         switch (k) {
             case SDLK_RETURN: case SDLK_KP_ENTER: openForm(); break;
             case SDLK_F1: helpOn = !helpOn; break;
+            case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: case SDLK_MINUS: case SDLK_KP_MINUS: case SDLK_BACKSLASH: {
+                if (primary < 0 || !phys.bodies[primary].alive || phys.bodies[primary].fan.strength == 0.f) break;
+                float& st = phys.bodies[primary].fan.strength;
+                if (k == SDLK_BACKSLASH) st = -st;
+                else {
+                    float mag = std::clamp(std::fabs(st) + ((k == SDLK_MINUS || k == SDLK_KP_MINUS) ? -10.f : 10.f), 5.f, 300.f);
+                    st = st < 0 ? -mag : mag;
+                }
+                lastFan = std::fabs(st);
+                notify("FAN STRENGTH " + fmt(st) + (st < 0 ? " (REVERSED)" : ""));
+                if (formKind == FK_EDIT_BOX) openForm();
+                break;
+            }
             case SDLK_ESCAPE: if (helpOn) helpOn = false; else if (!sel.empty()) clearSelection(); else running = false; break;
             case SDLK_g: if (SDL_GetModState() & KMOD_CTRL) { groupSelection(); break; } phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; break;
             case SDLK_u: if (SDL_GetModState() & KMOD_CTRL) ungroupSelection(); break;
@@ -1639,6 +1717,7 @@ struct Game {
         pruneSelection();
         if (noteFrames > 0) --noteFrames;
         continuousInput();
+        if (playing && !paused) fanPhase += 1.f;
         if (!playing) phys.stampBodies();   // editing: keep the cover cells in step with what is drawn
         if (newArmed > 0) --newArmed;
         if ((playing && !paused) || stepOnce) {
@@ -1658,6 +1737,10 @@ struct Game {
                 float t = std::clamp((c.temp - 500.f) / 1100.f, 0.f, 1.f);
                 uint32_t col = mix(0xc82814, 0xfff2a0, t);
                 return (c.var & 4) ? shade(col, 0.9f) : col;
+            }
+            case M_AIR: {
+                float a = std::clamp(0.03f + c.amt * 0.07f, 0.03f, 0.35f);
+                return mix(bg, m.color, a);
             }
             case M_SMOKE: case M_STEAM: case M_EXHAUST: case M_VAPOR: case M_PROPANE: case M_HYDROGEN: {
                 float a = std::clamp(0.12f + c.amt * 0.35f, 0.1f, 0.95f);
@@ -1683,6 +1766,20 @@ struct Game {
     void renderParticles() {
         const uint32_t bg = 0xFF000000u | MATS[M_EMPTY].color;
         for (int i = 0; i < World::W * World::H; ++i) pixels[i] = cellColor(world.cells[i], bg);
+        if (pressureView) {
+            for (int i = 0; i < World::W * World::H; ++i) {
+                const Cell& c = world.cells[i];
+                if (world.bodyMask[i] >= 0 || c.t == M_EMPTY) { pixels[i] = mix(pixels[i], bg, 0.35f); continue; }
+                Kind k = MATS[c.t].kind;
+                if (k == K_GAS && c.t != M_FIRE) {
+                    float p = c.amt * (c.temp + 273.f) / 293.f;     // 1 = ambient
+                    uint32_t col = p < 1.f ? mix(0x203a78, 0xe8eef8, std::sqrt(std::clamp(p, 0.f, 1.f)))
+                                           : mix(0xe8eef8, 0xe03020, std::clamp((p - 1.f) / 2.f, 0.f, 1.f));
+                    pixels[i] = col;
+                } else if (k == K_LIQUID && c.amt > 1.01f) pixels[i] = mix(pixels[i], 0xe03020, std::clamp((c.amt - 1.f) * 3.f, 0.f, 1.f));
+                else pixels[i] = mix(pixels[i], bg, 0.6f);
+            }
+        }
         if (elecView && (int)world.volt.size() == World::W * World::H) {
             for (int i = 0; i < World::W * World::H; ++i) {
                 int b = world.bodyMask[i];
@@ -1738,6 +1835,37 @@ struct Game {
         return pts;
     }
 
+    // blades sliding across the housing, and an arrow along the direction of airflow
+    void renderFan(const Body& b, uint32_t fill) {
+        float s = b.fan.strength, mag = std::fabs(s);
+        float dirSign = s > 0 ? 1.f : -1.f;
+        SDL_Color blade = rgb(shade(fill, 1.35f) & 0xFFFFFF);
+        SDL_Color dark = rgb(shade(fill, 0.45f) & 0xFFFFFF);
+        float span = 2.f * b.half.y;
+        int n = std::max(3, (int)std::lround(span / 4.f));
+        float gap = span / n;
+        float phase = std::fmod(fanPhase * mag * 0.012f, gap * 2.f);   // faster when stronger
+        for (int i = -1; i <= n; ++i) {
+            float y = -b.half.y + std::fmod(phase * dirSign + i * gap + span * 4.f, span + gap) - gap * 0.0f;
+            if (y < -b.half.y || y > b.half.y) continue;
+            float slant = std::min(b.half.x * 1.6f, 3.f) * dirSign;
+            lineWorld(b.toWorld(Vec2(-b.half.x + 0.3f, y - slant)), b.toWorld(Vec2(b.half.x - 0.3f, y + slant)), blade, 2);
+        }
+        lineWorld(b.toWorld(Vec2(-b.half.x, -b.half.y)), b.toWorld(Vec2(-b.half.x, b.half.y)), dark, 1);
+        lineWorld(b.toWorld(Vec2(b.half.x, -b.half.y)), b.toWorld(Vec2(b.half.x, b.half.y)), dark, 1);
+        // arrow: from the centre along the flow
+        Vec2 dir = rotate(Vec2(dirSign, 0.f), b.angle), nrm(-dir.y, dir.x);
+        float len = std::clamp(span * 0.55f, 9.f, 26.f);
+        Vec2 tail = b.pos - dir * (len * 0.5f), tip = b.pos + dir * (len * 0.5f);
+        SDL_Color ac{255, 235, 120, 255};
+        lineWorld(tail, tip, ac, 3);
+        lineWorld(tip, tip - dir * 5.f + nrm * 3.5f, ac, 3);
+        lineWorld(tip, tip - dir * 5.f - nrm * 3.5f, ac, 3);
+        std::string lab = fmt(mag);
+        Vec2 lp = b.toWorld(Vec2(0.f, -b.half.y)) - Vec2(0.f, 7.f);
+        font::draw(ren, lab, (int)(lp.x * S) - font::textWidth(lab, 1) / 2, (int)(lp.y * S), 1, SDL_Color{255, 235, 120, 255});
+    }
+
     void renderBodies() {
         for (auto& b : phys.bodies) {
             if (!b.alive) continue;
@@ -1756,6 +1884,7 @@ struct Game {
                     fillPoly({b.toWorld(Vec2(-b.half.x, b.half.y)), b.toWorld(Vec2(b.half.x, b.half.y)),
                               b.toWorld(Vec2(0, b.half.y + 3))}, 0x404048);
                 }
+                if (b.fan.strength != 0.f) renderFan(b, fill);
                 if (b.src.on) {
                     fillPoly(circlePts(b.pos, std::min(2.f, std::min(b.half.x, b.half.y) * 0.6f), 10), 0xFF000000u | MATS[b.src.mat].color);
                     static const Vec2 fd[5] = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
@@ -1870,7 +1999,7 @@ struct Game {
         if (lmb) {
             Vec2 d = m - dragStart;
             switch (tool) {
-                case T_BOX: case T_EMITTER: {
+                case T_BOX: case T_EMITTER: case T_FAN: {
                     Vec2 a = dragStart, b = m;
                     outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, white);
                     ghostLabel(b, fmt(std::fabs(d.x)) + " X " + fmt(std::fabs(d.y)));
@@ -1928,6 +2057,7 @@ struct Game {
             case FK_BOX: title = "NEW BOX (CELLS)"; break;
             case FK_CIRCLE: title = wheelForm ? "NEW WHEEL (CELLS)" : "NEW CIRCLE (CELLS)"; break;
             case FK_PIPE: title = "NEW PIPE (CELLS)"; break;
+            case FK_FAN: title = "NEW FAN (STRENGTH < 0 REVERSES)"; break;
             case FK_BATTERY: title = "BATTERY (VOLTS / AMPS)"; break;
             case FK_BOND: title = "BOND SETTINGS"; break;
             case FK_SAVE: title = "SAVE AS (saves/NAME.sbot)"; break;
@@ -1986,7 +2116,8 @@ struct Game {
         int bid = world.bodyMask[y * World::W + x];
         if (bid >= 0 && bid < (int)phys.bodies.size() && phys.bodies[bid].alive) {
             const Body& b = phys.bodies[bid];
-            if (b.src.on) std::snprintf(buf, sizeof buf, "EMITTER %s %g/S", MATS[b.src.mat].name, b.src.rate);
+            if (b.fan.strength != 0.f) std::snprintf(buf, sizeof buf, "FAN %g/S%s", b.fan.strength, b.fan.strength < 0 ? " REVERSED" : "");
+            else if (b.src.on) std::snprintf(buf, sizeof buf, "EMITTER %s %g/S", MATS[b.src.mat].name, b.src.rate);
             else std::snprintf(buf, sizeof buf, "BODY %s %dC", MATS[b.mat].name, (int)b.temp);
             return buf;
         }
@@ -2106,6 +2237,7 @@ struct Game {
         line("CTRL+G GROUP     CTRL+U UNGROUP     C CLEAR CELLS     X CLEAR BODIES     R RELOAD DEMO");
         line("E HOLD = SPARK     , . SPARK RATE     V DROP A CAR     G FLIP GRAVITY");
         line("ARROWS OR A / D DRIVE MOTORS     UP OR W FIRE ROCKETS");
+        line("FAN SELECTED: + / - STRENGTH     BACKSLASH FLIPS DIRECTION     PRESSURE BUTTON SHOWS GAS PRESSURE");
         y += 6;
         head("GOOD TO KNOW");
         line("ENGINES NEED A HOT GAS CYCLE: FUEL VAPOUR IN, SPARK OR GLOW PLUG, VALVES TIMED BY AN ECCENTRIC - SEE THE SCENES.");
@@ -2228,7 +2360,7 @@ int main(int argc, char** argv) {
     // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace]
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;
-    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false;
+    bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
@@ -2240,6 +2372,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--trace")) trace = true;
         else if (!std::strcmp(argv[i], "--elec")) elecFlag = true;
         else if (!std::strcmp(argv[i], "--help-card")) helpFlag = true;
+        else if (!std::strcmp(argv[i], "--pressure")) pressureFlag = true;
         else if (!std::strcmp(argv[i], "--tab") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
@@ -2265,6 +2398,7 @@ int main(int argc, char** argv) {
             case 15: g.buildCutTest(); break;
             case 16: g.buildEmitterTest(); break;
             case 17: g.buildElectricTest(); break;
+            case 22: g.buildFanTest(); break;
             case 18: g.buildBondTest(); break;
             case 19: g.buildPrimerTest(); break;
             case 20: {   // run-mode and file round trips
@@ -2301,6 +2435,7 @@ int main(int argc, char** argv) {
         if (heat) g.heatView = true;
         if (elecFlag) g.elecView = true;
         if (helpFlag) g.helpOn = true;
+        if (pressureFlag) g.pressureView = true;
         if (tabFlag >= 0) g.tab = (Tab)tabFlag;
         if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; }
         if (g0) g.phys.gravity = Vec2(0, 0);

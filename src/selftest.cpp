@@ -314,6 +314,92 @@ void flames() {
     check(stray == 0, "dying flames leave no random material behind", d);
 }
 
+// 9. fans: directed airflow, pressure rise against a closed duct, wind on bodies, thrust, direction
+float meanPsi(Rig& r, int x0, int x1, int y0, int y1) {
+    float sum = 0; int n = 0;
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0; x <= x1; ++x) {
+            const Cell& c = r.world.at(x, y);
+            sum += MATS[c.t].kind == K_GAS ? c.amt * (c.temp + 273.f) / 293.f : 0.f;
+            ++n;
+        }
+    return sum / n;
+}
+void fans() {
+    std::printf("fans and airflow\n");
+    {   // a fan in a closed duct raises the pressure ahead of it and lowers it behind, up to its stall pressure
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        r.world.fillRect(40, 95, 140, 98, M_WALL);
+        r.world.fillRect(40, 111, 140, 114, M_WALL);
+        r.world.fillRect(40, 99, 43, 110, M_WALL);
+        r.world.fillRect(137, 99, 140, 110, M_WALL);
+        int fan = r.phys.addBox(Vec2(90, 105), Vec2(2, 5.5f), 0, M_STEEL, true);
+        r.phys.bodies[fan].fan.strength = 80.f;
+        r.phys.stampBodies();
+        r.step(500);
+        float ahead = meanPsi(r, 100, 134, 99, 110), behind = meanPsi(r, 46, 80, 99, 110);
+        char d[128];
+        std::snprintf(d, sizeof d, "pressure ahead %.2f, behind %.2f, rise %.2f (stall %.2f)", ahead, behind, ahead - behind, 0.02f * 80.f);
+        check(ahead > behind + 0.3f, "the fan pumps up one side of a closed duct and draws down the other", d);
+        check(ahead - behind < 0.02f * 80.f * 1.4f, "the pressure rise stops near the stall pressure", d);
+    }
+    for (int dir = 0; dir < 2; ++dir) {   // a puff of smoke is carried downstream, in either direction
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int fan = r.phys.addBox(Vec2(100, 105), Vec2(2, 6), 0, M_STEEL, true);
+        r.phys.bodies[fan].fan.strength = dir ? -60.f : 60.f;
+        r.phys.stampBodies();
+        int x0 = dir ? 112 : 84;
+        for (int y = 101; y <= 109; ++y) for (int x = x0; x < x0 + 4; ++x) { r.world.setCell(x, y, M_SMOKE); r.world.at(x, y).amt = 1.f; }
+        auto centroid = [&]() { double sx = 0, n = 0; for (int y = 90; y < 120; ++y) for (int x = 40; x < 200; ++x) if (r.world.at(x, y).t == M_SMOKE) { sx += x * r.world.at(x, y).amt; n += r.world.at(x, y).amt; } return n ? sx / n : 0; };
+        double c0 = centroid();
+        r.step(90);
+        double c1 = centroid();
+        char d[96];
+        std::snprintf(d, sizeof d, "smoke centroid x %.1f -> %.1f", c0, c1);
+        check(dir ? (c1 < c0 - 8) : (c1 > c0 + 8), dir ? "a reversed fan carries smoke the other way" : "smoke behind the fan is carried through it and downstream", d);
+    }
+    {   // wind lifts a light body that sits in the stream, and does nothing when the fan is off
+        float moved[2];
+        for (int on = 0; on < 2; ++on) {
+            Rig r;
+            r.phys.gravity = Vec2(0, 0);
+            int fan = r.phys.addBox(Vec2(60, 105), Vec2(2, 8), 0, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = on ? 100.f : 0.f;
+            int ball = r.phys.addBox(Vec2(80, 105), Vec2(4, 4), 0, M_WOOD, false);
+            r.phys.stampBodies();
+            r.step(120);
+            moved[on] = r.phys.bodies[ball].pos.x - 80.f;
+        }
+        char d[96];
+        std::snprintf(d, sizeof d, "fan off: %.1f cells, fan on: %.1f cells", moved[0], moved[1]);
+        check(std::fabs(moved[0]) < 0.5f && moved[1] > 8.f, "wind pushes a light body along the stream", d);
+    }
+    {   // a free fan is pushed the opposite way; a rotated fan blows along its own axis
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int fan = r.phys.addBox(Vec2(100, 105), Vec2(2, 8), 0, M_ALUMINUM, false);
+        r.phys.bodies[fan].fan.strength = 100.f;
+        r.phys.stampBodies();
+        r.step(60);
+        float vx = r.phys.bodies[fan].vel.x;
+        char d[64];
+        std::snprintf(d, sizeof d, "vx = %.1f", vx);
+        check(vx < -5.f, "a free fan recoils against its own exhaust", d);
+        Rig q;
+        q.phys.gravity = Vec2(0, 0);
+        int f2 = q.phys.addBox(Vec2(100, 60), Vec2(2, 8), 1.5707963f, M_STEEL, true);   // axis points down
+        q.phys.bodies[f2].fan.strength = 100.f;
+        int ball = q.phys.addBox(Vec2(100, 85), Vec2(4, 4), 0, M_WOOD, false);
+        q.phys.stampBodies();
+        q.step(120);
+        float dy = q.phys.bodies[ball].pos.y - 85.f;
+        std::snprintf(d, sizeof d, "dy = %.1f, dx = %.1f", dy, q.phys.bodies[ball].pos.x - 100.f);
+        check(dy > 8.f, "a rotated fan blows along its rotated axis", d);
+    }
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -325,6 +411,7 @@ int runSelfTests() {
     boiling();
     plug();
     flames();
+    fans();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }
