@@ -170,6 +170,12 @@ struct Game {
     bool moving = false, moveArmed = false;
     Vec2 moveApplied;
     int moveHit = -1;
+    Vec2 moveStart;            // where the primary body was when a move drag began: with snap on, the body lands on the grid
+    // ---- handles: small squares on the selected body's edges and corners resize it, a round one on a stalk above it rotates it
+    int handle = -1;           // the handle being dragged (an index into HSX / HSY, or H_ROT); -1 = none
+    int handleId = -1;         // the body it belongs to
+    Body handleStart;          // that body as it was at the press: every frame of the drag is computed from it, so nothing drifts
+    Vec2 handlePress;          // the pointer at the press, in cells
     int cycleIdx = 0;
     Vec2 lastClickPos;
     Uint32 lastClickTick = 0;
@@ -2240,6 +2246,26 @@ struct Game {
         updateCamera(true);
         notify("FOCUS ON: THE CAMERA FOLLOWS THIS BODY. PRESS Z AGAIN TO RELEASE");
     }
+    // Shift+F: the largest zoom step at which the selection (grown by a fifth) fits the view, centred on it (within the
+    // camera clamps); with nothing selected the zoom resets
+    void zoomToSelection() {
+        pruneSelection();
+        if (sel.empty()) { zoomReset(); notify("NOTHING SELECTED: ZOOM RESET (SHIFT+F ZOOMS IN ON A SELECTION)"); return; }
+        Vec2 lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+        for (int id : sel)
+            for (Vec2 p : bodyOutline(phys.bodies[id])) {
+                lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y);
+                hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y);
+            }
+        Vec2 size = (hi - lo) * 1.2f, c = (lo + hi) * 0.5f;
+        int best = 0;
+        for (int i = 0; i < 7; ++i) if (size.x * 3.f * ZOOMS[i] <= SIM_W && size.y * 3.f * ZOOMS[i] <= SIM_H) best = i;
+        zoom = ZOOMS[best];
+        bool hadFocus = focusBody >= 0;
+        focusBody = -1;
+        setCam(c.x - viewW() * 0.5f, c.y - viewH() * 0.5f);
+        notify("ZOOM " + fmt(zoom) + "X ON THE SELECTION" + (hadFocus ? ", FOCUS OFF" : "") + "  (CTRL+0 RESETS, F FOLLOWS A BODY)");
+    }
     bool inScrollStrip(int localY) const { return localY >= SIM_H - 12 && localY < SIM_H; }
     void scrubTo(int mx) { setCam((float)mx / SIM_W * World::W - viewW() * 0.5f); }
     void scrubToY(int my) { setCam(camXf, (float)my / SIM_H * World::H - viewH() * 0.5f); }
@@ -2357,8 +2383,94 @@ struct Game {
         notify(std::string(b >= 0 ? "BONDED THE TWO BODIES" : "BONDED TO THE WORLD (NO OTHER BODY NEAR THE CLICK)") + ": MELTS AT " + fmt(bondT) + "C, HOLDS " + fmt(bondG) + "X ITS WEIGHT");
     }
 
+    // ---- handles. HSX / HSY index the eight box handles, corners and edge midpoints in the body's own frame (a circle uses the
+    // four edge ones, which set its radius); H_ROT is the round handle on a stalk above the top edge. They keep a constant size
+    // on screen, so their geometry is in pixels divided by sc().
+    static constexpr int H_ROT = 8;
+    static constexpr int HSX[8] = {-1, 0, 1, 1, 1, 0, -1, -1}, HSY[8] = {-1, -1, -1, 0, 1, 1, 1, 0};
+    static constexpr float HANDLE_PX = 3.5f, STALK_PX = 18.f;   // half the side of a handle square, and the length of the stalk
+    static Vec2 bodyExtent(const Body& b) { return b.shape == SHAPE_BOX ? b.half : Vec2(b.radius, b.radius); }
+    Vec2 handlePos(const Body& b, int h) const {
+        Vec2 e = bodyExtent(b);
+        if (h == H_ROT) return b.toWorld(Vec2(0, -e.y - STALK_PX / sc()));
+        return b.toWorld(Vec2(HSX[h] * e.x, HSY[h] * e.y));
+    }
+    // the body whose handles are shown: the one selected body (or the primary part of a group), or the primary of a whole
+    // selected group, which only gets the rotation handle; none while the simulation runs unpaused
+    int handleBody() const {
+        if (tool != T_SELECT || (playing && !paused) || primary < 0 || primary >= (int)phys.bodies.size() || !phys.bodies[primary].alive) return -1;
+        return sel.size() == 1 || partMode || phys.bodies[primary].group >= 0 ? primary : -1;
+    }
+    bool handleResizes() const { return sel.size() == 1 || partMode; }
+    bool handleShown(const Body& b, int h) const { return h == H_ROT || (handleResizes() && (b.shape == SHAPE_BOX || (HSX[h] == 0) != (HSY[h] == 0))); }
+    // the handle under a point, or -1; the hit area is a little bigger than the drawn square
+    int handleAt(Vec2 p) const {
+        int id = handleBody();
+        if (id < 0) return -1;
+        const Body& b = phys.bodies[id];
+        int best = -1;
+        float bd = 6.f / sc();
+        for (int h = 0; h <= H_ROT; ++h) {
+            if (!handleShown(b, h)) continue;
+            float d = length(p - handlePos(b, h));
+            if (d < bd) { bd = d; best = h; }
+        }
+        return best;
+    }
+    // Every frame of a handle drag (and once more on release). The body is recomputed from how it was at the press, so the
+    // modifiers can change mid-drag and nothing drifts. Resize: the dragged edge or corner follows the pointer by the distance
+    // dragged (snapped to the grid when snap is on, so an edge lands on a grid line) and the opposite edge stays; Ctrl keeps the
+    // centre instead; Shift on a corner keeps the proportions. Rotate: by the angle the pointer has swept round the centre,
+    // in 15 degree steps with Shift. Joints follow through reshape / transformGroup.
+    void updateHandleDrag() {
+        if (!lmb || handle < 0) return;
+        if (handleId < 0 || handleId >= (int)phys.bodies.size() || !phys.bodies[handleId].alive) { handle = -1; return; }
+        const Uint16 mod = SDL_GetModState();
+        const bool ctrl = (mod & KMOD_CTRL) != 0, shift = (mod & KMOD_SHIFT) != 0;
+        const Body& s = handleStart;
+        if (handle == H_ROT) {
+            float a0 = std::atan2(handlePress.y - s.pos.y, handlePress.x - s.pos.x), a1 = std::atan2(mouse.y - s.pos.y, mouse.x - s.pos.x);
+            float ang = s.angle + (a1 - a0);
+            if (shift) ang = std::round(ang / (PI / 12.f)) * (PI / 12.f);
+            if (handleResizes()) phys.reshape(handleId, s.pos, s.half, s.radius, ang, s.mat, s.isStatic);
+            else phys.transformGroup(handleId, s.pos, ang);
+            return;
+        }
+        Vec2 hp = handlePos(s, handle) + (mouse - handlePress);
+        if (snapIdx) hp = snap(hp);
+        Vec2 l = s.toLocal(hp), e = bodyExtent(s);
+        const int sx = HSX[handle], sy = HSY[handle];
+        if (s.shape == SHAPE_CIRCLE) {
+            phys.reshape(handleId, s.pos, s.half, std::max(0.5f, sx ? sx * l.x : sy * l.y), s.angle, s.mat, s.isStatic);
+            return;
+        }
+        Vec2 half = e, c;   // the new half extents, and the new centre in the frame of the body as it was
+        auto axis = [&](int sgn, float lp, float ext, float& h, float& cc) {
+            if (!sgn) return;
+            if (ctrl) { h = std::max(0.5f, sgn * lp); return; }
+            float fixed = -sgn * ext, edge = fixed + sgn * std::max(1.f, sgn * (lp - fixed));   // never thinner than one cell
+            h = sgn * (edge - fixed) * 0.5f;
+            cc = (edge + fixed) * 0.5f;
+        };
+        axis(sx, l.x, e.x, half.x, c.x);
+        axis(sy, l.y, e.y, half.y, c.y);
+        if (shift && sx && sy) {
+            half = e * std::max(half.x / e.x, half.y / e.y);
+            if (!ctrl) c = Vec2(sx * (half.x - e.x), sy * (half.y - e.y));
+        }
+        phys.reshape(handleId, s.toWorld(c), half, s.radius, s.angle, s.mat, s.isStatic);
+    }
+    // the live dimensions shown next to the pointer during a handle drag
+    std::string handleReadout() const {
+        if (handle < 0 || handleId < 0 || handleId >= (int)phys.bodies.size() || !phys.bodies[handleId].alive) return "";
+        const Body& b = phys.bodies[handleId];
+        if (handle == H_ROT) { float deg = std::fmod(b.angle * 180.f / PI, 360.f); if (deg < 0) deg += 360.f; return fmt(deg) + " DEG"; }
+        return b.shape == SHAPE_BOX ? fmt(b.half.x * 2) + " X " + fmt(b.half.y * 2) : "R " + fmt(b.radius);
+    }
+
     // Starts moving the selected bodies once the pointer has really dragged; also called on release so that a quick
-    // press-drag-release inside one frame still moves them.
+    // press-drag-release inside one frame still moves them. With snap on, the primary body's resulting position is snapped
+    // (not the displacement), so a dropped body lands on grid coordinates.
     void updateMoveDrag() {
         if (!lmb || tool != T_SELECT || !moveArmed) return;
         Vec2 total = mouse - dragStart;
@@ -2371,8 +2483,9 @@ struct Game {
             pushUndo();
             moving = true;
             moveApplied = Vec2();
+            moveStart = phys.bodies[primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive ? primary : moveHit].pos;
         }
-        Vec2 target = snapIdx ? snap(total) : total;
+        Vec2 target = snapIdx ? snap(moveStart + total) - moveStart : total;
         moveSelectionBy(target - moveApplied);
         moveApplied = target;
     }
@@ -2396,11 +2509,18 @@ struct Game {
                 if (id >= 0) { dragBody = id; grabJoint = phys.addMouse(id, mouse); }
                 break;
             }
-            case T_SELECT:
+            case T_SELECT: {
                 dragStart = mouse;
+                int h = handleAt(mouse);
+                if (h >= 0) {   // a press on a handle resizes or rotates; it never starts a move or a box-select
+                    handle = h; handleId = handleBody(); handleStart = phys.bodies[handleId]; handlePress = mouse;
+                    pushUndo();
+                    break;
+                }
                 moveHit = topBodyAt(mouse, true);   // a press on a selected body drags the whole selection
                 moveArmed = moveHit >= 0;
                 break;
+            }
             case T_DELETE: {
                 int id = phys.pickBody(mouse, true);
                 pushUndo();
@@ -2429,6 +2549,13 @@ struct Game {
                 const Uint8* ks = SDL_GetKeyboardState(nullptr);
                 bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
                 bool part = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
+                if (handle >= 0) {   // end of a resize or rotation: the cover cells and the open form catch up
+                    updateHandleDrag();
+                    handle = -1; handleId = -1;
+                    phys.stampBodies();
+                    if (formKind >= FK_EDIT_BOX) openForm();
+                    break;
+                }
                 if (moveArmed) updateMoveDrag();
                 if (moving) { moving = false; moveArmed = false; phys.stampBodies(); break; }
                 moveArmed = false;
@@ -2628,7 +2755,7 @@ struct Game {
         switch (k) {
             case SDLK_RETURN: case SDLK_KP_ENTER: openForm(); break;
             case SDLK_F1: helpOn = !helpOn; break;
-            case SDLK_f: toggleFocus(); break;
+            case SDLK_f: if (shift) zoomToSelection(); else toggleFocus(); break;
             case SDLK_m: toggleFanMode(); break;
             case SDLK_HOME: if (focusBody >= 0) focusBody = -1; setCam(0); break;
             case SDLK_END: if (focusBody >= 0) focusBody = -1; setCam((float)World::W); break;
@@ -2675,6 +2802,7 @@ struct Game {
         if (rmb) world.paintLine(lx, ly, cx, cy, brush, M_EMPTY, 1.f);
         if (lmb && tool == T_GRAB && grabJoint >= 0) phys.setMouseTarget(grabJoint, mouse);
         updateMoveDrag();
+        updateHandleDrag();
         lastMouse = mouse;
     }
 
@@ -2959,10 +3087,47 @@ struct Game {
             outlinePoly(circlePts(a, 5.f, 16), hl);
             outlinePoly(circlePts(a, 6.f, 16), SDL_Color{255, 255, 255, 160});
         }
-        if (tool == T_SELECT && lmb && !moveArmed && !moving && length(mouse - dragStart) >= 3.f) {
+        if (tool == T_SELECT && lmb && !moveArmed && !moving && handle < 0 && length(mouse - dragStart) >= 3.f) {
             Vec2 a = dragStart, b = mouse;
             outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, SDL_Color{255, 220, 80, 200});
         }
+        renderHandles();
+    }
+
+    // the resize and rotation handles on the selected body, the one under the pointer brighter with a hint, and the live
+    // dimensions while one is dragged
+    void renderHandles() {
+        int id = handleBody();
+        if (id < 0) return;
+        const Body& b = phys.bodies[id];
+        const int hov = handle >= 0 ? handle : (inSim && !lmb ? handleAt(mouse) : -1);
+        const float r = HANDLE_PX / sc();
+        Vec2 e = bodyExtent(b), rot = handlePos(b, H_ROT);
+        lineWorld(b.toWorld(Vec2(0, -e.y)), rot, SDL_Color{255, 255, 255, 170}, 1);
+        for (int h = 0; h <= H_ROT; ++h) {
+            if (!handleShown(b, h)) continue;
+            const bool lit = h == hov;
+            SDL_Color fill = lit ? SDL_Color{255, 255, 255, 255} : SDL_Color{225, 232, 245, 225};
+            SDL_Color edge = lit ? SDL_Color{255, 220, 80, 255} : SDL_Color{30, 36, 50, 255};
+            std::vector<Vec2> pts;
+            if (h == H_ROT) pts = circlePts(rot, r * 1.2f, 14);
+            else {
+                Vec2 l(HSX[h] * e.x, HSY[h] * e.y);
+                pts = {b.toWorld(l + Vec2(-r, -r)), b.toWorld(l + Vec2(r, -r)), b.toWorld(l + Vec2(r, r)), b.toWorld(l + Vec2(-r, r))};
+            }
+            fillPolyC(pts, fill);
+            for (size_t i = 0; i < pts.size(); ++i) lineWorld(pts[i], pts[(i + 1) % pts.size()], edge, 1);
+        }
+        if (handle >= 0) { ghostLabel(mouse, handleReadout()); return; }
+        if (hov < 0) return;
+        const char* hint = hov == H_ROT ? "DRAG TO ROTATE (SHIFT: 15 DEG STEPS)" : b.shape == SHAPE_CIRCLE ? "DRAG TO SET THE RADIUS"
+                         : (HSX[hov] && HSY[hov]) ? "DRAG TO RESIZE (CTRL: ABOUT THE CENTRE, SHIFT: KEEP PROPORTIONS)"
+                                                  : "DRAG TO RESIZE (CTRL: ABOUT THE CENTRE)";
+        SDL_FPoint q = sp(mouse);
+        SDL_Rect bg{(int)q.x + 9, (int)q.y + 7, font::textWidth(hint, 1) + 6, 13};
+        SDL_SetRenderDrawColor(ren, 8, 11, 18, 190);
+        SDL_RenderFillRect(ren, &bg);
+        font::draw(ren, hint, (int)q.x + 12, (int)q.y + 10, 1, SDL_Color{255, 240, 150, 255});
     }
 
     std::vector<int> bondsDrawn;
@@ -3761,6 +3926,71 @@ int main(int argc, char** argv) {
                 g.cutSelection();
                 std::printf("subtract selection: circle %s, centre of the hole empty: %s\n", g.keepCutter ? "kept" : "consumed", !covered(310, 75) ? "yes" : "NO");
                 (void)before2;
+                // handles: a fresh 60 x 30 box, its right edge dragged 10 cells, a corner with Ctrl, the rotation handle plain and
+                // with Shift, undo; then the grid snapping of a move drag and of a dragged edge
+                g.clearSelection(); g.snapIdx = 0;
+                g.tool = T_BOX;
+                drag(100, 160, 160, 190);                       // x 100..160, y 160..190, centre (130, 175)
+                g.tool = T_SELECT;
+                down(130, 175); up(130, 175);
+                const int hb = g.primary;
+                auto body = [&]() -> const Body& { return g.phys.bodies[hb]; };
+                auto hpos = [&](int h) { return g.handlePos(g.phys.bodies[hb], h); };
+                auto near = [](float a, float b, float tol = 0.05f) { return std::fabs(a - b) <= tol; };
+                auto nearV = [&](Vec2 a, Vec2 b) { return near(a.x, b.x) && near(a.y, b.y); };
+                std::printf("a fresh 60 x 30 box is selected and shows handles: %s\n", hb >= 0 && g.handleBody() == hb && g.handleResizes() ? "yes" : "NO");
+                Vec2 rh = hpos(3);                              // the right edge midpoint
+                drag(rh.x, rh.y, rh.x + 10, rh.y);
+                std::printf("right edge handle dragged 10 cells right: width %.2f (expected 70), left edge still at %.2f (expected 100): %s\n", body().half.x * 2,
+                            body().pos.x - body().half.x, near(body().half.x * 2, 70) && near(body().pos.x - body().half.x, 100) ? "yes" : "NO");
+                Vec2 c0 = body().pos, br = hpos(4);             // the bottom-right corner
+                SDL_SetModState(KMOD_CTRL);
+                drag(br.x, br.y, br.x + 4, br.y + 6);
+                SDL_SetModState(KMOD_NONE);
+                std::printf("ctrl + corner handle dragged (4, 6): %.0f x %.0f (expected 78 x 42), centre still at (%.2f, %.2f): %s\n", body().half.x * 2, body().half.y * 2,
+                            body().pos.x, body().pos.y, nearV(body().pos, c0) && near(body().half.x * 2, 78) && near(body().half.y * 2, 42) ? "yes" : "NO");
+                Vec2 rot = hpos(Game::H_ROT);
+                float arm = length(rot - body().pos);
+                drag(rot.x, rot.y, body().pos.x + arm, body().pos.y);   // from straight above the centre to straight right of it
+                float deg = body().angle * 180.f / PI;
+                std::printf("rotation handle dragged a quarter turn: angle %.1f (expected 90), centre still at (%.2f, %.2f): %s\n", deg, body().pos.x, body().pos.y,
+                            near(deg, 90, 0.5f) && nearV(body().pos, c0) ? "yes" : "NO");
+                key(SDLK_z, KMOD_CTRL);
+                rot = hpos(Game::H_ROT);
+                SDL_SetModState(KMOD_SHIFT);
+                drag(rot.x, rot.y, body().pos.x + arm * std::cos(-53.f * PI / 180.f), body().pos.y + arm * std::sin(-53.f * PI / 180.f));   // 37 degrees round
+                SDL_SetModState(KMOD_NONE);
+                deg = body().angle * 180.f / PI;
+                std::printf("shift + rotation handle swept 37 degrees: angle %.2f, snapped to a multiple of 15: %s\n", deg, near(deg, 30, 0.01f) ? "yes" : "NO");
+                key(SDLK_z, KMOD_CTRL); key(SDLK_z, KMOD_CTRL); key(SDLK_z, KMOD_CTRL);
+                bool restored = near(body().half.x * 2, 60) && near(body().half.y * 2, 30) && nearV(body().pos, Vec2(130, 175)) && near(body().angle, 0);
+                std::printf("three undos restore the box: %.0f x %.0f at (%.0f, %.0f), angle %.0f: %s\n", body().half.x * 2, body().half.y * 2, body().pos.x, body().pos.y,
+                            body().angle * 180.f / PI, restored ? "yes" : "NO");
+                g.snapIdx = 3;                                  // a 5-cell grid
+                drag(130, 175, 137, 178);
+                std::printf("move drag by (7, 3) with a 5-cell grid: the body lands at (%.0f, %.0f) (expected 135, 180): %s\n", body().pos.x, body().pos.y,
+                            nearV(body().pos, Vec2(135, 180)) ? "yes" : "NO");
+                rh = hpos(3);
+                drag(rh.x, rh.y, rh.x + 7.3f, rh.y);
+                std::printf("right edge dragged 7.3 cells with the grid on: edge at %.1f (expected 170), width %.1f: %s\n", body().pos.x + body().half.x, body().half.x * 2,
+                            near(body().pos.x + body().half.x, 170) ? "yes" : "NO");
+                g.snapIdx = 0;
+                key(SDLK_f, KMOD_SHIFT);                        // zoom to the selection: a 65 x 30 box grown by a fifth fits at 4x, not 6x
+                Vec2 centre(g.camXf + g.viewW() * 0.5f, g.camYf + g.viewH() * 0.5f);
+                std::printf("shift+f zooms to the selection: %.0fx (expected 4), view centre (%.1f, %.1f) on the body at (%.1f, %.1f): %s\n", g.zoom, centre.x, centre.y,
+                            body().pos.x, body().pos.y, near(g.zoom, 4) && nearV(centre, body().pos) ? "yes" : "NO");
+                g.clearSelection();
+                key(SDLK_f, KMOD_SHIFT);
+                std::printf("shift+f with nothing selected resets the zoom: %.0fx: %s\n", g.zoom, near(g.zoom, 1) ? "yes" : "NO");
+                g.setCam(0, 0);
+                down(135, 180); up(135, 180);
+                // screenshot states: HANDLE_SHOT=hover parks the pointer on the rotation handle, =drag leaves the right edge mid-drag,
+                // =circle selects the circle and hovers its right handle
+                if (const char* hs = std::getenv("HANDLE_SHOT")) {
+                    if (!std::strcmp(hs, "circle")) { down(130, 115); up(130, 115); Vec2 h = g.handlePos(g.phys.bodies[g.primary], 3); mouseTo(h.x, h.y); }
+                    else if (!std::strcmp(hs, "hover")) { rot = hpos(Game::H_ROT); mouseTo(rot.x, rot.y); }
+                    else { rh = hpos(3); down(rh.x, rh.y); mouseTo(rh.x + 12, rh.y + 4); g.update(); }
+                }
                 break;
             }
             case 28: {   // paraffin bonds: they hold a heavy block, give way when warmed, and melt in a flame
