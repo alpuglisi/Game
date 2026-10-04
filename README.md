@@ -24,7 +24,9 @@ The physics engine, the sand engine and the bitmap font are all written from scr
 | Palette buttons (bottom) | Pick a material or tool |
 | LMB / RMB | Use tool / erase particles |
 | Mouse wheel, `[` `]` | Brush size |
-| `Space`, `N` | Pause, single step |
+| `Space` | Play (from edit mode) / pause / resume |
+| `N` | Single step (starts paused play from edit mode) |
+| `Ctrl+S` / `Ctrl+O` / `Ctrl+N` | Save / load / new file |
 | `C` / `X` | Clear particles / clear bodies |
 | `R` | Reload the demo scene |
 | `T` | Toggle "anchored" (new bodies are static) |
@@ -35,6 +37,12 @@ The physics engine, the sand engine and the bitmap font are all written from scr
 | `Left`/`Right` (or `A`/`D`) | Drive keyed motors |
 | `Up` (or `W`) | Fire rockets |
 | `Del` | Delete body under the cursor |
+
+### Edit mode, play and stop, files
+
+The game starts in **edit mode**: nothing moves, so you can draw, place bodies and joints, and set up a machine in a frozen state. **PLAY** (or `Space`) takes a snapshot of everything (grid cells, bodies, joints, bonds, emitters, battery settings) and starts the simulation; **PAUSE** / `Space` freezes and resumes it; **STEP** advances one frame; **STOP** restores the snapshot, so the machine is exactly as you drew it. The top-right corner shows the mode. Scenes and loaded files open in edit mode.
+
+**NEW** (press twice to confirm) clears everything. **SAVE** writes to the current file (or asks for a name the first time), **SAVE AS** asks for a name, **LOAD** lists the saved files (Up/Down to pick, or type a name). Files are `saves/NAME.sbot` next to where you run the game. Saving while playing stores the design as it was drawn, not the mid-run state. Files can only be read by a build with the same data layout.
 
 ### Body tools
 

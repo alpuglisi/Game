@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include "sand.hpp"
+#include "state.hpp"
 #include "vec2.hpp"
 
 enum ShapeType { SHAPE_BOX = 0, SHAPE_CIRCLE = 1 };
@@ -104,6 +105,8 @@ public:
     bool thrustOn = false;   // fires rockets
 
     void clear();
+    void save(Writer& w) const;
+    bool load(Reader& r);
     void step(float dt);
     void stampBodies();
 

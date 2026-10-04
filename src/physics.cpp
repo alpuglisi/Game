@@ -83,6 +83,30 @@ void Physics::clear() {
     std::fill(world->bodyMask.begin(), world->bodyMask.end(), (int16_t)-1);
 }
 
+static_assert(std::is_trivially_copyable<Body>::value && std::is_trivially_copyable<Joint>::value, "serialisable");
+
+void Physics::save(Writer& w) const {
+    w.vec(bodies);
+    w.vec(joints);
+    w.pod(gravity); w.pod(seqCounter); w.pod(groupCounter); w.pod(bondCounter);
+}
+
+bool Physics::load(Reader& r) {
+    std::vector<Body> b;
+    std::vector<Joint> j;
+    r.vec(b, 20000);
+    r.vec(j, 200000);
+    Vec2 g = r.pod<Vec2>();
+    int sc = r.pod<int>(), gc = r.pod<int>(), bc = r.pod<int>();
+    if (!r.ok) return false;
+    bodies = b; joints = j; gravity = g; seqCounter = sc; groupCounter = gc; bondCounter = bc;
+    contacts.clear(); hydro.clear(); noCollide.clear(); hits.clear(); primerStrikes.clear(); flashes.clear();
+    eventFrames = 0; lastEvent.clear();
+    for (auto& jt : joints) if (jt.alive && jt.type == J_MOUSE) jt.alive = false;
+    stampBodies();
+    return true;
+}
+
 int Physics::allocBody() {
     for (auto& b : bodies)
         if (!b.alive) { int id = b.id; b = Body{}; b.id = id; b.alive = true; b.seq = ++seqCounter; return id; }

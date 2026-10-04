@@ -38,6 +38,25 @@ void World::clear() {
     blasts.clear();
 }
 
+void World::save(Writer& w) const {
+    w.vec(cells);
+    w.pod(clk); w.pod(tick); w.pod(sparkTimer); w.pod(rng);
+    w.pod(battV); w.pod(battA); w.pod(sparkPeriod); w.pod(burnEvents);
+}
+
+bool World::load(Reader& r) {
+    std::vector<Cell> c;
+    r.vec(c, (size_t)W * H);
+    if (!r.ok || (int)c.size() != W * H) return false;
+    cells = c;
+    clk = r.pod<uint8_t>(); tick = r.pod<uint32_t>(); sparkTimer = r.pod<uint32_t>(); rng = r.pod<uint32_t>();
+    battV = r.pod<float>(); battA = r.pod<float>(); sparkPeriod = r.pod<int>(); burnEvents = r.pod<long>();
+    bodyMask.assign(W * H, -1);
+    blasts.clear(); arcs.clear();
+    volt.clear(); curr.clear(); elecCool.clear(); hadElec = false; vMax = iSource = 0.f; arcCount = 0;
+    return r.ok;
+}
+
 uint32_t World::rnd() {
     rng ^= rng << 13;
     rng ^= rng >> 17;

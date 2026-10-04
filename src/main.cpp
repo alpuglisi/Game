@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -19,7 +21,7 @@ namespace {
 constexpr int S = 3;  // screen pixels per sand cell
 constexpr int SIM_W = World::W * S;
 constexpr int SIM_H = World::H * S;
-constexpr int COLS = 9, ROWS = 7, BTN_H = 24, BTN_GAP = 3;
+constexpr int COLS = 9, ROWS = 8, BTN_H = 24, BTN_GAP = 3;
 constexpr int UI_H = ROWS * (BTN_H + BTN_GAP) + 48;
 constexpr int WIN_W = SIM_W, WIN_H = SIM_H + UI_H;
 constexpr float PI = 3.14159265f;
@@ -139,7 +141,7 @@ struct Game {
     float pipeD = 12.f, pipeWall = 2.f;
     int hoseSegs = 0;          // 0 = automatic
     Tool lastTool = T_MAT;
-    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_SCALE, FK_BATTERY, FK_BOND, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
+    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_SCALE, FK_BATTERY, FK_BOND, FK_SAVE, FK_LOAD, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
     struct Field { std::string name, text; };
     FormKind formKind = FK_NONE;
     std::vector<Field> fields;
@@ -149,6 +151,13 @@ struct Game {
     bool fStatic = false;
     std::string formMsg;
     bool wheelForm = false;
+    // ---- run mode: the drawing is edited while stopped; PLAY snapshots it and STOP restores the snapshot
+    bool playing = false;
+    std::vector<uint8_t> snapshot;
+    std::string currentFile;
+    std::vector<std::string> fileList;
+    int fileIdx = -1;
+    int newArmed = 0;
     int bondType = 0;
     float bondT = 55.f, bondF = 100000.f;
     bool elecView = false;
@@ -181,6 +190,7 @@ struct Game {
         tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, World::W, World::H);
         buildButtons();
         buildDemo();
+        notify("EDIT MODE: DRAW FREELY, THEN PRESS PLAY (SPACE). STOP RESTORES YOUR DRAWING");
         return true;
     }
 
@@ -272,9 +282,9 @@ struct Game {
         add(4, 1, [] { return std::string("DELETE"); }, [this] { tool = T_DELETE; }, [this] { return tool == T_DELETE; });
         add(4, 2, [this] { return std::string(anchored ? "ANCHOR:ON" : "ANCHOR:OFF"); }, [this] { anchored = !anchored; },
             [this] { return anchored; });
-        add(4, 3, [this] { return std::string(paused ? "RESUME" : "PAUSE"); }, [this] { paused = !paused; },
-            [this] { return paused; });
-        add(4, 4, [] { return std::string("STEP"); }, [this] { stepOnce = true; }, [] { return false; });
+        add(4, 3, [this] { return std::string(paused ? "RESUME" : "PAUSE"); }, [this] { togglePause(); },
+            [this] { return playing && paused; });
+        add(4, 4, [] { return std::string("STEP"); }, [this] { stepFrame(); }, [] { return false; });
         add(4, 5, [] { return std::string("CLR BODIES"); }, [this] { clearBodies(); }, [] { return false; });
         add(4, 6, [] { return std::string("CLR CELLS"); }, [this] { world.clear(); phys.stampBodies(); }, [] { return false; });
         add(4, 7, [this] { return std::string("BODY:") + MATS[bodyMat].name; }, [this] { cycleBodyMat(); }, [] { return false; });
@@ -297,6 +307,13 @@ struct Game {
         add(6, 4, [this] { return std::string(elecView ? "ELEC VIEW:ON" : "ELEC VIEW"); }, [this] { elecView = !elecView; }, [this] { return elecView; });
         add(6, 5, [] { return std::string("BOND"); }, [this] { tool = T_BOND; }, [this] { return tool == T_BOND; });
         add(6, 6, [this] { return std::string(BOND_NAMES[bondType]); }, [this] { cycleBond(); }, [] { return false; });
+        // row 7: run control and files
+        add(7, 0, [this] { return std::string(playing && !paused ? "PLAYING" : "PLAY"); }, [this] { play(); }, [this] { return playing && !paused; });
+        add(7, 1, [this] { return std::string("STOP"); }, [this] { stopPlay(); }, [this] { return !playing; });
+        add(7, 2, [this] { return std::string(newArmed > 0 ? "SURE? NEW" : "NEW"); }, [this] { newFile(); }, [this] { return newArmed > 0; });
+        add(7, 3, [this] { return std::string("SAVE"); }, [this] { saveQuick(); }, [] { return false; });
+        add(7, 4, [this] { return std::string("SAVE AS"); }, [this] { openFileForm(true); }, [this] { return formKind == FK_SAVE; });
+        add(7, 5, [this] { return std::string("LOAD"); }, [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
     }
 
     void cycleBodyMat() {
@@ -320,6 +337,8 @@ struct Game {
         phys.gravity = Vec2(0, 260.f);
         phys.motorInput = 0;
         heatView = false;
+        playing = false;
+        paused = false;
     }
 
     // ---------------------------------------------------------------- scenes
@@ -820,6 +839,20 @@ struct Game {
                 formMsg = std::string("CREATED EMITTER OF ") + MATS[fPayload].name;
                 break;
             }
+            case FK_SAVE: {
+                std::string name = cleanName(fields[0].text);
+                if (name.empty()) { formMsg = "TYPE A NAME"; return; }
+                if (writeFile(name)) { currentFile = name; notify("SAVED saves/" + name + ".sbot" + (playing ? " (AS DRAWN)" : "")); closeForm(); }
+                else formMsg = "SAVE FAILED";
+                return;
+            }
+            case FK_LOAD: {
+                std::string name = cleanName(fields[0].text);
+                if (name.empty()) { formMsg = "TYPE OR PICK A NAME"; return; }
+                if (readFile(name)) { currentFile = name; notify("LOADED " + name + ". PRESS PLAY TO RUN"); closeForm(); }
+                else formMsg = "COULD NOT LOAD " + name;
+                return;
+            }
             case FK_BATTERY:
                 world.battV = std::clamp(fv(0), 1.f, 70000.f);
                 world.battA = std::clamp(fv(1), 0.001f, 400.f);
@@ -882,6 +915,145 @@ struct Game {
         fields = {{"MELT C", fmt(bondT)}, {"BREAK KN", fmt(bondF / 1000.f)}};
         formMsg = "";
     }
+    // ---------------------------------------------------------------- run mode, snapshots and files
+    static constexpr uint32_t STATE_MAGIC = 0x31544253u;  // "SBT1"
+    void captureState(std::vector<uint8_t>& out) {
+        out.clear();
+        Writer w{out};
+        w.pod(STATE_MAGIC);
+        w.pod((uint32_t)sizeof(Cell)); w.pod((uint32_t)sizeof(Body)); w.pod((uint32_t)sizeof(Joint));
+        w.pod((uint32_t)World::W); w.pod((uint32_t)World::H);
+        world.save(w);
+        phys.save(w);
+        w.pod((uint32_t)labels.size());
+        for (auto& l : labels) { w.pod(l.p); w.str(l.s); }
+        w.pod(bodyMat);
+    }
+    bool restoreState(const std::vector<uint8_t>& buf) {
+        Reader r(buf);
+        if (r.pod<uint32_t>() != STATE_MAGIC || r.pod<uint32_t>() != sizeof(Cell) || r.pod<uint32_t>() != sizeof(Body) ||
+            r.pod<uint32_t>() != sizeof(Joint) || r.pod<uint32_t>() != (uint32_t)World::W || r.pod<uint32_t>() != (uint32_t)World::H || !r.ok)
+            return false;
+        if (!world.load(r) || !phys.load(r)) return false;
+        uint32_t n = r.pod<uint32_t>();
+        std::vector<Label> ls;
+        for (uint32_t i = 0; i < n && r.ok && i < 1000; ++i) { Label l; l.p = r.pod<Vec2>(); l.s = r.str(); ls.push_back(l); }
+        uint8_t bm = r.pod<uint8_t>();
+        if (!r.ok) return false;
+        labels = ls;
+        bodyMat = bm;
+        dragBody = -1; grabJoint = -1;
+        pruneSelection();
+        return true;
+    }
+    void startPlay() {
+        if (playing) return;
+        captureState(snapshot);
+        playing = true;
+        paused = false;
+    }
+    void play() {
+        if (!playing) { startPlay(); notify("RUNNING. STOP RESTORES THE DRAWING AS IT WAS"); }
+        else paused = false;
+    }
+    void stopPlay() {
+        if (!playing) { notify("ALREADY STOPPED (EDIT MODE)"); return; }
+        if (!restoreState(snapshot)) { notify("COULD NOT RESTORE THE SNAPSHOT"); return; }
+        playing = false;
+        paused = false;
+        notify("STOPPED: BACK TO THE DRAWN STATE");
+    }
+    void togglePause() {
+        if (!playing) { notify("PRESS PLAY FIRST"); return; }
+        paused = !paused;
+    }
+    void stepFrame() {
+        if (!playing) { startPlay(); paused = true; }
+        stepOnce = true;
+    }
+    void newFile() {
+        if (newArmed > 0) {
+            resetWorld();
+            phys.stampBodies();
+            clearSelection();
+            currentFile.clear();
+            newArmed = 0;
+            notify("NEW EMPTY FILE");
+        } else {
+            newArmed = 240;
+            notify("PRESS NEW AGAIN TO CLEAR EVERYTHING (SAVE FIRST!)");
+        }
+    }
+    static std::string saveDir() { return "saves"; }
+    static std::string cleanName(const std::string& in) {
+        std::string o;
+        for (char c : in) if (std::isalnum((unsigned char)c) || c == '-' || c == '_') o += (char)std::tolower((unsigned char)c);
+        return o.substr(0, 24);
+    }
+    void refreshFiles() {
+        fileList.clear();
+        std::error_code ec;
+        std::vector<std::pair<std::filesystem::file_time_type, std::string>> found;
+        for (auto& e : std::filesystem::directory_iterator(saveDir(), ec))
+            if (e.is_regular_file(ec) && e.path().extension() == ".sbot") found.push_back({e.last_write_time(ec), e.path().stem().string()});
+        std::sort(found.begin(), found.end(), [](auto& a, auto& b) { return a.first > b.first; });
+        for (auto& f : found) fileList.push_back(f.second);
+    }
+    bool writeFile(const std::string& name) {
+        std::error_code ec;
+        std::filesystem::create_directories(saveDir(), ec);
+        std::vector<uint8_t> buf;
+        if (playing) buf = snapshot;   // a running machine is saved as it was drawn
+        else captureState(buf);
+        std::ofstream f(saveDir() + "/" + name + ".sbot", std::ios::binary);
+        if (!f) return false;
+        f.write(reinterpret_cast<const char*>(buf.data()), (std::streamsize)buf.size());
+        return (bool)f;
+    }
+    bool readFile(const std::string& name) {
+        std::ifstream f(saveDir() + "/" + name + ".sbot", std::ios::binary);
+        if (!f) return false;
+        std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        playing = false; paused = false;
+        if (!restoreState(buf)) return false;
+        clearSelection();
+        phys.stampBodies();
+        return true;
+    }
+    void saveQuick() {
+        if (currentFile.empty()) { openFileForm(true); return; }
+        notify(writeFile(currentFile) ? "SAVED " + currentFile + (playing ? " (AS DRAWN, NOT MID-RUN)" : "") : "SAVE FAILED");
+    }
+    void openFileForm(bool save) {
+        refreshFiles();
+        formKind = save ? FK_SAVE : FK_LOAD;
+        fActive = 0; fFresh = true; formMsg.clear();
+        fileIdx = -1;
+        fields = {{"FILE", save ? currentFile : (fileList.empty() ? std::string() : fileList[0])}};
+        if (!save && !fileList.empty()) fileIdx = 0;
+    }
+    // text entry for the file name; Up/Down pick from the existing files
+    bool fileFormKey(SDL_Keycode k, Uint16 mod) {
+        std::string& t = fields[0].text;
+        auto typeChar = [&](char c) {
+            if (fFresh) { t.clear(); fFresh = false; }
+            if (t.size() < 24) t += c;
+            fileIdx = -1;
+        };
+        if (k >= SDLK_a && k <= SDLK_z) typeChar((char)('a' + (k - SDLK_a)));
+        else if (k >= SDLK_0 && k <= SDLK_9) typeChar((char)('0' + (k - SDLK_0)));
+        else if (k == SDLK_MINUS) typeChar((mod & KMOD_SHIFT) ? '_' : '-');
+        else if (k == SDLK_BACKSPACE) { if (!t.empty()) t.pop_back(); fFresh = false; fileIdx = -1; }
+        else if ((k == SDLK_DOWN || k == SDLK_UP || k == SDLK_TAB) && !fileList.empty()) {
+            int n = (int)fileList.size();
+            fileIdx = fileIdx < 0 ? 0 : (fileIdx + (k == SDLK_UP ? n - 1 : 1)) % n;
+            t = fileList[fileIdx]; fFresh = true;
+        }
+        else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) applyForm();
+        else if (k == SDLK_ESCAPE) closeForm();
+        return true;
+    }
+
     void openScaleForm() {
         pruneSelection();
         if (sel.empty()) { notify("SELECT BODIES TO SCALE FIRST"); return; }
@@ -917,6 +1089,7 @@ struct Game {
     // returns true if the key was consumed by the form
     bool formKey(SDL_Keycode k, Uint16 mod) {
         if (formKind == FK_NONE) return false;
+        if (formKind == FK_SAVE || formKind == FK_LOAD) return fileFormKey(k, mod);
         int n = (int)fields.size();
         auto typeChar = [&](char c) {
             std::string& t = fields[fActive].text;
@@ -940,7 +1113,7 @@ struct Game {
         else if (k == SDLK_u) ungroupSelection();
         return true;
     }
-    SDL_Rect formRect() const { return SDL_Rect{8, 8, 300, 56 + (int)fields.size() * 20 + (formKind >= FK_EDIT_BOX || formKind == FK_EMITTER ? 52 : 20)}; }
+    SDL_Rect formRect() const { return SDL_Rect{8, 8, 300, 56 + (int)fields.size() * 20 + (formKind >= FK_EDIT_BOX || formKind == FK_EMITTER ? 52 : 20) + ((formKind == FK_SAVE || formKind == FK_LOAD) ? 14 + 12 * (int)std::min<size_t>(fileList.size(), 6) : 0)}; }
     SDL_Rect fieldRect(int i) const { return SDL_Rect{16, 36 + i * 20, 284, 18}; }
     bool formClick(int mx, int my) {
         if (formKind == FK_NONE) return false;
@@ -1309,8 +1482,10 @@ struct Game {
             case SDLK_ESCAPE: if (!sel.empty()) clearSelection(); else running = false; break;
             case SDLK_g: if (SDL_GetModState() & KMOD_CTRL) { groupSelection(); break; } phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; break;
             case SDLK_u: if (SDL_GetModState() & KMOD_CTRL) ungroupSelection(); break;
-            case SDLK_SPACE: paused = !paused; break;
-            case SDLK_n: stepOnce = true; break;
+            case SDLK_SPACE: if (!playing) play(); else togglePause(); break;
+            case SDLK_n: if (SDL_GetModState() & KMOD_CTRL) newFile(); else stepFrame(); break;
+            case SDLK_s: if (SDL_GetModState() & KMOD_CTRL) saveQuick(); break;
+            case SDLK_o: if (SDL_GetModState() & KMOD_CTRL) openFileForm(false); break;
             case SDLK_c: world.clear(); phys.stampBodies(); break;
             case SDLK_x: clearBodies(); break;
             case SDLK_r: buildDemo(); break;
@@ -1373,7 +1548,9 @@ struct Game {
         pruneSelection();
         if (noteFrames > 0) --noteFrames;
         continuousInput();
-        if (!paused || stepOnce) {
+        if (!playing) phys.stampBodies();   // editing: keep the cover cells in step with what is drawn
+        if (newArmed > 0) --newArmed;
+        if ((playing && !paused) || stepOnce) {
             phys.step(1.f / 60.f);
             world.step();
             stepOnce = false;
@@ -1662,6 +1839,8 @@ struct Game {
             case FK_PIPE: title = "NEW PIPE (CELLS)"; break;
             case FK_BATTERY: title = "BATTERY (VOLTS / AMPS)"; break;
             case FK_BOND: title = "BOND SETTINGS"; break;
+            case FK_SAVE: title = "SAVE AS (saves/NAME.sbot)"; break;
+            case FK_LOAD: title = "LOAD (TYPE A NAME OR UP/DOWN)"; break;
             case FK_EMITTER: title = "NEW EMITTER (CELLS, RATE = CELLS/S)"; break;
             case FK_SCALE: title = "SCALE SELECTION"; break;
             case FK_HOSE: title = "NEW HOSE (CELLS)"; break;
@@ -1692,6 +1871,18 @@ struct Game {
             if (formKind == FK_EDIT_GROUP) ms = "PARTS: " + std::to_string(sel.size()) + "  CTRL+CLICK EDITS ONE PART";
             font::draw(ren, ms, 16, y, 1, SDL_Color{255, 220, 120, 255});
             y += 12;
+        }
+        if (formKind == FK_SAVE || formKind == FK_LOAD) {
+            int ly = y;
+            font::draw(ren, fileList.empty() ? "NO SAVED FILES YET" : "SAVED FILES (NEWEST FIRST):", 16, ly, 1, SDL_Color{150, 160, 180, 255});
+            for (size_t i = 0; i < fileList.size() && i < 6; ++i) {
+                bool cur = (int)i == fileIdx;
+                font::draw(ren, (cur ? "> " : "  ") + fileList[i], 16, ly + 12 + 12 * (int)i, 1, cur ? SDL_Color{255, 255, 255, 255} : SDL_Color{190, 205, 225, 255});
+            }
+            y += 14 + 12 * (int)std::min<size_t>(fileList.size(), 6);
+            font::draw(ren, "ENTER: OK  ESC: CANCEL", 16, y, 1, SDL_Color{150, 160, 180, 255});
+            font::draw(ren, formMsg, 16, y + 12, 1, SDL_Color{255, 150, 120, 255});
+            return;
         }
         font::draw(ren, "TAB/CLICK: NEXT FIELD  ENTER: APPLY  ESC: CLOSE", 16, y + (formKind >= FK_EDIT_BOX && emitterFormActive() ? 12 : 0), 1, SDL_Color{150, 160, 180, 255});
         font::draw(ren, formMsg, 16, y + 12, 1, SDL_Color{150, 230, 255, 255});
@@ -1753,20 +1944,26 @@ struct Game {
         if (!sel.empty()) status += "  SEL " + std::to_string(sel.size());
         status += "  X " + std::to_string((int)smouse().x) + " Y " + std::to_string((int)smouse().y);
         status += "  FPS " + std::to_string((int)fps);
-        if (paused) status += "  [PAUSED]";
+        status += playing ? (paused ? "  [PAUSED]" : "  [RUNNING]") : "  [EDIT MODE]";
+        if (!currentFile.empty()) status += "  FILE: " + currentFile;
         font::draw(ren, status, 8, sy, 2, SDL_Color{255, 220, 120, 255});
         if (noteFrames > 0) font::draw(ren, note, 8, SIM_H - 14, 2, SDL_Color{255, 200, 120, 255});
         else if (phys.eventFrames > 0) font::draw(ren, phys.lastEvent, 8, SIM_H - 14, 2, SDL_Color{255, 120, 90, 255});
+        {
+            const char* mode = playing ? (paused ? "PAUSED" : "RUNNING") : "EDIT MODE - PRESS PLAY (SPACE)";
+            SDL_Color mc = playing ? (paused ? SDL_Color{255, 190, 90, 255} : SDL_Color{120, 255, 150, 255}) : SDL_Color{130, 190, 255, 255};
+            font::draw(ren, mode, WIN_W - font::textWidth(mode, 2) - 8, 8, 2, mc);
+        }
         if (world.vMax > 0.f) {
             char eb[96];
             std::snprintf(eb, sizeof eb, "ELEC: PEAK %.4g V  SOURCE %.3g A  ARCS %ld", world.vMax, world.iSource, world.arcCount);
-            font::draw(ren, eb, WIN_W - font::textWidth(eb, 1) - 6, 6, 1, SDL_Color{255, 240, 140, 255});
+            font::draw(ren, eb, WIN_W - font::textWidth(eb, 1) - 6, 28, 1, SDL_Color{255, 240, 140, 255});
         }
         std::string hover = hoverText();
         if (!hover.empty()) font::draw(ren, hover, 8, sy + 17, 2, SDL_Color{150, 230, 255, 255});
         font::draw(ren, TOOL_HINTS[tool], 8 + (hover.empty() ? 0 : font::textWidth(hover, 2) + 20), sy + 20, 1, SDL_Color{170, 180, 200, 255});
         font::draw(ren,
-                   "SPACE PAUSE  N STEP  C CLEAR CELLS  X CLEAR BODIES  R DEMO  T ANCHOR  F BODY MATERIAL  ENTER EXACT VALUES  CTRL+G GROUP  CTRL+U UNGROUP  H HEAT VIEW  E HOLD = SPARK  , . SPARK RATE  V CAR  G GRAVITY  ARROWS DRIVE  UP ROCKETS",
+                   "SPACE PLAY/PAUSE  N STEP  CTRL+S SAVE  CTRL+O LOAD  CTRL+N NEW  C CLEAR CELLS  X CLEAR BODIES  R DEMO  T ANCHOR  F BODY MATERIAL  ENTER EXACT VALUES  CTRL+G GROUP  CTRL+U UNGROUP  H HEAT VIEW  E HOLD = SPARK  , . SPARK RATE  V CAR  G GRAVITY  ARROWS DRIVE  UP ROCKETS",
                    8, sy + 32, 1, SDL_Color{120, 130, 150, 255});
     }
 
@@ -1843,6 +2040,34 @@ int main(int argc, char** argv) {
             case 17: g.buildElectricTest(); break;
             case 18: g.buildBondTest(); break;
             case 19: g.buildPrimerTest(); break;
+            case 20: {   // run-mode and file round trips
+                g.buildGasEngine();
+                std::vector<uint8_t> a, b, c;
+                g.captureState(a);
+                g.play();
+                for (int i = 0; i < 200; ++i) g.update();
+                g.captureState(b);
+                std::printf("after 200 frames of play the state differs from the drawing: %s (playing=%d)\n", a != b ? "yes" : "NO", (int)g.playing);
+                g.stopPlay();
+                g.captureState(c);
+                std::printf("STOP restored the drawn state exactly: %s (playing=%d)\n", a == c ? "yes" : "NO", (int)g.playing);
+                bool w = g.writeFile("selftest");
+                g.buildDemo();
+                bool r = g.readFile("selftest");
+                g.captureState(c);
+                std::printf("save+load round trip: write=%d read=%d identical=%s\n", (int)w, (int)r, a == c ? "yes" : "NO");
+                g.play();
+                for (int i = 0; i < 60; ++i) g.update();
+                g.captureState(b);
+                std::printf("save while playing stores the drawn design: ");
+                bool w2 = g.writeFile("selftest2");
+                g.stopPlay();
+                bool r2 = g.readFile("selftest2");
+                g.captureState(c);
+                std::printf("write=%d read=%d identical=%s\n", (int)w2, (int)r2, a == c ? "yes" : "NO");
+                break;
+            }
+            case 21: g.buildGasEngine(); g.writeFile("engine1"); g.currentFile = "engine1"; g.openFileForm(false); break;
             case 13: g.buildPrecisionTest(); g.tool = Tool::T_HOSE; g.clearSelection(); g.openForm(); break;
             default: g.buildTestScene(scene); break;
         }

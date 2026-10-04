@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include "state.hpp"
 #include "materials.hpp"
 
 struct Cell {
@@ -63,6 +64,8 @@ public:
 
     World();
     void clear();
+    void save(Writer& w) const;
+    bool load(Reader& r);
     void step();
 
     bool inb(int x, int y) const { return (unsigned)x < (unsigned)W && (unsigned)y < (unsigned)H; }
