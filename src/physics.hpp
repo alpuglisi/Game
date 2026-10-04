@@ -151,6 +151,8 @@ public:
     int newGroupId();   // the lowest id no body or weld is using
     int newBondId() { return bondCounter++; }
     void translateBodies(const std::vector<int>& ids, Vec2 delta);
+    // mirror bodies about the line x = pivot.x (horizontal flip) or y = pivot.y (vertical); joints, welds, fans, emitters and motors follow
+    void flipBodies(const std::vector<int>& ids, bool horizontal, Vec2 pivot);
     void applyFans(float dt);   // directed airflow, suction/stall, thrust and wind on bodies
     // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
     int addBond(Vec2 anchor, int a, int b, float breakT, float breakF, float loadG = 0.f);

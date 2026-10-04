@@ -29,10 +29,10 @@ constexpr int WIN_W = LEFT_W + SIM_W + RIGHT_W, WIN_H = TOP_H + SIM_H + BOT_H;
 constexpr float PI = 3.14159265f;
 
 enum Tool {
-    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND, T_FAN, T_CUT
+    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND, T_FAN, T_CUT, T_MEASURE
 };
 const char* TOOL_NAMES[] = {"PARTICLES", "BOX", "CIRCLE", "WHEEL", "ROCKET", "PIN JOINT", "MOTOR (ARROWS)",
-                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND", "FAN", "CUT"};
+                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND", "FAN", "CUT", "MEASURE"};
 const char* TOOL_HINTS[] = {
     "LMB: PAINT  RMB: ERASE  WHEEL: BRUSH SIZE",
     "DRAG TO SIZE A BOX OF THE SELECTED SOLID (CLICK = DEFAULT)",
@@ -54,6 +54,7 @@ const char* TOOL_HINTS[] = {
     "CLICK WHERE TWO BODIES OVERLAP OR TOUCH (ONE NEARBY = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO WHEN TOO HOT OR OVERLOADED. ENTER = SET BOTH",
     "DRAG A FAN: THE ARROW SHOWS WHICH WAY IT BLOWS. SELECT IT, THEN + / - CHANGE STRENGTH AND \\ FLIPS IT. ENTER = EXACT VALUES",
     "DRAG A BOX OR CIRCLE OVER BODIES: THE AREA UNDER IT IS CUT OUT OF EVERY BODY IT TOUCHES. CTRL+Z UNDOES",
+    "DRAG TO MEASURE LENGTH, DX, DY AND ANGLE (SNAP APPLIES)",
 };
 // the digit keys pick tools: 1 SELECT, 2 GRAB, 3 BOX, 4 CIRCLE, 5 WHEEL, 6 PIN, 7 MOTOR, 8 ROD, 9 SPRING, 0 PAINT
 const Tool DIGIT_TOOLS[10] = {T_MAT, T_SELECT, T_GRAB, T_BOX, T_CIRCLE, T_WHEEL, T_PIN, T_MOTOR, T_ROD, T_SPRING};
@@ -438,6 +439,7 @@ struct Game {
         header("TOOLS");
         tool_("SELECT", T_SELECT);
         tool_("GRAB", T_GRAB);
+        tool_("MEASURE", T_MEASURE);
         header("SHAPES");
         tool_("BOX", T_BOX); tool_("CIRCLE", T_CIRCLE); tool_("WHEEL", T_WHEEL); tool_("ROCKET", T_ROCKET);
         tool_("PIPE", T_PIPE); tool_("HOSE", T_HOSE);
@@ -456,6 +458,9 @@ struct Game {
         act_("COPY", "COPY THE SELECTED BODIES (CTRL+C)", [this] { copySelection(); });
         act_("PASTE", "PASTE AT THE CURSOR (CTRL+V)", [this] { pasteClipboard(); });
         act_("SUBTRACT", "CUT THE LAST-CLICKED (RED) BODY OUT OF THE OTHER SELECTED BODIES", [this] { cutSelection(); }, nullptr, true);
+        act_("FLIP H", "MIRROR THE SELECTION LEFT-RIGHT ABOUT ITS CENTRE (CTRL+H)", [this] { flipSelection(true); });
+        act_("FLIP V", "MIRROR THE SELECTION TOP-BOTTOM ABOUT ITS CENTRE (CTRL+SHIFT+H)", [this] { flipSelection(false); });
+        act_("DUPLICATE", "COPY THE SELECTION, JOINTS INCLUDED, AT THE CURSOR OR BESIDE ITSELF (CTRL+D)", [this] { duplicateSelection(); }, nullptr, true);
         header("PARTICLES");
         act_("PAINT", "PAINT SAND, LIQUIDS, GASES AND SOLIDS AS CELLS (RMB ERASES)  (KEY 0)", [this] { pickTool(T_MAT); },
              [this] { return tool == T_MAT && mat != M_EMPTY; });
@@ -2263,6 +2268,55 @@ struct Game {
         phys.translateBodies(sel, delta);
     }
 
+    // ---- flip, duplicate, measure
+    Vec2 measA, measB;        // the measure tool's last line
+    bool measOn = false;
+    std::vector<int> wholeGroups(const std::vector<int>& ids) const {   // the ids with every group they touch completed
+        std::vector<int> out = ids;
+        for (int id : ids) {
+            int g = phys.bodies[id].group;
+            if (g < 0) continue;
+            for (int m : phys.groupMembers(g)) if (std::find(out.begin(), out.end(), m) == out.end()) out.push_back(m);
+        }
+        return out;
+    }
+    std::pair<Vec2, Vec2> bodiesBox(const std::vector<int>& ids) {   // the tight bounding box of some bodies: {min, max}
+        Vec2 lo(1e9f, 1e9f), hi(-1e9f, -1e9f);
+        for (int id : ids)
+            for (Vec2 p : bodyOutline(phys.bodies[id])) {
+                lo.x = std::min(lo.x, p.x); lo.y = std::min(lo.y, p.y);
+                hi.x = std::max(hi.x, p.x); hi.y = std::max(hi.y, p.y);
+            }
+        return {lo, hi};
+    }
+    // Mirror the selection (whole groups) about the centre of its bounding box, left-right or top-bottom. Joints, welds, fans,
+    // emitters and motors follow (Physics::flipBodies). Works while stopped or paused, like moving.
+    void flipSelection(bool horizontal) {
+        pruneSelection();
+        if (sel.empty()) { notify(horizontal ? "SELECT BODIES TO FLIP FIRST (CTRL+H)" : "SELECT BODIES TO FLIP FIRST (CTRL+SHIFT+H)"); return; }
+        std::vector<int> ids = wholeGroups(sel);
+        std::pair<Vec2, Vec2> box = bodiesBox(ids);
+        pushUndo();
+        phys.flipBodies(ids, horizontal, (box.first + box.second) * 0.5f);
+        phys.stampBodies();
+        notify(horizontal ? "FLIPPED LEFT-RIGHT (CTRL+Z UNDOES)" : "FLIPPED TOP-BOTTOM (CTRL+Z UNDOES)");
+        if (formKind >= FK_EDIT_BOX) openForm();
+    }
+    // Copy the selection with its joints and welds. The copy lands at the pointer, or 1 cell right of and below the originals
+    // when the pointer is off the view (the button was clicked), and becomes the selection. The clipboard is left as it was.
+    void duplicateSelection() {
+        pruneSelection();
+        if (sel.empty()) { notify("SELECT BODIES TO DUPLICATE FIRST (CTRL+D)"); return; }
+        Clip saved = clip;
+        Vec2 from = bodiesBox(sel).first;
+        copySelection();
+        pasteClipboard();   // one undo entry; at the pointer, or at the view centre
+        if (!inSim) moveSelectionBy(from + Vec2(1.f, 1.f) - bodiesBox(sel).first);
+        clip = saved;
+        phys.stampBodies();
+        notify("DUPLICATED " + std::to_string(sel.size()) + " BODIES - DRAG THEM INTO PLACE (CTRL+Z UNDOES)");
+    }
+
     // The CUT tool: a box or circle dragged over the picture is cut out of every body it touches.
     void applyCutShape(Vec2 a, Vec2 b) {
         std::vector<int> targets;
@@ -2624,6 +2678,7 @@ struct Game {
                 phys.stampBodies();
                 break;
             }
+            case T_MEASURE: measA = measB = snap(mouse); measOn = true; break;
             default: break;
         }
     }
@@ -2704,6 +2759,7 @@ struct Game {
                 grabJoint = -1;
                 dragBody = -1;
                 break;
+            case T_MEASURE: measB = snap(mouse); break;
             default: break;
         }
         lmb = false;
@@ -2841,6 +2897,8 @@ struct Game {
                 case SDLK_n: newFile(); break;
                 case SDLK_g: groupSelection(); break;
                 case SDLK_u: ungroupSelection(); break;
+                case SDLK_h: flipSelection(!shift); break;
+                case SDLK_d: duplicateSelection(); break;
                 case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: zoomCentre(1); break;
                 case SDLK_MINUS: case SDLK_KP_MINUS: zoomCentre(-1); break;
                 case SDLK_0: case SDLK_KP_0: zoomReset(); break;
@@ -3421,6 +3479,23 @@ struct Game {
     }
 
     void renderGhost() {
+        // the measure tool: a line from the press to the pointer with its length, dx, dy and angle; the last one stays until
+        // the next press or a change of tool, wherever the pointer is
+        if (tool != T_MEASURE) measOn = false;
+        if (measOn) {
+            if (lmb) measB = snap(mouse);
+            Vec2 d = measB - measA;
+            SDL_Color gold{255, 214, 90, 230};
+            lineWorld(measA, measB, gold, 2);
+            for (Vec2 e : {measA, measB}) {   // a small cross at each end
+                lineWorld(e - Vec2(1.5f, 0), e + Vec2(1.5f, 0), gold, 1);
+                lineWorld(e - Vec2(0, 1.5f), e + Vec2(0, 1.5f), gold, 1);
+            }
+            float deg = length(d) > 1e-4f ? std::atan2(d.y, d.x) * 180.f / PI : 0.f;   // the engine's convention: positive turns clockwise on screen
+            ghostLabel(measB, "L " + fmt(length(d)) + "  A " + fmt(deg) + " DEG");
+            SDL_FPoint q = sp(measB);
+            font::draw(ren, "DX " + fmt(d.x) + "  DY " + fmt(d.y), (int)q.x + 8, (int)q.y + 2, 2, SDL_Color{255, 240, 150, 255});
+        }
         if (!inSim) return;
         SDL_Color white{255, 255, 255, 170};
         Vec2 m = smouse();
@@ -4087,6 +4162,60 @@ int main(int argc, char** argv) {
                 g.cutSelection();
                 std::printf("subtract selection: circle %s, centre of the hole empty: %s\n", g.keepCutter ? "kept" : "consumed", !covered(310, 75) ? "yes" : "NO");
                 (void)before2;
+                // duplicate and flip through the keyboard: two boxes, box-selected, ctrl+d at the pointer, ctrl+h, undo twice
+                g.clearSelection();
+                g.tool = T_BOX; drag(40, 160, 80, 180); drag(90, 160, 130, 190);
+                g.tool = T_SELECT;
+                drag(30, 150, 140, 200);                        // box-select both (the press is on empty space)
+                std::vector<int> pair = g.sel;
+                int n1 = alive();
+                auto bboxC = [&](const std::vector<int>& ids) {   // the centre of the pos +- bound box, as the clipboard measures it
+                    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                    for (int id : ids) {
+                        const Body& b = g.phys.bodies[id];
+                        x0 = std::min(x0, b.pos.x - b.bound); x1 = std::max(x1, b.pos.x + b.bound);
+                        y0 = std::min(y0, b.pos.y - b.bound); y1 = std::max(y1, b.pos.y + b.bound);
+                    }
+                    return Vec2((x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+                };
+                mouseTo(250, 200);
+                key(SDLK_d, KMOD_CTRL);
+                bool fresh = g.sel.size() == 2;
+                for (int id : g.sel) if (std::find(pair.begin(), pair.end(), id) != pair.end()) fresh = false;
+                Vec2 dupC = bboxC(g.sel);
+                std::printf("ctrl+d: %d -> %d bodies (expected %d), the duplicates are the new selection: %s, placed at the pointer (%.0f, %.0f): %s\n",
+                            n1, alive(), n1 + 2, pair.size() == 2 && fresh ? "yes" : "NO", dupC.x, dupC.y,
+                            length(dupC - Vec2(250, 200)) < 0.5f ? "yes" : "NO");
+                std::vector<int> dup = g.sel;
+                std::vector<Vec2> p0;
+                float fx0 = 1e9f, fx1 = -1e9f;
+                for (int id : dup) {
+                    const Body& b = g.phys.bodies[id];
+                    p0.push_back(b.pos); fx0 = std::min(fx0, b.pos.x - b.half.x); fx1 = std::max(fx1, b.pos.x + b.half.x);
+                }
+                float cx = (fx0 + fx1) * 0.5f;                  // the flip pivot: the centre of the selection's tight bounding box
+                key(SDLK_h, KMOD_CTRL);
+                bool mirrored = dup.size() == 2;
+                for (size_t i = 0; i < dup.size(); ++i) {
+                    const Vec2& q = g.phys.bodies[dup[i]].pos;
+                    mirrored = mirrored && std::fabs(q.x - (2.f * cx - p0[i].x)) < 1e-3f && std::fabs(q.y - p0[i].y) < 1e-3f;
+                }
+                std::printf("ctrl+h mirrors the x positions about the selection centre %.1f: %s (%.1f, %.1f -> %.1f, %.1f)\n", cx, mirrored ? "yes" : "NO",
+                            p0.empty() ? 0.f : p0[0].x, p0.size() > 1 ? p0[1].x : 0.f,
+                            dup.empty() ? 0.f : g.phys.bodies[dup[0]].pos.x, dup.size() > 1 ? g.phys.bodies[dup[1]].pos.x : 0.f);
+                key(SDLK_z, KMOD_CTRL);
+                bool back = true;
+                for (size_t i = 0; i < dup.size(); ++i) back = back && length(g.phys.bodies[dup[i]].pos - p0[i]) < 1e-3f;
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("ctrl+z puts the duplicates back where they were: %s; another ctrl+z removes them: %d bodies (expected %d)\n",
+                            back ? "yes" : "NO", alive(), n1);
+                // the measure tool: a drag leaves its readout on screen and touches neither the world nor the undo stack
+                size_t undoN = g.undoStack.size();
+                g.tool = T_MEASURE;
+                drag(160, 210, 220, 180);
+                std::printf("measure tool: (%.0f, %.0f) -> (%.0f, %.0f) length %.1f, still shown: %s, bodies %d and undo entries unchanged: %s\n",
+                            g.measA.x, g.measA.y, g.measB.x, g.measB.y, length(g.measB - g.measA), g.measOn ? "yes" : "NO", alive(),
+                            alive() == n1 && g.undoStack.size() == undoN ? "yes" : "NO");
                 // handles: a fresh 60 x 30 box, its right edge dragged 10 cells, a corner with Ctrl, the rotation handle plain and
                 // with Shift, undo; then the grid snapping of a move drag and of a dragged edge
                 g.clearSelection(); g.snapIdx = 0;

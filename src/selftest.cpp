@@ -892,6 +892,226 @@ void buoyancyArea() {
     }
 }
 
+// editing operations: the mirror (flip). Positions, joint anchors, slider rails, motors, fans and emitter outlets all come out
+// as the mirror image, a joint reaching outside the flipped set stays put, and flipping twice gives the original back.
+void editingOps() {
+    std::printf("editing operations: flip\n");
+    auto mirror = [](Vec2 p, bool horizontal, Vec2 pivot) { return horizontal ? Vec2(2.f * pivot.x - p.x, p.y) : Vec2(p.x, 2.f * pivot.y - p.y); };
+    auto mirrorDir = [](Vec2 v, bool horizontal) { return horizontal ? Vec2(-v.x, v.y) : Vec2(v.x, -v.y); };
+    auto close = [](Vec2 a, Vec2 b, float tol) { return std::fabs(a.x - b.x) < tol && std::fabs(a.y - b.y) < tol; };
+    // a small car: box chassis, two wheels on free-running motors, a fan welded on top, a spring to a post, a piston sliding in the chassis's frame
+    struct Car { int chassis, wl, wr, fan, post, piston; std::vector<int> all() const { return {chassis, wl, wr, fan, post, piston}; } };
+    auto buildCar = [&](Rig& r, Vec2 c, bool withFan, bool withSpring) {
+        Car k;
+        k.chassis = r.phys.addBox(c, Vec2(24, 5), 0, M_ALUMINUM, false);
+        k.wl = r.phys.addCircle(c + Vec2(-16, 6), 9, M_RUBBER, false, true);
+        k.wr = r.phys.addCircle(c + Vec2(16, 6), 9, M_RUBBER, false, true);
+        r.phys.addPin(c + Vec2(-16, 6), k.chassis, k.wl, true, false);
+        r.phys.addPin(c + Vec2(16, 6), k.chassis, k.wr, true, false);
+        k.fan = r.phys.addBox(c + Vec2(-10, -8), Vec2(2, 3), 0, M_STEEL, false);
+        if (withFan) r.phys.bodies[k.fan].fan.strength = 60.f;
+        r.phys.bodies[k.fan].src.face = 1;
+        r.phys.groupBodies({k.chassis, k.fan});
+        k.post = r.phys.addBox(c + Vec2(-60, -30), Vec2(2, 20), 0, M_STEEL, true);
+        if (withSpring) r.phys.addDistance(k.chassis, c + Vec2(-24, -3), k.post, c + Vec2(-58, -40), 2.f);
+        k.piston = r.phys.addBox(c + Vec2(30, -2), Vec2(3, 2), 0, M_STEEL, false);
+        r.phys.addSliderRel(k.piston, k.chassis, c + Vec2(30, -2), Vec2(1, 0));
+        return k;
+    };
+    // a joint's world anchors, and a slider's rail direction in the world, from a given set of body poses
+    auto anchors = [](const std::vector<Body>& bs, const Joint& j, Vec2& a, Vec2& b, Vec2& axis) {
+        a = bs[j.a].toWorld(j.la); b = j.b >= 0 ? bs[j.b].toWorld(j.lb) : j.lb;
+        axis = j.type == J_SLIDER ? (j.b >= 0 ? rotate(j.u, bs[j.b].angle) : j.u) : Vec2();
+    };
+    {   // the whole car (post included) mirrored about its centre: every body and every joint lands on its mirror image
+        Rig r;
+        Car k = buildCar(r, Vec2(150, 100), true, true);
+        std::vector<Body> b0 = r.phys.bodies;
+        std::vector<Joint> j0 = r.phys.joints;
+        float x0 = 1e9f, x1 = -1e9f;
+        for (int id : k.all()) { x0 = std::min(x0, b0[id].pos.x - b0[id].bound); x1 = std::max(x1, b0[id].pos.x + b0[id].bound); }
+        Vec2 pivot((x0 + x1) * 0.5f, 100.f);
+        r.phys.flipBodies(k.all(), true, pivot);
+        bool posOk = true; float worst = 0.f;
+        for (int id : k.all()) {
+            Vec2 want = mirror(b0[id].pos, true, pivot);
+            worst = std::max(worst, length(r.phys.bodies[id].pos - want));
+            posOk = posOk && close(r.phys.bodies[id].pos, want, 1e-3f) && std::fabs(r.phys.bodies[id].angle + b0[id].angle) < 1e-5f;
+        }
+        char d[160];
+        std::snprintf(d, sizeof d, "pivot x %.1f, worst position error %.5f, fan now at x %.1f (was %.1f)",
+                      pivot.x, worst, r.phys.bodies[k.fan].pos.x, b0[k.fan].pos.x);
+        check(posOk, "every body of the mirrored car sits at the mirror image of where it was", d);
+        bool jOk = true; int n = 0; float worstJ = 0.f;
+        for (auto& j : r.phys.joints) {
+            if (!j.alive || j.group >= 0) continue;
+            Vec2 a, b, ax, a0, bb0, ax0;
+            anchors(r.phys.bodies, j, a, b, ax);
+            anchors(b0, j0[j.id], a0, bb0, ax0);
+            worstJ = std::max(worstJ, std::max(length(a - mirror(a0, true, pivot)), length(b - mirror(bb0, true, pivot))));
+            jOk = jOk && close(a, mirror(a0, true, pivot), 1e-3f) && close(b, mirror(bb0, true, pivot), 1e-3f);
+            jOk = jOk && close(ax, mirrorDir(ax0, true), 1e-4f);
+            if (j.type == J_MOTOR) jOk = jOk && j.speed == -j0[j.id].speed;
+            if (j.type == J_DISTANCE) jOk = jOk && std::fabs(j.length - j0[j.id].length) < 1e-4f && j.freq == j0[j.id].freq;
+            ++n;
+        }
+        std::snprintf(d, sizeof d, "%d joints (two motors, a spring, a slider), worst anchor error %.5f", n, worstJ);
+        check(jOk && n == 4, "every joint's world anchors are the mirror images of the originals; the slider's rail too, motors reversed", d);
+        const Body& fan = r.phys.bodies[k.fan];
+        std::snprintf(d, sizeof d, "fan strength %.0f (was %.0f), outlet face %d (was %d)", fan.fan.strength, b0[k.fan].fan.strength, fan.src.face, b0[k.fan].src.face);
+        check(fan.fan.strength == -60.f && fan.src.face == 2, "the fan's strength negates and the emitter outlet swaps to the other side", d);
+        // the flipped machine is consistent: with a floor under it, nothing snaps when it runs
+        r.world.fillRect(0, 116, 399, 119, M_WALL);
+        r.phys.stampBodies();
+        float gap = 0.f;
+        for (int i = 0; i < 60; ++i) {
+            r.step(1);
+            for (auto& j : r.phys.joints)
+                if (j.alive && j.group < 0 && (j.type == J_PIN || j.type == J_MOTOR)) gap = std::max(gap, length(r.phys.jointAnchorA(j) - r.phys.jointAnchorB(j)));
+        }
+        std::snprintf(d, sizeof d, "largest pin gap after a second %.3f", gap);
+        check(gap < 0.5f, "the mirrored car runs without its joints snapping", d);
+        // flipping twice is the identity (on a fresh copy: the one above has been driven)
+        Rig q;
+        Car k2 = buildCar(q, Vec2(150, 100), true, true);
+        std::vector<Body> c0 = q.phys.bodies; std::vector<Joint> jc0 = q.phys.joints;
+        q.phys.flipBodies(k2.all(), true, pivot);
+        q.phys.flipBodies(k2.all(), true, pivot);
+        bool same = true;
+        for (int id : k2.all()) {
+            const Body& n = q.phys.bodies[id];
+            same = same && close(n.pos, c0[id].pos, 1e-4f) && std::fabs(n.angle - c0[id].angle) < 1e-5f && n.fan.strength == c0[id].fan.strength && n.src.face == c0[id].src.face;
+        }
+        for (auto& j : q.phys.joints) {
+            if (!j.alive || j.group >= 0) continue;
+            const Joint& o = jc0[j.id];
+            same = same && close(j.la, o.la, 1e-4f) && close(j.lb, o.lb, 1e-4f) && std::fabs(j.length - o.length) < 1e-4f;
+            same = same && j.speed == o.speed && close(j.u, o.u, 1e-5f);
+        }
+        check(same, "flipping twice gives the original back", "bodies, anchors, rails, lengths, motor speeds, fan and outlet compared");
+    }
+    {   // only the car flipped, the post left behind: the spring keeps both its world anchors and its natural length
+        Rig r;
+        Car k = buildCar(r, Vec2(150, 100), true, true);
+        int spring = -1; for (auto& j : r.phys.joints) if (j.alive && j.type == J_DISTANCE) spring = j.id;
+        Vec2 a0 = r.phys.jointAnchorA(r.phys.joints[spring]), b0 = r.phys.jointAnchorB(r.phys.joints[spring]);
+        float l0 = r.phys.joints[spring].length;
+        r.phys.flipBodies({k.chassis, k.wl, k.wr, k.fan, k.piston}, true, Vec2(150, 100));
+        Vec2 a1 = r.phys.jointAnchorA(r.phys.joints[spring]), b1 = r.phys.jointAnchorB(r.phys.joints[spring]);
+        char d[128];
+        std::snprintf(d, sizeof d, "car end moved %.4f, post end moved %.4f, length %.1f -> %.1f", length(a1 - a0), length(b1 - b0), l0,
+                      r.phys.joints[spring].length);
+        check(close(a1, a0, 1e-3f) && close(b1, b0, 1e-3f) && r.phys.joints[spring].length == l0,
+              "a spring reaching a body outside the flipped set keeps its world anchors", d);
+    }
+    {   // the mirrored car drives the other way (the motors' sign)
+        float dx[2];
+        for (int flip = 0; flip < 2; ++flip) {
+            Rig r;
+            r.world.fillRect(0, 116, 399, 119, M_WALL);
+            Car k = buildCar(r, Vec2(150, 100), false, false);   // no fan and no spring: only the motors drive it
+            if (flip) r.phys.flipBodies(k.all(), true, Vec2(150, 100));
+            r.phys.stampBodies();
+            r.step(60);
+            dx[flip] = r.phys.bodies[k.chassis].pos.x - 150.f;
+        }
+        char d[96];
+        std::snprintf(d, sizeof d, "original moved %.1f cells, mirrored %.1f", dx[0], dx[1]);
+        check(std::fabs(dx[0]) > 3.f && dx[0] * dx[1] < 0.f && std::fabs(dx[0] + dx[1]) < 0.3f * std::fabs(dx[0]) + 1.f,
+              "after a second the mirrored car has driven the other way", d);
+    }
+    {   // the mirrored fan blows the other way: a light block downstream of the mirror image is pushed
+        float moved[2];
+        for (int flip = 0; flip < 2; ++flip) {
+            Rig r;
+            r.phys.gravity = Vec2(0, 0);
+            int fan = r.phys.addBox(Vec2(100, 105), Vec2(2, 8), 0, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = 100.f;
+            if (flip) r.phys.flipBodies({fan}, true, Vec2(100, 105));   // in place: only the direction changes
+            float bx = flip ? 80.f : 120.f;
+            int block = r.phys.addBox(Vec2(bx, 105), Vec2(4, 4), 0, M_WOOD, false);
+            r.phys.stampBodies();
+            r.step(120);
+            moved[flip] = r.phys.bodies[block].pos.x - bx;
+        }
+        char d[96];
+        std::snprintf(d, sizeof d, "block ahead of the fan moved %.1f, block ahead of the mirrored fan %.1f", moved[0], moved[1]);
+        check(moved[0] > 8.f && moved[1] < -8.f, "the mirrored fan blows the other way", d);
+        // a tilted fan, flipped both ways: the stream's world direction is the mirror image (strength negates only horizontally)
+        bool axisOk = true;
+        for (int h = 0; h < 2; ++h) {
+            Rig r;
+            int fan = r.phys.addBox(Vec2(100, 100), Vec2(2, 8), 0.7f, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = 60.f;
+            Vec2 ax0 = rotate(Vec2(1, 0), 0.7f);
+            r.phys.flipBodies({fan}, h == 0, Vec2(100, 100));
+            const Body& f = r.phys.bodies[fan];
+            Vec2 ax1 = rotate(Vec2(f.fan.strength > 0 ? 1.f : -1.f, 0), f.angle);
+            axisOk = axisOk && close(ax1, mirrorDir(ax0, h == 0), 1e-4f) && std::fabs(f.fan.strength) == 60.f && (f.fan.strength < 0) == (h == 0);
+        }
+        check(axisOk, "a tilted fan's stream is mirrored by both flips", "world direction of the stream compared after each flip");
+    }
+    {   // a rotated box: its angle negates and its corners land on the mirrored corners
+        Rig r;
+        int b = r.phys.addBox(Vec2(100, 100), Vec2(10, 4), 0.6f, M_STEEL, false);
+        Body o = r.phys.bodies[b];
+        r.phys.flipBodies({b}, true, Vec2(120, 100));
+        const Body& n = r.phys.bodies[b];
+        bool cornersOk = true;
+        for (Vec2 c : {Vec2(-10, -4), Vec2(10, -4), Vec2(10, 4), Vec2(-10, 4)}) {
+            Vec2 want = mirror(o.toWorld(c), true, Vec2(120, 100));
+            bool found = false;
+            for (Vec2 c2 : {Vec2(-10, -4), Vec2(10, -4), Vec2(10, 4), Vec2(-10, 4)}) found = found || close(n.toWorld(c2), want, 1e-3f);
+            cornersOk = cornersOk && found;
+        }
+        char d[96];
+        std::snprintf(d, sizeof d, "angle %.2f -> %.2f, centre x %.1f -> %.1f", o.angle, n.angle, o.pos.x, n.pos.x);
+        check(cornersOk && std::fabs(n.angle + 0.6f) < 1e-5f && close(n.pos, Vec2(140, 100), 1e-3f),
+              "a rotated box flips to angle -a with its corners where the mirrored corners should be", d);
+    }
+    {   // vertical flip of a rotated box pinned to the world at a corner: the pin's anchors mirror and it holds when run
+        Rig r;
+        int b = r.phys.addBox(Vec2(100, 100), Vec2(10, 4), 0.6f, M_STEEL, false);
+        Vec2 anchor = r.phys.bodies[b].toWorld(Vec2(-10, -4));
+        int j = r.phys.addPin(anchor, b, -1, false, false);
+        r.phys.bodies[b].src.face = 3;
+        r.phys.flipBodies({b}, false, Vec2(100, 120));
+        const Body& n = r.phys.bodies[b];
+        const Joint& pj = r.phys.joints[j];
+        Vec2 want = mirror(anchor, false, Vec2(100, 120));
+        bool geomOk = close(n.pos, Vec2(100, 140), 1e-3f) && std::fabs(n.angle + 0.6f) < 1e-5f && n.src.face == 4;
+        geomOk = geomOk && close(r.phys.jointAnchorA(pj), want, 1e-3f) && close(pj.lb, want, 1e-3f);
+        char d[160];
+        int len = std::snprintf(d, sizeof d, "box at (%.1f, %.1f) angle %.2f, pin anchor error %.5f, outlet face %d",
+                                n.pos.x, n.pos.y, n.angle, length(r.phys.jointAnchorA(pj) - want), n.src.face);
+        r.phys.stampBodies();
+        float gap = 0.f;
+        for (int i = 0; i < 60; ++i) { r.step(1); gap = std::max(gap, length(r.phys.jointAnchorA(pj) - pj.lb)); }
+        std::snprintf(d + len, sizeof d - len, ", largest gap while swinging %.3f", gap);
+        check(geomOk && gap < 0.5f, "a vertical flip mirrors a rotated box and its world pin, which still holds", d);
+    }
+    {   // a world slider: the rail's point and direction mirror, the locked angle negates, and the body still runs along the mirrored rail
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int b = r.phys.addBox(Vec2(100, 100), Vec2(6, 6), 0.3f, M_STEEL, false);
+        int sid = r.phys.addSlider(b, Vec2(1, 0.5f));
+        r.phys.flipBodies({b}, true, Vec2(130, 100));
+        const Joint& sj = r.phys.joints[sid];
+        bool geomOk = close(sj.lb, Vec2(160, 100), 1e-3f) && close(sj.u, mirrorDir(normalize(Vec2(1, 0.5f)), true), 1e-4f);
+        geomOk = geomOk && std::fabs(sj.length + 0.3f) < 1e-5f;
+        r.phys.stampBodies();
+        r.phys.bodies[b].vel = sj.u * 30.f;
+        r.step(60);
+        Vec2 off = r.phys.bodies[b].pos - sj.lb;
+        float perp = std::fabs(cross(sj.u, off));
+        char d[160];
+        std::snprintf(d, sizeof d, "rail through (%.1f, %.1f) along (%.2f, %.2f), locked angle %.2f; after a second off the rail by %.3f, slid %.1f",
+                      sj.lb.x, sj.lb.y, sj.u.x, sj.u.y, sj.length, perp, dot(sj.u, off));
+        check(geomOk && perp < 0.5f && std::fabs(dot(sj.u, off)) > 10.f && std::fabs(r.phys.bodies[b].angle + 0.3f) < 0.05f,
+              "a world slider's rail is mirrored and still guides the body", d);
+    }
+}
+
 // fixes from the second review of the rigid-body engine
 void rigidReview2() {
     std::printf("rigid-body review fixes, round two\n");
@@ -1322,6 +1542,7 @@ int runSelfTests() {
     emitters();
     rigidReview();
     buoyancyArea();
+    editingOps();
     rigidReview2();
     oxidiser();
     gridReview();

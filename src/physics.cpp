@@ -277,6 +277,58 @@ void Physics::translateBodies(const std::vector<int>& ids, Vec2 delta) {
     }
 }
 
+// Mirror bodies about the vertical line x = pivot.x (horizontal flip) or the horizontal line y = pivot.y (vertical one).
+// A reflection F turns a rotation R(a) into R(-a), so every body's angle negates and a local anchor la becomes F*la: the world
+// anchor pos + R(a)*la lands on F*(pos + R(a)*la) = F*pos + R(-a)*(F*la). Boxes and circles are symmetric, so the shapes stay.
+// Whatever is anchored in the world (pins, rods, a slider's rail) is mirrored too; a joint reaching a body outside the set keeps
+// its world anchor, as translateBodies does. A fan blows along its own +x: after a horizontal flip that axis points the wrong
+// way, so its strength negates (a vertical flip already turns the axis the right way). Emitter faces swap sides, motors turn
+// the other way. Groups are re-welded at the new poses.
+void Physics::flipBodies(const std::vector<int>& ids, bool horizontal, Vec2 pivot) {
+    const Vec2 F = horizontal ? Vec2(-1.f, 1.f) : Vec2(1.f, -1.f);     // the reflection's diagonal
+    auto fl = [&](Vec2 v) { return Vec2(v.x * F.x, v.y * F.y); };       // a direction or a local anchor, mirrored
+    auto fp = [&](Vec2 p) { return pivot + fl(p - pivot); };            // a world point, mirrored
+    std::vector<char> in(bodies.size(), 0);
+    std::vector<Body> old(bodies.size());
+    std::vector<int> groups;
+    for (int id : ids) {
+        if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive || in[id]) continue;
+        in[id] = 1;
+        Body& b = bodies[id];
+        old[id] = b;
+        b.pos = fp(b.pos);
+        b.angle = -b.angle;
+        b.vel = Vec2(); b.w = 0.f;
+        if (horizontal) {
+            b.fan.strength = -b.fan.strength;
+            if (b.src.face == 1 || b.src.face == 2) b.src.face = (uint8_t)(3 - b.src.face);
+        } else if (b.src.face == 3 || b.src.face == 4) b.src.face = (uint8_t)(7 - b.src.face);
+        if (b.group >= 0 && std::find(groups.begin(), groups.end(), b.group) == groups.end()) groups.push_back(b.group);
+    }
+    for (auto& j : joints) {
+        if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+        bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
+        if (!ia && !ib) continue;
+        if (ia && (ib || j.b < 0)) {   // the whole joint is mirrored; a world anchor or rail mirrors as a world point / direction
+            j.la = fl(j.la);
+            j.lb = j.b >= 0 ? fl(j.lb) : fp(j.lb);
+            if (j.type == J_SLIDER) { j.u = fl(j.u); j.length = -j.length; }   // the rail's direction, and the locked angle
+            if (j.type == J_MOTOR) j.speed = -j.speed;
+            continue;
+        }
+        // one end mirrored and the other body stayed: keep the world anchor
+        float dA = ia ? bodies[j.a].angle - old[j.a].angle : bodies[j.b].angle - old[j.b].angle;
+        if (ia) j.la = bodies[j.a].toLocal(old[j.a].toWorld(j.la));
+        if (ib) j.lb = bodies[j.b].toLocal(old[j.b].toWorld(j.lb));
+        if (j.type == J_SLIDER) {   // as in transformGroup: the locked angle follows the body that turned; a rail in the carrier's frame stays put
+            if (ia) j.length += dA;
+            else { j.length -= dA; j.u = rotate(j.u, -dA); }
+        }
+        if (j.type == J_DISTANCE && j.freq <= 0.f) j.length = length(jointAnchorB(j) - jointAnchorA(j));   // a rod keeps its new length, a spring its own
+    }
+    for (int g : groups) rebuildGroup(g);
+}
+
 int Physics::addRocket(Vec2 c, float angle) {
     int id = addBox(c, Vec2(4.f, 8.f), angle, M_ALUMINUM, false);
     bodies[id].isRocket = true;
