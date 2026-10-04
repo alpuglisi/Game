@@ -2564,6 +2564,21 @@ struct Game {
         phys.stampBodies();
     }
 
+    // in edit mode the arrow keys nudge whatever is selected (while playing they still drive motors and rockets):
+    // 1 cell, Shift 10 cells, Ctrl a quarter of a cell
+    void nudgeSelection(SDL_Keycode k) {
+        pruneSelection();
+        if (playing || sel.empty()) return;
+        const Uint16 mod = SDL_GetModState();
+        float step = (mod & KMOD_SHIFT) ? 10.f : (mod & KMOD_CTRL) ? 0.25f : 1.f;
+        Vec2 d(k == SDLK_RIGHT ? step : k == SDLK_LEFT ? -step : 0.f, k == SDLK_DOWN ? step : k == SDLK_UP ? -step : 0.f);
+        pushUndo("nudge");
+        moveSelectionBy(d);
+        phys.stampBodies();
+        if (primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive)
+            notify("MOVED TO " + fmt(phys.bodies[primary].pos.x) + ", " + fmt(phys.bodies[primary].pos.y) + "  (ARROW = 1 CELL, SHIFT = 10, CTRL = 0.25)");
+    }
+
     void handleKey(SDL_Keycode k) {
         if (formKey(k, SDL_GetModState())) return;
         const Uint16 mod = SDL_GetModState();
@@ -2583,6 +2598,7 @@ struct Game {
                 case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: zoomCentre(1); break;
                 case SDLK_MINUS: case SDLK_KP_MINUS: zoomCentre(-1); break;
                 case SDLK_0: case SDLK_KP_0: zoomReset(); break;
+                case SDLK_LEFT: case SDLK_RIGHT: case SDLK_UP: case SDLK_DOWN: nudgeSelection(k); break;
                 default: break;
             }
             return;
@@ -2613,6 +2629,7 @@ struct Game {
             case SDLK_p: pressureView = !pressureView; break;
             case SDLK_COMMA: sparkIdx = (sparkIdx + 6) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
             case SDLK_PERIOD: sparkIdx = (sparkIdx + 1) % 7; world.sparkPeriod = SPARK_RATES[sparkIdx]; break;
+            case SDLK_LEFT: case SDLK_RIGHT: case SDLK_UP: case SDLK_DOWN: nudgeSelection(k); break;
             case SDLK_LEFTBRACKET: brush = std::max(1, brush - 1); break;
             case SDLK_RIGHTBRACKET: brush = std::min(24, brush + 1); break;
             case SDLK_DELETE: case SDLK_BACKSPACE: deleteSelection(); break;
@@ -3398,6 +3415,7 @@ struct Game {
         line("CTRL+G GROUP    CTRL+U UNGROUP    T FIXED IN PLACE    H HEAT VIEW    P PRESSURE VIEW    G FLIP GRAVITY    [ ] BRUSH SIZE");
         line("FAN SELECTED: + / - STRENGTH    BACKSLASH FLIPS    M BLOW / VACUUM       E HOLD = SPARK PLUG    , . SPARK PLUG PERIOD");
         line("ARROWS OR A / D DRIVE MOTORS    UP OR W FIRE ROCKETS       MIDDLE-DRAG, THE STRIPS AT THE VIEW EDGES, HOME / END / PAGE UP / PAGE DOWN SCROLL");
+        line("ARROW KEYS NUDGE THE SELECTION IN EDIT MODE: 1 CELL, SHIFT = 10 CELLS, CTRL = 1/4 CELL (WHILE PLAYING THEY DRIVE MOTORS AS BEFORE).");
         line("ZOOM: CTRL+WHEEL, CTRL + PLUS / MINUS, OR THE - AND + BUTTONS (CTRL+0 RESETS).    K OR THE GRID BUTTON: REFERENCE GRID, RULERS (CELL NUMBERS) AND A SCALE BAR.");
     }
 
@@ -3829,6 +3847,49 @@ int main(int argc, char** argv) {
                 int sj = g.phys.addDistance(0, Vec2(100, 60), b2, Vec2(160, 60), 3.f);
                 g.phys.stampBodies();
                 g.tool = T_SELECT; g.selectJoint(sj);
+                break;
+            }
+            case 36: {   // arrow keys nudge the selection in edit mode: a body, a group, a box-selection
+                g.resetWorld();
+                g.undoStack.clear();
+                auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
+                auto key = [&](SDL_Keycode k, Uint16 mod = 0) { SDL_SetModState((SDL_Keymod)mod); SDL_Event e{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = k; push(e); SDL_SetModState(KMOD_NONE); };
+                int a = g.phys.addBox(Vec2(100, 100), Vec2(10, 5), 0, M_STEEL, false);
+                int b = g.phys.addCircle(Vec2(130, 100), 6.f, M_STEEL, false, false);
+                int c = g.phys.addBox(Vec2(160, 100), Vec2(5, 5), 0, M_STEEL, false);
+                g.phys.addPin(Vec2(115, 100), a, b, false, false);
+                g.phys.stampBodies();
+                g.tool = T_SELECT;
+                g.selectBody(a, false, false);
+                key(SDLK_RIGHT); key(SDLK_RIGHT); key(SDLK_DOWN);
+                std::printf("one body, Right Right Down: at (%.2f, %.2f) (expected 102, 101)\n", g.phys.bodies[a].pos.x, g.phys.bodies[a].pos.y);
+                key(SDLK_LEFT, KMOD_SHIFT);
+                std::printf("Shift+Left: x %.2f (expected 92)\n", g.phys.bodies[a].pos.x);
+                key(SDLK_UP, KMOD_CTRL);
+                std::printf("Ctrl+Up: y %.2f (expected 100.75)\n", g.phys.bodies[a].pos.y);
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("Ctrl+Z undoes the whole run of nudges: (%.2f, %.2f) (expected 100, 100)\n", g.phys.bodies[a].pos.x, g.phys.bodies[a].pos.y);
+                // a box selection of the two pinned bodies moves together, the pin keeping them joined
+                g.clearSelection();
+                g.sel = {a, b}; g.primary = a;
+                float gap0 = g.phys.bodies[b].pos.x - g.phys.bodies[a].pos.x;
+                for (int i = 0; i < 5; ++i) key(SDLK_RIGHT);
+                std::printf("two pinned bodies selected, Right x5: a at %.1f, b at %.1f, spacing %.1f -> %.1f, the third body stayed at %.1f\n", g.phys.bodies[a].pos.x, g.phys.bodies[b].pos.x, gap0, g.phys.bodies[b].pos.x - g.phys.bodies[a].pos.x, g.phys.bodies[c].pos.x);
+                // a group
+                g.clearSelection();
+                g.sel = {b, c}; g.primary = b;
+                g.groupSelection();
+                g.selectBody(c, false, false);
+                float cx0 = g.phys.bodies[c].pos.x, bx0 = g.phys.bodies[b].pos.x;
+                key(SDLK_DOWN); key(SDLK_DOWN);
+                std::printf("a group (clicked as a whole), Down x2: c moved %.1f, b moved %.1f in y\n", g.phys.bodies[c].pos.y - 100.f, g.phys.bodies[b].pos.y - 100.f);
+                (void)cx0; (void)bx0;
+                // while playing, the arrow keys leave the selection alone
+                g.play();
+                float yb = g.phys.bodies[c].pos.y;
+                key(SDLK_DOWN);
+                std::printf("while playing an arrow key does not nudge: %s\n", g.phys.bodies[c].pos.y == yb ? "yes" : "NO");
+                g.stopPlay();
                 break;
             }
             case 35: {   // zoom: the mouse still lands on the right cell, Ctrl+wheel zooms about the pointer, drawing works zoomed in

@@ -69,6 +69,7 @@ Troubleshooting: if CMake says it cannot find SDL2, the development package is m
 | `Ctrl+S` / `Ctrl+O` / `Ctrl+N` | Save / open / new |
 | `Space` | Play (from edit mode) / pause / resume |
 | `N` | Single step |
+| Arrow keys | Edit mode: nudge the selection 1 cell (`Shift` 10 cells, `Ctrl` a quarter cell); works on one body, a group, a box-selection or anything selected. While playing they drive motors as before |
 | `Del` / `Backspace` | Delete the selection |
 | `Enter` | Numeric form for the tool or selection |
 | `F` | Focus the camera on the selected body |
