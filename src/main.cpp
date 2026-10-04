@@ -945,16 +945,19 @@ struct Game {
         crankSlider(91, 16, 100, 156, 18, 24, M_IRON);
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
-        world.sourceAmt = 0.8f;
-        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel supply on the left of the chest (gasoline vapour by default)
-        world.sourceAmt = 2.f;
-        rect(120, 136, 120, 145, M_SOURCE, M_AIR);             // air supply on the right: the charge needs oxygen to burn (2.5 air per unit of vapour)
+        // The supply wall: alternate cells of gasoline vapour (0.8) and air (1.0), a carburettor of sorts. The charge enters the chest
+        // already mixed, about 2.5 air per unit of vapour, and the bore gets fuel beside air at every port opening, so the plug can
+        // light it. A wall of vapour beside a wall of air only mixes by diffusion, and denser air simply crowds the vapour out.
+        for (int y = 136; y <= 145; ++y) {
+            const bool air = y & 1;
+            world.sourceAmt = air ? 1.f : 0.8f;
+            rect(76, y, 76, y, M_SOURCE, air ? M_AIR : M_VAPOR);
+        }
         rect(90, 152, 90, 156, M_IGNITER);                     // spark plug set into the head wall
         sparkIdx = 5;
         world.sparkPeriod = SPARK_RATES[sparkIdx];
         rect(0, 230, World::W - 1, 239, M_CONCRETE);
-        label(60, 124, "GASOLINE VAPOUR SUPPLY");
-        label(112, 130, "AIR SUPPLY");
+        label(50, 124, "GASOLINE VAPOUR + AIR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "SPARK PLUG");
         label(196, 118, "FLYWHEEL (STARTED SPINNING)");
@@ -969,17 +972,17 @@ struct Game {
         crankSlider(91, 16, 100, 156, 18, 24, M_IRON);
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
-        world.sourceAmt = 0.8f;
-        rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // diesel vapour supply on the left of the chest
-        for (int y = 136; y <= 145; ++y) world.at(76, y).aux = M_DIESEL;
-        world.sourceAmt = 2.4f;
-        rect(120, 136, 120, 145, M_SOURCE, M_AIR);             // air supply on the right: the charge needs oxygen to burn (3 air per unit of vapour)
+        for (int y = 136; y <= 145; ++y) {   // the supply wall: alternate cells of diesel vapour and air (diesel wants 3 air per unit), see the gas engine
+            const bool air = y & 1;
+            world.sourceAmt = air ? 1.2f : 0.8f;
+            rect(76, y, 76, y, M_SOURCE, air ? M_AIR : M_VAPOR);
+            if (!air) world.at(76, y).aux = M_DIESEL;
+        }
         rect(90, 152, 90, 156, M_HEATER);                      // glow plug: diesel needs heat, not a spark, to light
         sparkIdx = 0;
         world.sparkPeriod = 0;
         rect(0, 230, World::W - 1, 239, M_CONCRETE);
-        label(60, 124, "DIESEL VAPOUR SUPPLY");
-        label(112, 130, "AIR SUPPLY");
+        label(50, 124, "DIESEL VAPOUR + AIR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "GLOW PLUG");
         label(196, 118, "FLYWHEEL (STARTED SPINNING)");
