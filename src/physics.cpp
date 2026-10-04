@@ -205,6 +205,7 @@ void Physics::removeBody(int id) {
     bodies[id].alive = false;
     for (auto& j : joints)
         if (j.alive && (j.a == id || j.b == id)) j.alive = false;
+    if (bodies[id].group >= 0) rebuildGroup(bodies[id].group);
 }
 
 int Physics::bodyCount() const {
@@ -237,7 +238,7 @@ int Physics::nearestJoint(Vec2 p, float maxDist) const {
     int best = -1;
     float bd = maxDist;
     for (auto& j : joints) {
-        if (!j.alive || j.type == J_MOUSE) continue;
+        if (!j.alive || j.type == J_MOUSE || j.group >= 0) continue;
         Vec2 a = jointAnchorA(j), bb = jointAnchorB(j);
         float d = length(p - a);
         if (j.type == J_DISTANCE) {
@@ -993,14 +994,157 @@ void Physics::step(float dt) {
             if (j.a >= 0) bodies[j.a].hasJoint = true;
             if (j.b >= 0) bodies[j.b].hasJoint = true;
         }
+    std::vector<std::vector<int>> groups;
+    for (auto& b : bodies)
+        if (b.alive && b.group >= 0) {
+            if ((int)groups.size() <= b.group) groups.resize(b.group + 1);
+            groups[b.group].push_back(b.id);
+        }
+    for (auto& g : groups)  // members of one group never collide with each other
+        for (size_t i = 0; i < g.size(); ++i)
+            for (size_t k = i + 1; k < g.size(); ++k) noCollide.push_back(pairKey(g[i], g[k]));
+    auto expand = [&](int id) {
+        std::vector<int> r;
+        if (bodies[id].group >= 0) r = groups[bodies[id].group]; else r.push_back(id);
+        return r;
+    };
     for (auto& j : joints)
-        if (j.alive && (j.type == J_PIN || j.type == J_MOTOR || j.type == J_DISTANCE) && j.b >= 0)
-            noCollide.push_back(pairKey(j.a, j.b));
+        if (j.alive && j.group < 0 && (j.type == J_PIN || j.type == J_MOTOR || j.type == J_DISTANCE) && j.b >= 0) {
+            // a joint between members of two groups frees the whole groups from colliding (hose joints)
+            for (int x : expand(j.a)) for (int y : expand(j.b)) noCollide.push_back(pairKey(x, y));
+        }
     std::sort(noCollide.begin(), noCollide.end());
+    noCollide.erase(std::unique(noCollide.begin(), noCollide.end()), noCollide.end());
     float h = dt / SUBSTEPS;
     for (int s = 0; s < SUBSTEPS; ++s) substep(h);
     thermalStep();
     stampBodies();
+}
+
+// ------------------------------------------------------------------ groups
+std::vector<int> Physics::groupMembers(int g) const {
+    std::vector<int> r;
+    if (g < 0) return r;
+    for (auto& b : bodies) if (b.alive && b.group == g) r.push_back(b.id);
+    return r;
+}
+
+// A weld = two pins at distinct points, which together lock all three degrees of freedom.
+void Physics::weldPair(int root, int member) {
+    Vec2 p1 = bodies[root].pos, p2 = bodies[member].pos;
+    if (length(p2 - p1) < 4.f) p2 = p1 + rotate(Vec2(4.f, 0.f), bodies[root].angle);
+    int j1 = addPin(p1, root, member, false, false);
+    int j2 = addPin(p2, root, member, false, false);
+    if (j1 >= 0) joints[j1].group = bodies[root].group;
+    if (j2 >= 0) joints[j2].group = bodies[root].group;
+}
+
+void Physics::rebuildGroup(int g) {
+    for (auto& j : joints) if (j.alive && j.group == g) j.alive = false;
+    std::vector<int> m = groupMembers(g);
+    if (m.size() < 2) { for (int id : m) bodies[id].group = -1; return; }
+    for (size_t i = 1; i < m.size(); ++i) weldPair(m[0], m[i]);
+}
+
+int Physics::groupBodies(const std::vector<int>& ids) {
+    std::vector<int> gs;
+    int target = -1;
+    for (int id : ids) {
+        if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive) continue;
+        if (bodies[id].group >= 0) { target = target < 0 ? bodies[id].group : std::min(target, bodies[id].group); }
+    }
+    if (target < 0) target = groupCounter++;
+    for (int id : ids) {
+        if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive) continue;
+        int old = bodies[id].group;
+        if (old >= 0 && old != target)  // merge the whole old group
+            for (auto& b : bodies) if (b.alive && b.group == old) b.group = target;
+        bodies[id].group = target;
+    }
+    for (auto& j : joints) if (j.alive && j.group >= 0 && bodies[j.a].group != j.group) j.alive = false;
+    rebuildGroup(target);
+    return target;
+}
+
+void Physics::ungroup(int g) {
+    for (auto& j : joints) if (j.alive && j.group == g) j.alive = false;
+    for (auto& b : bodies) if (b.alive && b.group == g) b.group = -1;
+}
+
+void Physics::reshape(int id, Vec2 pos, Vec2 half, float radius, float angle, uint8_t mat, bool stat) {
+    if (id < 0 || id >= (int)bodies.size() || !bodies[id].alive) return;
+    Body old = bodies[id];
+    Body& b = bodies[id];
+    b.pos = pos; b.angle = angle;
+    if (b.shape == SHAPE_BOX) b.half = Vec2(std::max(0.5f, half.x), std::max(0.5f, half.y));
+    else b.radius = std::max(0.5f, radius);
+    if (mat != b.mat) { b.mat = mat; b.color = MATS[mat].color; b.temp = MATS[mat].initT; }
+    b.isStatic = stat;
+    b.vel = Vec2(); b.w = 0;
+    finalize(b);
+    for (auto& j : joints) {
+        if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+        if (j.type == J_SLIDER) {
+            if (j.a == id) { j.lb += pos - old.pos; j.length += angle - old.angle; }
+            continue;
+        }
+        if (j.a == id) j.la = b.toLocal(old.toWorld(j.la));   // keep the joint where it was in the world
+        if (j.b == id) j.lb = b.toLocal(old.toWorld(j.lb));
+    }
+    if (b.group >= 0) rebuildGroup(b.group);
+}
+
+void Physics::transformGroup(int primary, Vec2 newPos, float newAngle) {
+    if (primary < 0 || primary >= (int)bodies.size() || !bodies[primary].alive) return;
+    Vec2 oldPos = bodies[primary].pos;
+    float dA = newAngle - bodies[primary].angle;
+    std::vector<int> m = bodies[primary].group >= 0 ? groupMembers(bodies[primary].group) : std::vector<int>{primary};
+    for (int id : m) {
+        Body& b = bodies[id];
+        b.pos = newPos + rotate(b.pos - oldPos, dA);
+        b.angle += dA;
+        b.vel = Vec2(); b.w = 0;
+    }
+    for (auto& j : joints)  // pins to the world travel with their body
+        if (j.alive && j.group < 0 && j.b < 0 && j.a >= 0 && j.type != J_SLIDER && j.type != J_MOUSE &&
+            std::find(m.begin(), m.end(), j.a) != m.end())
+            j.lb = bodies[j.a].toWorld(j.la);
+}
+
+int Physics::addPipe(Vec2 a, Vec2 b, float outerD, float wall, uint8_t mat, bool stat) {
+    Vec2 d = b - a;
+    float L = length(d);
+    if (L < 2.f) return -1;
+    float ang = std::atan2(d.y, d.x);
+    Vec2 mid = (a + b) * 0.5f, nrm(-d.y / L, d.x / L);
+    wall = std::clamp(wall, 0.5f, outerD * 0.5f);
+    float off = outerD * 0.5f - wall * 0.5f;
+    int w1 = addBox(mid + nrm * off, Vec2(L * 0.5f, wall * 0.5f), ang, mat, stat);
+    int w2 = addBox(mid - nrm * off, Vec2(L * 0.5f, wall * 0.5f), ang, mat, stat);
+    return groupBodies({w1, w2});
+}
+
+int Physics::addHose(Vec2 a, Vec2 b, float outerD, float wall, int segments, uint8_t mat, bool stat) {
+    Vec2 d = b - a;
+    float L = length(d);
+    if (L < 4.f) return -1;
+    segments = std::clamp(segments, 2, 60);
+    float seg = L / segments, overlap = outerD * 0.5f;
+    Vec2 dir = d / L;
+    int first = -1, prevBody = -1;
+    for (int i = 0; i < segments; ++i) {
+        Vec2 s0 = a + dir * (seg * i), s1 = a + dir * (seg * (i + 1));
+        // extend every segment (except at the hose ends) so neighbours overlap and a bend leaves no gap
+        if (i > 0) s0 -= dir * (overlap * 0.5f);
+        if (i < segments - 1) s1 += dir * (overlap * 0.5f);
+        int g = addPipe(s0, s1, outerD, wall, mat, stat);
+        if (g < 0) continue;
+        if (first < 0) first = g;
+        int body = groupMembers(g)[0];
+        if (prevBody >= 0) addPin(a + dir * (seg * i), prevBody, body, false, false);
+        prevBody = body;
+    }
+    return first;
 }
 
 void Physics::dumpContacts(int body) const {

@@ -21,6 +21,7 @@ struct Body {
     float area = 0, mass = 0, invMass = 0, invI = 0, bound = 0;
     bool isStatic = false, isWheel = false, isRocket = false;
     bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
+    int group = -1;     // rigid group (weld-linked bodies act as one object); -1 = none
     uint32_t color = 0xe0b060;
     // pressure of adjacent gas/liquid, refreshed once per frame
     Vec2 fluidF;
@@ -47,6 +48,7 @@ struct Joint {
     // motor
     float speed = 6.f, power = 60.f;
     bool keyed = true;
+    int group = -1;  // >= 0: one half of a weld holding a group together
     // mouse
     float maxForce = 0;
     // solver cache
@@ -98,6 +100,19 @@ public:
     int addMouse(int body, Vec2 anchor);
     int addSlider(int body, Vec2 axis);  // confine a body to a line through its centre; rotation locked
     void setMouseTarget(int joint, Vec2 target);
+
+    // ---- groups ("layers"): members are welded into one rigid object but stay individually editable
+    int groupBodies(const std::vector<int>& ids);      // returns the group id (merges existing groups)
+    void ungroup(int g);
+    void rebuildGroup(int g);                          // re-weld at the current poses
+    std::vector<int> groupMembers(int g) const;
+    // exact edits: size (half/radius), pose and static flag of one body; welds and joints follow
+    void reshape(int id, Vec2 pos, Vec2 half, float radius, float angle, uint8_t mat, bool stat);
+    void transformGroup(int primary, Vec2 newPos, float newAngle);  // move/rotate a whole group about `primary`
+    // hollow tube between two points: two welded walls. Returns the group id.
+    int addPipe(Vec2 a, Vec2 b, float outerD, float wall, uint8_t mat, bool stat);
+    // flexible tube: chain of pipe segments hinged together. Returns the first segment's group id.
+    int addHose(Vec2 a, Vec2 b, float outerD, float wall, int segments, uint8_t mat, bool stat);
     void removeJoint(int id);
     void removeBody(int id);
 
@@ -116,6 +131,8 @@ private:
     std::vector<HydroGroup> hydro;
     std::vector<uint64_t> noCollide;
     int seqCounter = 0;
+    int groupCounter = 0;
+    void weldPair(int root, int member);
 
     Body& B(int id) { return id >= 0 ? bodies[id] : worldBody; }
     int allocBody();

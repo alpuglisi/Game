@@ -19,18 +19,18 @@ namespace {
 constexpr int S = 3;  // screen pixels per sand cell
 constexpr int SIM_W = World::W * S;
 constexpr int SIM_H = World::H * S;
-constexpr int COLS = 9, ROWS = 5, BTN_H = 24, BTN_GAP = 3;
-constexpr int UI_H = ROWS * (BTN_H + BTN_GAP) + 40;
+constexpr int COLS = 9, ROWS = 6, BTN_H = 24, BTN_GAP = 3;
+constexpr int UI_H = ROWS * (BTN_H + BTN_GAP) + 48;
 constexpr int WIN_W = SIM_W, WIN_H = SIM_H + UI_H;
 constexpr float PI = 3.14159265f;
 
 enum Tool {
-    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER
+    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE
 };
 enum Tab { TAB_POWDER, TAB_LIQUID, TAB_GAS, TAB_METAL, TAB_STRUCT, TAB_DEVICE, TAB_SCENE, TAB_COUNT };
 
 const char* TOOL_NAMES[] = {"PARTICLES", "BOX", "CIRCLE", "WHEEL", "ROCKET", "PIN JOINT", "MOTOR (ARROWS)",
-                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER"};
+                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE"};
 const char* TOOL_HINTS[] = {
     "LMB: PAINT  RMB: ERASE  WHEEL: BRUSH SIZE",
     "DRAG TO SIZE A BOX OF THE SELECTED SOLID (CLICK = DEFAULT)",
@@ -45,6 +45,9 @@ const char* TOOL_HINTS[] = {
     "DRAG BODIES AROUND",
     "CLICK A BODY OR JOINT TO REMOVE IT",
     "PRESS ON A BODY AND DRAG ALONG THE LINE IT MAY SLIDE ON (PISTONS, VALVES). ROTATION IS LOCKED",
+    "CLICK = SELECT (SHIFT ADDS, CTRL = ONE PART OF A GROUP). DRAG = BOX SELECT. ENTER = EDIT EXACT VALUES",
+    "DRAG ALONG THE PIPE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/WALL",
+    "DRAG ALONG THE HOSE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/SEGMENTS",
 };
 
 const uint8_t PALETTE[TAB_COUNT][18] = {
@@ -58,6 +61,7 @@ const uint8_t PALETTE[TAB_COUNT][18] = {
 };
 const char* TAB_NAMES[TAB_COUNT] = {"POWDER", "LIQUID", "GAS", "METAL", "STRUCT", "DEVICE", "SCENES"};
 const int SPARK_RATES[] = {0, 120, 60, 40, 30, 20, 12};
+const int SNAPS[] = {0, 1, 2, 5, 10};
 
 SDL_Color rgb(uint32_t c, uint8_t a = 255) {
     return SDL_Color{(uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c, a};
@@ -120,6 +124,25 @@ struct Game {
     int brush = 3;
     bool paused = false, stepOnce = false, anchored = false, running = true, heatView = false;
     int sparkIdx = 2;
+
+    // ---- precision tools: selection, groups, snapping and the numeric entry form
+    std::vector<int> sel;      // selected body ids (a group is always selected whole unless in part mode)
+    int primary = -1;          // the body the form edits
+    bool partMode = false;     // true = the selection is one component of a group
+    int snapIdx = 0;
+    float pipeD = 12.f, pipeWall = 2.f;
+    int hoseSegs = 0;          // 0 = automatic
+    Tool lastTool = T_MAT;
+    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
+    struct Field { std::string name, text; };
+    FormKind formKind = FK_NONE;
+    std::vector<Field> fields;
+    int fActive = 0;
+    bool fFresh = true;
+    uint8_t fMat = M_STEEL;
+    bool fStatic = false;
+    std::string formMsg;
+    bool wheelForm = false;
 
     bool lmb = false, rmb = false;
     Vec2 mouse, lastMouse, dragStart;
@@ -228,6 +251,16 @@ struct Game {
         add(4, 6, [] { return std::string("CLR CELLS"); }, [this] { world.clear(); phys.stampBodies(); }, [] { return false; });
         add(4, 7, [this] { return std::string("BODY:") + MATS[bodyMat].name; }, [this] { cycleBodyMat(); }, [] { return false; });
         add(4, 8, [] { return std::string("SLIDER"); }, [this] { tool = T_SLIDER; }, [this] { return tool == T_SLIDER; });
+        // row 5: selection, groups, pipes and exact numeric entry
+        add(5, 0, [] { return std::string("SELECT"); }, [this] { tool = T_SELECT; }, [this] { return tool == T_SELECT; });
+        add(5, 1, [] { return std::string("GROUP"); }, [this] { groupSelection(); }, [] { return false; });
+        add(5, 2, [] { return std::string("UNGROUP"); }, [this] { ungroupSelection(); }, [] { return false; });
+        add(5, 3, [] { return std::string("PIPE"); }, [this] { tool = T_PIPE; }, [this] { return tool == T_PIPE; });
+        add(5, 4, [] { return std::string("HOSE"); }, [this] { tool = T_HOSE; }, [this] { return tool == T_HOSE; });
+        add(5, 5, [] { return std::string("EXACT"); }, [this] { if (formKind == FK_NONE) openForm(); else closeForm(); },
+            [this] { return formKind != FK_NONE; });
+        add(5, 6, [this] { return std::string("SNAP:") + (SNAPS[snapIdx] ? std::to_string(SNAPS[snapIdx]) : "OFF"); },
+            [this] { snapIdx = (snapIdx + 1) % 5; }, [this] { return snapIdx > 0; });
     }
 
     void cycleBodyMat() {
@@ -592,8 +625,251 @@ struct Game {
         phys.stampBodies();
     }
 
+
+    // ---------------------------------------------------------------- selection / groups / numeric form
+    static constexpr int SNAPS_N = 5;
+    Vec2 snap(Vec2 p) const {
+        int g = SNAPS[snapIdx];
+        if (g <= 0) return p;
+        return Vec2(std::round(p.x / g) * g, std::round(p.y / g) * g);
+    }
+    bool shapeTool(Tool t) const { return t == T_BOX || t == T_CIRCLE || t == T_WHEEL || t == T_ROCKET || t == T_PIPE || t == T_HOSE; }
+    Vec2 smouse() const { return shapeTool(tool) ? snap(mouse) : mouse; }
+
+    static std::string fmt(float v) {
+        char b[32];
+        std::snprintf(b, sizeof b, "%g", std::round(v * 100.f) / 100.f);
+        return b;
+    }
+    float fv(int i) const { return i < (int)fields.size() ? (float)std::atof(fields[i].text.c_str()) : 0.f; }
+
+    void pruneSelection() {
+        sel.erase(std::remove_if(sel.begin(), sel.end(), [&](int id) { return id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive; }), sel.end());
+        if (std::find(sel.begin(), sel.end(), primary) == sel.end()) primary = sel.empty() ? -1 : sel[0];
+    }
+    void clearSelection() { sel.clear(); primary = -1; partMode = false; }
+    void selectBody(int id, bool add, bool part) {
+        if (id < 0) { if (!add) clearSelection(); return; }
+        std::vector<int> add_;
+        const Body& b = phys.bodies[id];
+        if (b.group >= 0 && !part) add_ = phys.groupMembers(b.group); else add_.push_back(id);
+        bool already = std::find(sel.begin(), sel.end(), id) != sel.end();
+        if (!add) sel.clear();
+        if (add && already) {
+            for (int m : add_) sel.erase(std::remove(sel.begin(), sel.end(), m), sel.end());
+        } else {
+            for (int m : add_) if (std::find(sel.begin(), sel.end(), m) == sel.end()) sel.push_back(m);
+            primary = id;
+        }
+        partMode = part && b.group >= 0;
+        pruneSelection();
+        if (formKind >= FK_EDIT_BOX) openForm();
+    }
+    void boxSelect(Vec2 a, Vec2 b, bool add, bool part) {
+        float x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+        if (!add) sel.clear();
+        for (auto& bd : phys.bodies) {
+            if (!bd.alive || bd.pos.x < x0 || bd.pos.x > x1 || bd.pos.y < y0 || bd.pos.y > y1) continue;
+            std::vector<int> m = bd.group >= 0 && !part ? phys.groupMembers(bd.group) : std::vector<int>{bd.id};
+            for (int id : m) if (std::find(sel.begin(), sel.end(), id) == sel.end()) sel.push_back(id);
+        }
+        partMode = false;
+        primary = -1;
+        pruneSelection();
+        if (formKind >= FK_EDIT_BOX) openForm();
+    }
+    void groupSelection() {
+        pruneSelection();
+        if (sel.size() < 2) { formMsg = "SELECT 2+ BODIES FIRST"; return; }
+        int g = phys.groupBodies(sel);
+        sel = phys.groupMembers(g);
+        partMode = false;
+        formMsg = "GROUPED " + std::to_string(sel.size()) + " BODIES";
+        if (formKind >= FK_EDIT_BOX) openForm();
+    }
+    void ungroupSelection() {
+        pruneSelection();
+        int n = 0;
+        std::vector<int> gs;
+        for (int id : sel) { int g = phys.bodies[id].group; if (g >= 0 && std::find(gs.begin(), gs.end(), g) == gs.end()) gs.push_back(g); }
+        for (int g : gs) { phys.ungroup(g); ++n; }
+        partMode = false;
+        formMsg = n ? "UNGROUPED" : "NOTHING GROUPED";
+        if (formKind >= FK_EDIT_BOX) openForm();
+    }
+
+    // ---- the numeric form
+    void openForm() {
+        pruneSelection();
+        fields.clear();
+        fActive = 0; fFresh = true;
+        Vec2 m = snap(mouse);
+        if (primary >= 0) {
+            const Body& b = phys.bodies[primary];
+            float deg = std::fmod(b.angle * 180.f / PI, 360.f);
+            if (b.group >= 0 && !partMode) {
+                formKind = FK_EDIT_GROUP;
+                fields = {{"X", fmt(b.pos.x)}, {"Y", fmt(b.pos.y)}, {"ANGLE", fmt(deg)}};
+            } else if (b.shape == SHAPE_BOX) {
+                formKind = FK_EDIT_BOX;
+                fields = {{"X", fmt(b.pos.x)}, {"Y", fmt(b.pos.y)}, {"WIDTH", fmt(b.half.x * 2)}, {"HEIGHT", fmt(b.half.y * 2)}, {"ANGLE", fmt(deg)}};
+            } else {
+                formKind = FK_EDIT_CIRCLE;
+                fields = {{"X", fmt(b.pos.x)}, {"Y", fmt(b.pos.y)}, {"RADIUS", fmt(b.radius)}, {"ANGLE", fmt(deg)}};
+            }
+            fMat = b.mat; fStatic = b.isStatic;
+            return;
+        }
+        switch (tool) {
+            case T_CIRCLE: case T_WHEEL:
+                formKind = FK_CIRCLE; wheelForm = tool == T_WHEEL;
+                fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"RADIUS", fmt(lastR)}};
+                break;
+            case T_PIPE: case T_HOSE:
+                formKind = tool == T_PIPE ? FK_PIPE : FK_HOSE;
+                fields = {{"X1", fmt(m.x)}, {"Y1", fmt(m.y)}, {"X2", fmt(m.x + lastLen)}, {"Y2", fmt(m.y)},
+                          {"DIAMETER", fmt(pipeD)}, {"WALL", fmt(pipeWall)}};
+                if (tool == T_HOSE) fields.push_back({"SEGMENTS", std::to_string(hoseSegs)});
+                break;
+            default:
+                if (tool != T_BOX) tool = T_BOX;
+                formKind = FK_BOX;
+                fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"WIDTH", fmt(lastW)}, {"HEIGHT", fmt(lastH)}, {"ANGLE", "0"}};
+                break;
+        }
+        fMat = bodyMat; fStatic = anchored;
+    }
+    float lastW = 40.f, lastH = 10.f, lastR = 8.f, lastLen = 60.f;
+    void closeForm() { formKind = FK_NONE; fields.clear(); formMsg.clear(); }
+
+    void applyForm() {
+        pruneSelection();
+        switch (formKind) {
+            case FK_BOX: {
+                lastW = std::max(1.f, fv(2)); lastH = std::max(1.f, fv(3));
+                int id = phys.addBox(Vec2(fv(0), fv(1)), Vec2(lastW, lastH) * 0.5f, fv(4) * PI / 180.f, bodyMat, anchored);
+                sel = {id}; primary = id; partMode = false;
+                formMsg = "CREATED BOX " + fmt(lastW) + " X " + fmt(lastH);
+                break;
+            }
+            case FK_CIRCLE: {
+                lastR = std::max(0.5f, fv(2));
+                createCircle(Vec2(fv(0), fv(1)), lastR, wheelForm);
+                formMsg = "CREATED CIRCLE R " + fmt(lastR);
+                break;
+            }
+            case FK_PIPE: case FK_HOSE: {
+                pipeD = std::max(2.f, fv(4)); pipeWall = std::clamp(fv(5), 0.5f, pipeD * 0.5f);
+                Vec2 a(fv(0), fv(1)), b(fv(2), fv(3));
+                lastLen = std::max(4.f, length(b - a));
+                int g;
+                if (formKind == FK_PIPE) g = phys.addPipe(a, b, pipeD, pipeWall, bodyMat, anchored);
+                else { hoseSegs = (int)fv(6); g = phys.addHose(a, b, pipeD, pipeWall, hoseSegs > 0 ? hoseSegs : autoSegs(a, b), bodyMat, anchored); }
+                if (g >= 0) { sel = phys.groupMembers(g); primary = sel.empty() ? -1 : sel[0]; partMode = false; }
+                formMsg = g >= 0 ? (formKind == FK_PIPE ? "CREATED PIPE" : "CREATED HOSE") : "TOO SHORT";
+                break;
+            }
+            case FK_EDIT_GROUP:
+                phys.transformGroup(primary, Vec2(fv(0), fv(1)), fv(2) * PI / 180.f);
+                formMsg = "MOVED GROUP";
+                break;
+            case FK_EDIT_BOX:
+                phys.reshape(primary, Vec2(fv(0), fv(1)), Vec2(fv(2), fv(3)) * 0.5f, 0, fv(4) * PI / 180.f, fMat, fStatic);
+                formMsg = "UPDATED";
+                break;
+            case FK_EDIT_CIRCLE:
+                phys.reshape(primary, Vec2(fv(0), fv(1)), Vec2(), fv(2), fv(3) * PI / 180.f, fMat, fStatic);
+                formMsg = "UPDATED";
+                break;
+            default: break;
+        }
+        phys.stampBodies();
+        fFresh = true;
+    }
+    int autoSegs(Vec2 a, Vec2 b) const { return std::clamp((int)std::ceil(length(b - a) / std::max(4.f, pipeD * 1.2f)), 2, 60); }
+
+    // returns true if the key was consumed by the form
+    bool formKey(SDL_Keycode k, Uint16 mod) {
+        if (formKind == FK_NONE) return false;
+        int n = (int)fields.size();
+        auto typeChar = [&](char c) {
+            std::string& t = fields[fActive].text;
+            if (fFresh) { t.clear(); fFresh = false; }
+            if (t.size() < 9) t += c;
+        };
+        if (k >= SDLK_0 && k <= SDLK_9) typeChar((char)('0' + (k - SDLK_0)));
+        else if (k >= SDLK_KP_1 && k <= SDLK_KP_9) typeChar((char)('1' + (k - SDLK_KP_1)));
+        else if (k == SDLK_KP_0) typeChar('0');
+        else if (k == SDLK_PERIOD || k == SDLK_KP_PERIOD) typeChar('.');
+        else if (k == SDLK_MINUS || k == SDLK_KP_MINUS) typeChar('-');
+        else if (k == SDLK_BACKSPACE) { std::string& t = fields[fActive].text; if (!t.empty()) t.pop_back(); fFresh = false; }
+        else if (k == SDLK_TAB || k == SDLK_DOWN) { fActive = (fActive + ((mod & KMOD_SHIFT) ? n - 1 : 1)) % n; fFresh = true; }
+        else if (k == SDLK_UP) { fActive = (fActive + n - 1) % n; fFresh = true; }
+        else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) applyForm();
+        else if (k == SDLK_ESCAPE) closeForm();
+        else if (k == SDLK_m && formKind >= FK_EDIT_BOX && formKind != FK_EDIT_GROUP) { bodyMat = fMat; cycleBodyMat(); fMat = bodyMat; }
+        else if (k == SDLK_s && formKind >= FK_EDIT_BOX) fStatic = !fStatic;
+        else if (k == SDLK_g) groupSelection();
+        else if (k == SDLK_u) ungroupSelection();
+        return true;
+    }
+    SDL_Rect formRect() const { return SDL_Rect{8, 8, 300, 56 + (int)fields.size() * 20 + (formKind >= FK_EDIT_BOX ? 40 : 20)}; }
+    SDL_Rect fieldRect(int i) const { return SDL_Rect{16, 36 + i * 20, 284, 18}; }
+    bool formClick(int mx, int my) {
+        if (formKind == FK_NONE) return false;
+        SDL_Rect r = formRect();
+        if (mx < r.x || my < r.y || mx >= r.x + r.w || my >= r.y + r.h) return false;
+        for (int i = 0; i < (int)fields.size(); ++i) {
+            SDL_Rect f = fieldRect(i);
+            if (mx >= f.x && mx < f.x + f.w && my >= f.y && my < f.y + f.h) { fActive = i; fFresh = true; }
+        }
+        return true;
+    }
+
+    // exercises the numeric form and group tools the way a user would (headless test)
+    void typeInto(const std::vector<std::string>& vals) {
+        for (size_t i = 0; i < vals.size(); ++i) {
+            fActive = (int)i; fFresh = true;
+            for (char c : vals[i]) formKey(c == '.' ? SDLK_PERIOD : (c == '-' ? SDLK_MINUS : (SDL_Keycode)c), 0);
+        }
+    }
+    void buildPrecisionTest() {
+        resetWorld();
+        rect(0, 200, 399, 203, M_WALL);
+        anchored = true;
+        tool = T_BOX; clearSelection(); openForm(); typeInto({"40", "120", "60", "6", "0"}); applyForm();   // exact shelf 60 x 6
+        tool = T_PIPE; closeForm(); clearSelection(); openForm(); typeInto({"40", "100", "100", "100", "12", "2"}); applyForm();
+        std::vector<int> pipeSel = sel;
+        anchored = false;
+        tool = T_BOX; closeForm(); clearSelection(); openForm(); typeInto({"200", "60", "30", "8", "30"}); applyForm();
+        int a = primary;
+        tool = T_CIRCLE; closeForm(); clearSelection(); openForm(); typeInto({"200", "60", "10"}); applyForm();
+        int b = primary;
+        sel = {a, b}; groupSelection();
+        tool = T_HOSE; closeForm(); clearSelection(); openForm(); typeInto({"100", "100", "100", "160", "10", "1.5", "0"}); applyForm();
+        std::vector<int> hoseSel = sel;
+        closeForm();
+        // hang the hose from the end of the pipe
+        if (!pipeSel.empty() && !hoseSel.empty()) phys.addPin(Vec2(100, 100), pipeSel[0], hoseSel[0], false, false);
+        sel = {a}; primary = a; partMode = true; openForm();
+        typeInto({"205", "62", "30", "8", "10"}); applyForm();
+        closeForm();
+        clearSelection();
+        sel = phys.groupMembers(phys.bodies[a].group); primary = a;
+        phys.stampBodies();
+    }
+
     // ---------------------------------------------------------------- input
     Vec2 toWorld(int mx, int my) const { return Vec2((float)mx / S, (float)my / S); }
+
+    void createCircle(Vec2 c, float r, bool wheel) {
+        int id = phys.addCircle(c, r, wheel && bodyMat == M_STEEL ? (uint8_t)M_RUBBER : bodyMat, anchored, wheel);
+        if (wheel) {
+            int under = phys.pickBody(c, true, id);
+            if (under >= 0) phys.addPin(c, under, id, true, true);
+        }
+        sel = {id}; primary = id; partMode = false;
+    }
 
     void createShape(Vec2 a, Vec2 b) {
         Vec2 d = b - a;
@@ -602,18 +878,16 @@ struct Game {
                 Vec2 half = Vec2(std::fabs(d.x), std::fabs(d.y)) * 0.5f;
                 Vec2 c = (a + b) * 0.5f;
                 if (half.x < 2 || half.y < 2) { half = Vec2(7, 7); c = a; }
-                phys.addBox(c, half, 0, bodyMat, anchored);
+                int id = phys.addBox(c, half, 0, bodyMat, anchored);
+                sel = {id}; primary = id; partMode = false;
+                lastW = half.x * 2; lastH = half.y * 2;
                 break;
             }
             case T_CIRCLE: case T_WHEEL: {
                 float r = length(d);
                 if (r < 3) r = 8;
-                bool wheel = tool == T_WHEEL;
-                int id = phys.addCircle(a, r, wheel && bodyMat == M_STEEL ? (uint8_t)M_RUBBER : bodyMat, anchored, wheel);
-                if (wheel) {
-                    int under = phys.pickBody(a, true, id);
-                    if (under >= 0) phys.addPin(a, under, id, true, true);
-                }
+                createCircle(a, r, tool == T_WHEEL);
+                lastR = r;
                 break;
             }
             case T_ROCKET: {
@@ -621,8 +895,17 @@ struct Game {
                 phys.addRocket(a, ang);
                 break;
             }
+            case T_PIPE: case T_HOSE: {
+                if (length(d) < 4) break;
+                int g = tool == T_PIPE ? phys.addPipe(a, b, pipeD, pipeWall, bodyMat, anchored)
+                                       : phys.addHose(a, b, pipeD, pipeWall, hoseSegs > 0 ? hoseSegs : autoSegs(a, b), bodyMat, anchored);
+                if (g >= 0) { sel = phys.groupMembers(g); primary = sel.empty() ? -1 : sel[0]; partMode = false; }
+                lastLen = length(d);
+                break;
+            }
             default: break;
         }
+        if (formKind != FK_NONE && !sel.empty()) {}  // form keeps its current mode
     }
 
     void clickJoint(Vec2 p) {
@@ -637,7 +920,7 @@ struct Game {
     void handleSimDown(int button) {
         if (button == SDL_BUTTON_RIGHT) { rmb = true; return; }
         lmb = true;
-        dragStart = mouse;
+        dragStart = smouse();
         switch (tool) {
             case T_PIN: case T_MOTOR: case T_AUTOMOTOR: clickJoint(mouse); break;
             case T_ROD: case T_SPRING: case T_SLIDER: {
@@ -650,6 +933,7 @@ struct Game {
                 if (id >= 0) { dragBody = id; grabJoint = phys.addMouse(id, mouse); }
                 break;
             }
+            case T_SELECT: break;
             case T_DELETE: {
                 int id = phys.pickBody(mouse, true);
                 if (id >= 0) phys.removeBody(id);
@@ -669,7 +953,15 @@ struct Game {
         if (!lmb) return;
         lmb = false;
         switch (tool) {
-            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: createShape(dragStart, mouse); break;
+            case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: createShape(dragStart, smouse()); break;
+            case T_SELECT: {
+                const Uint8* ks = SDL_GetKeyboardState(nullptr);
+                bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+                bool part = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
+                if (length(mouse - dragStart) < 3.f) selectBody(phys.pickBody(mouse, true), add, part);
+                else boxSelect(dragStart, mouse, add, part);
+                break;
+            }
             case T_ROD: case T_SPRING: {
                 std::vector<int> ids = phys.bodiesAt(mouse);
                 int endBody = ids.empty() ? -1 : ids.back();
@@ -705,6 +997,7 @@ struct Game {
                     break;
                 case SDL_MOUSEBUTTONDOWN:
                     mouse = toWorld(e.button.x, e.button.y);
+                    if (e.button.button == SDL_BUTTON_LEFT && formClick(e.button.x, e.button.y)) break;
                     if (e.button.y >= SIM_H) {
                         if (e.button.button == SDL_BUTTON_LEFT)
                             for (auto& b : buttons)
@@ -718,10 +1011,13 @@ struct Game {
                     break;
                 case SDL_MOUSEBUTTONUP:
                     mouse = toWorld(e.button.x, e.button.y);
-                    handleSimUp(e.button.button);
+                    if (lmb || e.button.button == SDL_BUTTON_RIGHT) handleSimUp(e.button.button);
                     break;
                 case SDL_MOUSEWHEEL:
-                    brush = std::clamp(brush + (e.wheel.y > 0 ? 1 : -1), 1, 24);
+                    if (tool == T_PIPE || tool == T_HOSE) {
+                        pipeD = std::clamp(pipeD + (e.wheel.y > 0 ? 1.f : -1.f), 3.f, 60.f);
+                        pipeWall = std::min(pipeWall, pipeD * 0.5f);
+                    } else brush = std::clamp(brush + (e.wheel.y > 0 ? 1 : -1), 1, 24);
                     break;
                 case SDL_KEYDOWN: handleKey(e.key.keysym.sym); break;
                 default: break;
@@ -730,8 +1026,12 @@ struct Game {
     }
 
     void handleKey(SDL_Keycode k) {
+        if (formKey(k, SDL_GetModState())) return;
         switch (k) {
-            case SDLK_ESCAPE: running = false; break;
+            case SDLK_RETURN: case SDLK_KP_ENTER: openForm(); break;
+            case SDLK_ESCAPE: if (!sel.empty()) clearSelection(); else running = false; break;
+            case SDLK_g: if (SDL_GetModState() & KMOD_CTRL) { groupSelection(); break; } phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; break;
+            case SDLK_u: if (SDL_GetModState() & KMOD_CTRL) ungroupSelection(); break;
             case SDLK_SPACE: paused = !paused; break;
             case SDLK_n: stepOnce = true; break;
             case SDLK_c: world.clear(); phys.stampBodies(); break;
@@ -755,11 +1055,15 @@ struct Game {
                 break;
             }
             case SDLK_DELETE: case SDLK_BACKSPACE: {
+                if (!sel.empty()) {
+                    for (int id : std::vector<int>(sel)) phys.removeBody(id);
+                    clearSelection(); phys.stampBodies();
+                    break;
+                }
                 int id = phys.pickBody(mouse, true);
                 if (id >= 0) { phys.removeBody(id); phys.stampBodies(); }
                 break;
             }
-            case SDLK_g: phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; break;
             default: break;
         }
     }
@@ -769,8 +1073,8 @@ struct Game {
         float m = 0;
         if (ks[SDL_SCANCODE_RIGHT] || ks[SDL_SCANCODE_D]) m += 1;
         if (ks[SDL_SCANCODE_LEFT] || ks[SDL_SCANCODE_A]) m -= 1;
-        phys.motorInput = m;
-        phys.thrustOn = ks[SDL_SCANCODE_UP] || ks[SDL_SCANCODE_W];
+        phys.motorInput = formKind != FK_NONE ? 0.f : m;
+        phys.thrustOn = formKind == FK_NONE && (ks[SDL_SCANCODE_UP] || ks[SDL_SCANCODE_W]);
         world.sparkHeld = ks[SDL_SCANCODE_E];
 
         if (!inSim) return;
@@ -784,6 +1088,12 @@ struct Game {
 
     // ---------------------------------------------------------------- update
     void update() {
+        if (tool != lastTool) {
+            lastTool = tool;
+            if (shapeTool(tool)) { clearSelection(); }
+            if (formKind != FK_NONE) { closeForm(); if (shapeTool(tool)) openForm(); }
+        }
+        pruneSelection();
         continuousInput();
         if (!paused || stepOnce) {
             phys.step(1.f / 60.f);
@@ -906,9 +1216,34 @@ struct Game {
         }
     }
 
+    std::vector<Vec2> bodyOutline(const Body& b, float grow = 0.f) {
+        if (b.shape == SHAPE_CIRCLE) return circlePts(b.pos, b.radius + grow);
+        Vec2 h = b.half + Vec2(grow, grow);
+        return {b.toWorld(Vec2(-h.x, -h.y)), b.toWorld(Vec2(h.x, -h.y)), b.toWorld(Vec2(h.x, h.y)), b.toWorld(Vec2(-h.x, h.y))};
+    }
+
+    void renderSelection() {
+        for (auto& b : phys.bodies)
+            if (b.alive && b.group >= 0) outlinePoly(bodyOutline(b, 0.7f), SDL_Color{70, 220, 255, 150});
+        for (int id : sel) {
+            if (id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive) continue;
+            bool pri = id == primary;
+            outlinePoly(bodyOutline(phys.bodies[id], 1.2f), pri ? SDL_Color{255, 255, 255, 255} : SDL_Color{255, 220, 80, 230});
+        }
+        if (primary >= 0) {
+            Vec2 p = phys.bodies[primary].pos;
+            lineWorld(p + Vec2(-3, 0), p + Vec2(3, 0), SDL_Color{255, 255, 255, 255});
+            lineWorld(p + Vec2(0, -3), p + Vec2(0, 3), SDL_Color{255, 255, 255, 255});
+        }
+        if (tool == T_SELECT && lmb && length(mouse - dragStart) >= 3.f) {
+            Vec2 a = dragStart, b = mouse;
+            outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, SDL_Color{255, 220, 80, 200});
+        }
+    }
+
     void renderJoints() {
         for (auto& j : phys.joints) {
-            if (!j.alive) continue;
+            if (!j.alive || j.group >= 0) continue;
             Vec2 a = phys.jointAnchorA(j);
             if (j.type == J_MOUSE) {
                 lineWorld(a, j.lb, SDL_Color{255, 255, 255, 160});
@@ -952,28 +1287,101 @@ struct Game {
         for (auto& l : labels) font::draw(ren, l.s, (int)(l.p.x * S), (int)(l.p.y * S), 1, SDL_Color{200, 210, 230, 200});
     }
 
+    void ghostLabel(Vec2 at, const std::string& t) {
+        font::draw(ren, t, (int)(at.x * S) + 8, (int)(at.y * S) - 14, 2, SDL_Color{255, 240, 150, 255});
+    }
+
     void renderGhost() {
         if (!inSim) return;
         SDL_Color white{255, 255, 255, 170};
+        Vec2 m = smouse();
         if (lmb) {
-            Vec2 d = mouse - dragStart;
+            Vec2 d = m - dragStart;
             switch (tool) {
                 case T_BOX: {
-                    Vec2 a = dragStart, b = mouse;
+                    Vec2 a = dragStart, b = m;
                     outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, white);
+                    ghostLabel(b, fmt(std::fabs(d.x)) + " X " + fmt(std::fabs(d.y)));
                     break;
                 }
-                case T_CIRCLE: case T_WHEEL: outlinePoly(circlePts(dragStart, length(d)), white); break;
-                case T_ROCKET: case T_ROD: case T_SPRING: case T_SLIDER: lineWorld(dragStart, mouse, white, 2); break;
+                case T_CIRCLE: case T_WHEEL:
+                    outlinePoly(circlePts(dragStart, length(d)), white);
+                    ghostLabel(m, "R " + fmt(length(d)));
+                    break;
+                case T_PIPE: case T_HOSE: {
+                    if (length(d) < 1.f) break;
+                    Vec2 n = Vec2(-d.y, d.x) / length(d) * (pipeD * 0.5f);
+                    lineWorld(dragStart + n, m + n, white, 1);
+                    lineWorld(dragStart - n, m - n, white, 1);
+                    ghostLabel(m, "L " + fmt(length(d)) + " D " + fmt(pipeD));
+                    break;
+                }
+                case T_ROCKET: case T_ROD: case T_SPRING: case T_SLIDER: lineWorld(dragStart, m, white, 2); break;
                 default: break;
+            }
+        }
+        if (formKind == FK_BOX) {
+            float ang = fv(4) * PI / 180.f;
+            Vec2 c(fv(0), fv(1)), h = Vec2(fv(2), fv(3)) * 0.5f;
+            std::vector<Vec2> pts;
+            for (Vec2 q : {Vec2(-h.x, -h.y), Vec2(h.x, -h.y), Vec2(h.x, h.y), Vec2(-h.x, h.y)}) pts.push_back(c + rotate(q, ang));
+            outlinePoly(pts, SDL_Color{120, 255, 160, 220});
+        } else if (formKind == FK_CIRCLE) {
+            outlinePoly(circlePts(Vec2(fv(0), fv(1)), fv(2)), SDL_Color{120, 255, 160, 220});
+        } else if (formKind == FK_PIPE || formKind == FK_HOSE) {
+            Vec2 a(fv(0), fv(1)), b(fv(2), fv(3)), d = b - a;
+            if (length(d) > 1.f) {
+                Vec2 n = Vec2(-d.y, d.x) / length(d) * (std::max(2.f, fv(4)) * 0.5f);
+                lineWorld(a + n, b + n, SDL_Color{120, 255, 160, 220}, 1);
+                lineWorld(a - n, b - n, SDL_Color{120, 255, 160, 220}, 1);
             }
         }
         if (tool == T_MAT) {
             outlinePoly(circlePts(mouse, (float)brush + 0.5f, 24), SDL_Color{255, 255, 255, 110});
         } else {
-            lineWorld(mouse + Vec2(-3, 0), mouse + Vec2(3, 0), white);
-            lineWorld(mouse + Vec2(0, -3), mouse + Vec2(0, 3), white);
+            lineWorld(m + Vec2(-3, 0), m + Vec2(3, 0), white);
+            lineWorld(m + Vec2(0, -3), m + Vec2(0, 3), white);
         }
+    }
+
+    void renderForm() {
+        if (formKind == FK_NONE) return;
+        SDL_Rect r = formRect();
+        SDL_SetRenderDrawColor(ren, 14, 18, 28, 235);
+        SDL_RenderFillRect(ren, &r);
+        SDL_SetRenderDrawColor(ren, 120, 255, 160, 255);
+        SDL_RenderDrawRect(ren, &r);
+        const char* title = "";
+        switch (formKind) {
+            case FK_BOX: title = "NEW BOX (CELLS)"; break;
+            case FK_CIRCLE: title = wheelForm ? "NEW WHEEL (CELLS)" : "NEW CIRCLE (CELLS)"; break;
+            case FK_PIPE: title = "NEW PIPE (CELLS)"; break;
+            case FK_HOSE: title = "NEW HOSE (CELLS)"; break;
+            case FK_EDIT_BOX: title = "EDIT BOX PART"; break;
+            case FK_EDIT_CIRCLE: title = "EDIT CIRCLE PART"; break;
+            case FK_EDIT_GROUP: title = "EDIT GROUP (MOVE/ROTATE)"; break;
+            default: break;
+        }
+        font::draw(ren, title, 16, 16, 2, SDL_Color{120, 255, 160, 255});
+        for (int i = 0; i < (int)fields.size(); ++i) {
+            SDL_Rect f = fieldRect(i);
+            bool act = i == fActive;
+            SDL_SetRenderDrawColor(ren, act ? 50 : 28, act ? 66 : 34, act ? 100 : 46, 255);
+            SDL_RenderFillRect(ren, &f);
+            font::draw(ren, fields[i].name, f.x + 4, f.y + 2, 2, SDL_Color{170, 185, 210, 255});
+            std::string t = fields[i].text + (act && !fFresh ? "_" : "");
+            font::draw(ren, t, f.x + 130, f.y + 2, 2, act ? SDL_Color{255, 255, 255, 255} : SDL_Color{220, 230, 245, 255});
+        }
+        int y = 36 + (int)fields.size() * 20 + 4;
+        if (formKind >= FK_EDIT_BOX) {
+            std::string ms = formKind == FK_EDIT_GROUP ? "" : std::string("M: ") + MATS[fMat].name + "  ";
+            ms += std::string("S: ") + (fStatic ? "STATIC" : "DYNAMIC");
+            if (formKind == FK_EDIT_GROUP) ms = "PARTS: " + std::to_string(sel.size()) + "  CTRL+CLICK EDITS ONE PART";
+            font::draw(ren, ms, 16, y, 1, SDL_Color{255, 220, 120, 255});
+            y += 12;
+        }
+        font::draw(ren, "TAB/CLICK: NEXT FIELD  ENTER: APPLY  ESC: CLOSE", 16, y, 1, SDL_Color{150, 160, 180, 255});
+        font::draw(ren, formMsg, 16, y + 12, 1, SDL_Color{150, 230, 255, 255});
     }
 
     std::string hoverText() const {
@@ -1021,7 +1429,10 @@ struct Game {
         std::string status = std::string("TOOL: ") + (tool == T_MAT ? (mat == M_EMPTY ? "ERASER" : MATS[mat].name) : TOOL_NAMES[tool]);
         status += "  BODY: " + std::string(MATS[bodyMat].name);
         if (mat == M_SOURCE) status += "  EMITS: " + std::string(MATS[payload].name);
-        status += "  BRUSH " + std::to_string(brush);
+        if (tool == T_PIPE || tool == T_HOSE) status += "  DIA " + fmt(pipeD) + " WALL " + fmt(pipeWall);
+        else status += "  BRUSH " + std::to_string(brush);
+        if (!sel.empty()) status += "  SEL " + std::to_string(sel.size());
+        status += "  X " + std::to_string((int)smouse().x) + " Y " + std::to_string((int)smouse().y);
         status += "  FPS " + std::to_string((int)fps);
         if (paused) status += "  [PAUSED]";
         font::draw(ren, status, 8, sy, 2, SDL_Color{255, 220, 120, 255});
@@ -1029,7 +1440,7 @@ struct Game {
         if (!hover.empty()) font::draw(ren, hover, 8, sy + 17, 2, SDL_Color{150, 230, 255, 255});
         font::draw(ren, TOOL_HINTS[tool], 8 + (hover.empty() ? 0 : font::textWidth(hover, 2) + 20), sy + 20, 1, SDL_Color{170, 180, 200, 255});
         font::draw(ren,
-                   "SPACE PAUSE  N STEP  C CLEAR CELLS  X CLEAR BODIES  R DEMO  T ANCHOR  F BODY MATERIAL  H HEAT VIEW  E HOLD = SPARK  , . SPARK RATE  V CAR  G GRAVITY  ARROWS DRIVE  UP ROCKETS",
+                   "SPACE PAUSE  N STEP  C CLEAR CELLS  X CLEAR BODIES  R DEMO  T ANCHOR  F BODY MATERIAL  ENTER EXACT VALUES  CTRL+G GROUP  CTRL+U UNGROUP  H HEAT VIEW  E HOLD = SPARK  , . SPARK RATE  V CAR  G GRAVITY  ARROWS DRIVE  UP ROCKETS",
                    8, sy + 32, 1, SDL_Color{120, 130, 150, 255});
     }
 
@@ -1039,8 +1450,10 @@ struct Game {
         renderParticles();
         renderBodies();
         renderJoints();
+        renderSelection();
         renderLabels();
         renderGhost();
+        renderForm();
         renderUI();
     }
 
@@ -1092,6 +1505,9 @@ int main(int argc, char** argv) {
             case 8: g.buildFuels(); break;
             case 9: g.buildPressureTest(); break;
             case 10: g.buildDieselEngine(); break;
+            case 11: g.buildPrecisionTest(); break;
+            case 12: g.buildPrecisionTest(); g.selectBody(g.sel.empty() ? -1 : g.sel[0], false, true); g.openForm(); g.formMsg = "UPDATED"; break;
+            case 13: g.buildPrecisionTest(); g.tool = Tool::T_HOSE; g.clearSelection(); g.openForm(); break;
             default: g.buildTestScene(scene); break;
         }
         if (heat) g.heatView = true;

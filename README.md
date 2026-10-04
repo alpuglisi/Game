@@ -44,6 +44,11 @@ The physics engine, the sand engine and the bitmap font are all written from scr
 * **Motor** – a pin whose angular velocity is driven by the arrow keys. **Auto motor** always spins (windmills, conveyors).
 * **Rod / Spring** – drag from one body (or empty space = world) to another.
 * **Rocket** – drag to choose the thrust direction; hold `Up` to fire.
+* **Select** – click a body (Shift adds, Ctrl picks a single part of a group), or drag a box around several. Enter edits the selection numerically.
+* **Group / Ungroup** (`Ctrl+G` / `Ctrl+U`) – welds the selected bodies into one rigid object. Every part stays individually editable (Ctrl+click it, then Enter), while grabbing, moving or rotating the group treats it as one thing. Parts of a group never collide with each other. Grouped bodies are outlined in cyan.
+* **Pipe** – hollow tube between two points (two welded walls). **Hose** – a chain of pipe segments hinged together so it bends; the mouse wheel sets the diameter.
+* **Exact** (`Enter`) – a numeric form for precise work, in grid cells and degrees. With nothing selected it creates a box (X, Y, width, height, angle), circle/wheel (X, Y, radius), pipe or hose (both end points, diameter, wall, segments) at exactly those values and shows a green preview outline. With a body selected it edits that body's position, size, angle, material (`M`) and static flag (`S`); with a group selected it moves/rotates the whole group. `Tab`/click move between fields.
+* **Snap** – the SNAP button rounds mouse-drawn shapes to a 1/2/5/10 cell grid. While dragging, the exact dimensions are shown next to the cursor and the cursor coordinates are in the status line, so mouse drawing stays available and can be made precise too.
 * **Grab** – drag bodies around with a soft spring. **Delete** – click a body or joint.
 
 ### Materials and tabs
@@ -69,4 +74,4 @@ Other things to try: lava on water makes stone and steam; fire spreads through w
 
 ## Developer flags
 
-`sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--g0]` runs headless (SDL dummy video driver), simulates, prints burn counts/wheel speed (and body/gas stats with `--trace`) and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use, `4` steam engine, `5` gasoline engine, `6` hydraulics, `7` conduction, `8` fuels, `9` pressure test, `10` diesel engine.
+`sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace] [--g0]` runs headless (SDL dummy video driver), simulates, prints burn counts/wheel speed (and body/gas stats with `--trace`) and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use, `11`–`13` precision/group/hose tests (13 shows the numeric form), `4` steam engine, `5` gasoline engine, `6` hydraulics, `7` conduction, `8` fuels, `9` pressure test, `10` diesel engine.
