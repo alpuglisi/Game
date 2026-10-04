@@ -400,6 +400,80 @@ void fans() {
     }
 }
 
+// 10. vacuum mode: draws only what is there, evacuates the intake side, accelerates the gas, pulls on bodies
+void vacuumFans() {
+    std::printf("vacuum fans\n");
+    {   // no ambient air is created
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int fan = r.phys.addBox(Vec2(100, 105), Vec2(2, 8), 0, M_STEEL, true);
+        r.phys.bodies[fan].fan.strength = 80.f; r.phys.bodies[fan].fan.vacuum = 1;
+        r.phys.stampBodies();
+        r.step(120);
+        int air = 0;
+        for (auto& c : r.world.cells) if (c.t == M_AIR) ++air;
+        char d[64];
+        std::snprintf(d, sizeof d, "%d air cells appeared", air);
+        check(air == 0, "a vacuum fan makes no air of its own", d);
+    }
+    {   // a sealed chamber on the intake side is pumped down, the exhaust side is pressurised
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        r.world.fillRect(40, 95, 140, 98, M_WALL);
+        r.world.fillRect(40, 111, 140, 114, M_WALL);
+        r.world.fillRect(40, 99, 43, 110, M_WALL);
+        r.world.fillRect(137, 99, 140, 110, M_WALL);
+        int fan = r.phys.addBox(Vec2(90, 105), Vec2(2, 5.5f), 0, M_STEEL, true);
+        r.phys.bodies[fan].fan.strength = 80.f; r.phys.bodies[fan].fan.vacuum = 1;
+        r.phys.stampBodies();
+        r.gas(44, 99, 86, 110, M_AIR, 1.f);
+        float before = meanPsi(r, 44, 86, 99, 110);
+        r.step(500);
+        float left = meanPsi(r, 44, 86, 99, 110), right = meanPsi(r, 94, 136, 99, 110);
+        char d[128];
+        std::snprintf(d, sizeof d, "intake side %.2f -> %.2f, exhaust side %.2f", before, left, right);
+        check(left < 0.5f * before && right > left + 0.8f, "gas is pulled out of the low-pressure side and pushed into the other", d);
+    }
+    {   // gas hops faster the closer it is to the fan, and fastest leaving it (a blower hops at one rate)
+        double rate[2][3];
+        for (int vac = 0; vac < 2; ++vac) {
+            Rig r;
+            r.phys.gravity = Vec2(0, 0);
+            r.world.fillRect(40, 95, 340, 98, M_WALL);
+            r.world.fillRect(40, 111, 340, 114, M_WALL);
+            r.world.fillRect(40, 99, 43, 110, M_WALL);
+            r.world.fillRect(337, 99, 340, 110, M_WALL);
+            int fan = r.phys.addBox(Vec2(200, 105), Vec2(2, 5.5f), 0, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = 100.f; r.phys.bodies[fan].fan.vacuum = (uint8_t)vac;
+            r.phys.stampBodies();
+            for (int y = 99; y <= 110; ++y) for (int x = 44; x < 337; ++x) if (r.world.bodyMask[y * World::W + x] < 0) { r.world.setCell(x, y, M_SMOKE); r.world.at(x, y).amt = 1.f; }
+            r.step(40);
+            for (int z = 0; z < 3; ++z) rate[vac][z] = r.phys.fanHopTries[z] ? (double)r.phys.fanHopMoves[z] / r.phys.fanHopTries[z] : 0;
+            std::printf("    %s: hop rate far %.2f, near %.2f, ahead %.2f\n", vac ? "vacuum" : "blower", rate[vac][0], rate[vac][1], rate[vac][2]);
+        }
+        char d[128];
+        std::snprintf(d, sizeof d, "vacuum near/far %.2f, ahead/far %.2f | blower near/far %.2f", rate[1][1] / std::max(1e-6, rate[1][0]), rate[1][2] / std::max(1e-6, rate[1][0]), rate[0][1] / std::max(1e-6, rate[0][0]));
+        check(rate[1][1] > 1.4 * rate[1][0] && rate[1][2] > rate[1][1] && std::fabs(rate[0][1] - rate[0][0]) < 0.15 * rate[0][0] + 0.02,
+              "a vacuum fan draws gas faster and faster towards it and flings it out; a blower does not", d);
+    }
+    {   // suction draws a body towards the intake
+        float moved[2];
+        for (int vac = 0; vac < 2; ++vac) {
+            Rig r;
+            r.phys.gravity = Vec2(0, 0);
+            int fan = r.phys.addBox(Vec2(120, 105), Vec2(2, 8), 0, M_STEEL, true);
+            r.phys.bodies[fan].fan.strength = 100.f; r.phys.bodies[fan].fan.vacuum = (uint8_t)vac;
+            int ball = r.phys.addBox(Vec2(95, 105), Vec2(3, 3), 0, M_WOOD, false);
+            r.phys.stampBodies();
+            r.step(90);
+            moved[vac] = r.phys.bodies[ball].pos.x - 95.f;
+        }
+        char d[96];
+        std::snprintf(d, sizeof d, "towards the fan: blower %.1f cells, vacuum %.1f cells", moved[0], moved[1]);
+        check(moved[1] > 15.f && moved[1] > 2.f * moved[0], "a vacuum fan pulls a body in much harder than a blower", d);
+    }
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -412,6 +486,7 @@ int runSelfTests() {
     plug();
     flames();
     fans();
+    vacuumFans();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

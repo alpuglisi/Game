@@ -20,6 +20,7 @@ struct Emitter {
 // A fan / blower: pushes gas along the body's +x axis (negative strength = the other way).
 struct Fan {
     float strength = 0.f;  // airflow speed in cells per second; 0 = not a fan
+    uint8_t vacuum = 0;    // 0 blower (draws in ambient air), 1 vacuum: only pulls the gas that is there, accelerating it through the fan
 };
 
 struct Body {
@@ -143,6 +144,8 @@ public:
     // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
     int addBond(Vec2 anchor, int a, int b, float breakT, float breakF);
     long bondsBroken = 0;
+    // dev: how often gas in each part of a fan lane hopped (0 far half behind, 1 near half behind, 2 ahead)
+    long fanHopTries[3] = {0, 0, 0}, fanHopMoves[3] = {0, 0, 0};
     std::string lastEvent;  // dev/UI: last thing that happened (bond broke, primer fired)
     int eventFrames = 0;
     // hollow tube between two points: two welded walls. Returns the group id.

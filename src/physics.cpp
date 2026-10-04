@@ -1265,7 +1265,8 @@ void Physics::applyFans(float dt) {
         const Vec2 axis = rotate(Vec2(s > 0 ? 1.f : -1.f, 0.f), b.angle);
         const Vec2 lat(-axis.y, axis.x);
         const float R = std::clamp(10.f + mag * 0.25f, 10.f, 60.f);   // reach of the stream
-        const int Rin = std::clamp((int)(R * 0.6f), 6, 36);   // suction reaches back behind the fan
+        const bool vac = b.fan.vacuum != 0;
+        const int Rin = vac ? std::clamp((int)(R * 1.5f), 12, 60) : std::clamp((int)(R * 0.6f), 6, 36);   // suction reaches back behind the fan
         const float tFace = b.half.x + 0.5f;
         const int lanes = std::max(1, (int)std::floor(2.f * b.half.y));
 
@@ -1312,19 +1313,29 @@ void Physics::applyFans(float dt) {
         const float flow = std::clamp(1.f - (pOut - pIn) / std::max(0.05f, stall), 0.f, 1.f);
 
         const float v = mag / 60.f * flow;                 // cells per frame
-        const int hops = std::max(1, (int)std::ceil(v));
+        const float peak = vac ? 1.9f : 1.f;               // a vacuum fan accelerates the gas through the throat
+        const int hops = std::max(1, (int)std::ceil(v * peak));
         const float pHop = std::min(1.f, v / hops);
         for (int l = 0; l < lanes; ++l) {
             std::vector<int>& L = lane[l];
             if (L.empty()) continue;
             for (int h = 0; h < hops; ++h) {
-                // intake: ambient air appears at the back end of the lane and is drawn towards the fan
-                if (split[l] > 0 && w.chance(pHop)) {
+                // intake (blower mode): ambient air appears at the back end of the lane and is drawn towards the fan;
+                // a vacuum fan only draws what is already there
+                if (!vac && split[l] >= Rin - 2 && w.chance(pHop)) {   // (an obstructed intake draws nothing in)
                     int i = L[0];
+                    bool nearBody = false;   // no air appears right against a body (it would shove it away)
+                    for (int dy = -3; dy <= 3 && !nearBody; ++dy)
+                        for (int dx = -3; dx <= 3 && !nearBody; ++dx) {
+                            int nx = i % World::W + dx, ny = i / World::W + dy;
+                            if (w.inb(nx, ny)) { int m = w.bodyMask[ny * World::W + nx]; nearBody = m >= 0 && m != b.id; }
+                        }
                     Cell& in = w.cells[i];
-                    if (in.t == M_EMPTY) {
+                    if (nearBody) {
+                    } else if (in.t == M_EMPTY) {
                         w.setCell(i % World::W, i / World::W, M_AIR);
                         w.cells[i].amt = 1.f;
+                        w.cells[i].life = 1;   // ambient air from an intake: it may thin out at the open void
                     } else if (in.t == M_AIR && in.amt < 1.f) {   // the intake is open to ambient air: it tops the cell up
                         in.temp = (in.temp * in.amt + AMBIENT_T * (1.f - in.amt)) ;
                         in.temp = std::clamp(in.temp, -100.f, 2000.f);
@@ -1333,7 +1344,16 @@ void Physics::applyFans(float dt) {
                 }
                 for (int k = (int)L.size() - 2; k >= 0; --k) {
                     Cell& a = w.cells[L[k]];
-                    if (MATS[a.t].kind != K_GAS || !w.chance(pHop)) continue;
+                    float prof = 1.f;   // vacuum: slow far upstream, quickening towards the fan, fastest leaving it
+                    if (vac) {
+                        if (k < split[l]) prof = 0.35f + 0.65f * (1.f - std::min(1.f, (float)(split[l] - 1 - k) / (float)Rin));
+                        else prof = 1.f + 0.9f * std::max(0.f, 1.f - (float)(k - split[l]) / (R * 0.5f));
+                    }
+                    if (MATS[a.t].kind != K_GAS) continue;
+                    int zone = k >= split[l] ? 2 : (split[l] - 1 - k) * 2 < Rin ? 1 : 0;
+                    ++fanHopTries[zone];
+                    if (!w.chance(std::min(1.f, pHop * prof))) continue;
+                    ++fanHopMoves[zone];
                     Cell& c = w.cells[L[k + 1]];
                     if (c.t == M_EMPTY) { c = a; a = Cell{}; }
                     else if (MATS[c.t].kind == K_GAS) {
@@ -1355,17 +1375,19 @@ void Physics::applyFans(float dt) {
             Vec2 rel = o.pos - b.pos;
             float t = dot(rel, axis), u = dot(rel, lat), reach = o.bound;
             if (std::fabs(u) > b.half.y + reach) continue;
-            float d, sign;
-            if (t > b.half.x && t < b.half.x + R) { d = (t - b.half.x) / R; sign = 1.f; }
-            else if (t < -b.half.x && t > -b.half.x - R * 0.5f) { d = (-t - b.half.x) / (R * 0.5f); sign = -0.35f; }  // suction
+            float d, strength;
+            bool behind = false;
+            const float backReach = vac ? (float)Rin : R * 0.5f;
+            if (t > b.half.x && t < b.half.x + R) { d = (t - b.half.x) / R; strength = 1.f; }
+            else if (t < -b.half.x && t > -b.half.x - backReach) { d = (-t - b.half.x) / backReach; strength = vac ? 0.9f : 0.35f; behind = true; }  // suction draws bodies in
             else continue;
-            Vec2 p = o.pos - axis * (sign > 0 ? reach + 1.5f : -(reach + 1.5f));
+            Vec2 p = o.pos - axis * (behind ? -(reach + 1.5f) : (reach + 1.5f));
             int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
             float dens = 0.2f;
             if (w.inb(ix, iy) && MATS[w.cells[iy * World::W + ix].t].kind == K_GAS) dens = std::clamp(w.cells[iy * World::W + ix].amt, 0.2f, 1.5f);
             // sideways drift towards the axis keeps light bodies in the stream
-            float F = WIND_K * mag * flow * (1.f - d) * 2.f * reach * dens;
-            o.vel += (axis * (F * sign) + lat * (-u * 0.4f * F * 0.05f)) * (o.invMass * dt);
+            float F = WIND_K * mag * flow * (1.f - d) * 2.f * reach * dens * strength;
+            o.vel += (axis * F + lat * (-u * 0.4f * F * 0.05f)) * (o.invMass * dt);
         }
     }
 }

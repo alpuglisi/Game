@@ -32,7 +32,7 @@ struct Blast {
 
 class World {
 public:
-    static constexpr int W = 400;
+    static constexpr int W = 1200;
     static constexpr int H = 240;
 
     std::vector<Cell> cells;

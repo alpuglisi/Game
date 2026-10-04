@@ -231,7 +231,7 @@ void World::updateCell(int x, int y) {
                 const Cell& n = cells[ny * W + nx];
                 if (n.t == M_EMPTY || (MATS[n.t].kind == K_GAS && n.amt < 0.12f)) ++empty;   // void, or gas too thin to matter
             }
-            if (empty && c.amt < 0.6f) {   // dense air is contained (a duct, a chamber); only thin edge air leaks away
+            if (empty && c.amt < 0.6f && c.life == 1) {   // ambient air from a fan intake (life 1) only; dense air is contained (a duct, a chamber); only thin edge air leaks away
                 c.amt *= 1.f - 0.05f * (float)empty;
                 if (c.amt < 0.03f) { c.t = M_EMPTY; return; }
             }

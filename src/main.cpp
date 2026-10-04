@@ -19,7 +19,8 @@
 namespace {
 
 constexpr int S = 3;  // screen pixels per sand cell
-constexpr int SIM_W = World::W * S;
+constexpr int VIEW_W = 400;                 // cells visible across the window; the world is wider and the camera scrolls
+constexpr int SIM_W = VIEW_W * S;
 constexpr int SIM_H = World::H * S;
 // bottom panel: toolbar row, tab row, two rows of tab content, then a three-line status area
 constexpr int PAD = 6, TB_H = 28, TAB_H = 26, BTN_H = 26, BTN_GAP = 4, COLS = 7, CONTENT_ROWS = 2, STATUS_H = 54;
@@ -172,6 +173,14 @@ struct Game {
     int newArmed = 0;
     int bondType = 0;
     float bondT = 55.f, bondF = 100000.f;
+    // ---- camera: the window shows VIEW_W cells of the wider world
+    float camXf = 0.f;
+    int camX = 0;
+    int focusBody = -1;        // the camera follows this body when >= 0
+    bool panning = false, scrubbing = false;
+    int panStartPx = 0;
+    float panStartCam = 0.f;
+    bool fanVacuumDefault = false;
     bool elecView = false, pressureView = false;
     float fanPhase = 0.f;
     float lastFan = 60.f;
@@ -252,7 +261,7 @@ struct Game {
             Button& b = mk(0, [this] { return std::string(playing && !paused ? "PLAYING" : "PLAY"); },
                            "RUN THE SIMULATION (SPACE). YOUR DRAWING IS SNAPSHOT FIRST, SO STOP CAN RESTORE IT",
                            [this] { play(); }, [this] { return playing && !paused; });
-            b.style = 1; b.minW = 78;
+            b.style = 1; b.minW = 70;
         }
         {
             Button& b = mk(0, [this] { return std::string(paused ? "RESUME" : "PAUSE"); }, "FREEZE / RESUME WHILE PLAYING (SPACE)",
@@ -271,8 +280,11 @@ struct Game {
         mk(0, lit("LOAD"), "OPEN A SAVED FILE (CTRL+O)", [this] { openFileForm(false); }, [this] { return formKind == FK_LOAD; });
         mk(0, lit("HEAT"), "COLOUR EVERYTHING BY TEMPERATURE (H)", [this] { heatView = !heatView; }, [this] { return heatView; }).gap = 10;
         mk(0, lit("PRESSURE"), "COLOUR GAS BY PRESSURE: BLUE BELOW AMBIENT, WHITE ABOUT 1, RED HIGH", [this] { pressureView = !pressureView; }, [this] { return pressureView; });
+        mk(0, [this] { return std::string("FOCUS"); },
+           "CAMERA FOLLOWS THE SELECTED BODY (Z): SELECT A VEHICLE, PRESS FOCUS, PLAY. MIDDLE-DRAG OR THE STRIP AT THE BOTTOM PANS",
+           [this] { toggleFocus(); }, [this] { return focusBody >= 0; });
         mk(0, lit("ELEC"), "SHOW VOLTAGE AND CURRENT ON CONDUCTORS", [this] { elecView = !elecView; }, [this] { return elecView; });
-        mk(0, [this] { return std::string("SNAP ") + (SNAPS[snapIdx] ? std::to_string(SNAPS[snapIdx]) : "OFF"); },
+        mk(0, [this] { return std::string("SNAP") + (SNAPS[snapIdx] ? " " + std::to_string(SNAPS[snapIdx]) : ""); },
            "ROUND MOUSE-DRAWN SHAPES TO A GRID OF THIS MANY CELLS", [this] { snapIdx = (snapIdx + 1) % 5; }, [this] { return snapIdx > 0; });
         mk(0, [this] { return std::string("SPARK ") + (SPARK_RATES[sparkIdx] ? std::to_string(SPARK_RATES[sparkIdx]) + "F" : "OFF"); },
            "SPARK-PLUG PULSE PERIOD IN FRAMES (HOLD E TO FIRE; , AND . CHANGE IT)",
@@ -339,6 +351,9 @@ struct Game {
         toolBtn(TAB_SHAPES, 5, "HOSE", T_HOSE);
         toolBtn(TAB_SHAPES, 6, "EMITTER", T_EMITTER);
         toolBtn(TAB_SHAPES, 7, "FAN", T_FAN);
+        actBtn(TAB_SHAPES, 10, [this] { return std::string(fanModeLabel()); },
+               "FAN MODE: BLOW DRAWS IN AMBIENT AIR; VACUUM ONLY PULLS THE GAS THAT IS THERE, ACCELERATING IT THROUGH THE FAN (M)", [this] { toggleFanMode(); },
+               [this] { return fanModeVacuum(); });
         actBtn(TAB_SHAPES, 8, [this] { return std::string(anchored ? "ANCHOR: ON" : "ANCHOR: OFF"); },
                "ANCHORED SHAPES ARE FIXED IN PLACE (T)", [this] { anchored = !anchored; }, [this] { return anchored; });
         actBtn(TAB_SHAPES, 9, [this] { return std::string("BODY: ") + MATS[bodyMat].name; },
@@ -372,8 +387,9 @@ struct Game {
             {"HYDRAULICS", &Game::buildHydraulics}, {"CONDUCTION", &Game::buildConduction}, {"FUELS", &Game::buildFuels},
             {"DIESEL ENGINE", &Game::buildDieselEngine}, {"ELECTRIC", &Game::buildElectricTest},
             {"BONDS", &Game::buildBondTest}, {"PRIMER", &Game::buildPrimerTest}, {"FANS", &Game::buildFanTest},
+            {"ROAD + FOCUS", &Game::buildRoadTest},
         };
-        for (int i = 0; i < 11; ++i) {
+        for (int i = 0; i < 12; ++i) {
             auto fn = scenes[i].fn;
             Button& b = mk(2, lit(scenes[i].name), "LOAD THIS EXAMPLE (REPLACES THE CURRENT DRAWING), THEN PRESS PLAY",
                            [this, fn] { (this->*fn)(); currentFile.clear(); }, nullptr, [this] { return tab == TAB_SCENE; });
@@ -390,7 +406,7 @@ struct Game {
         for (size_t i = 0; i < buttons.size(); ++i) {
             Button& b = buttons[i];
             if (!b.visible()) continue;
-            int w = std::max(b.minW, font::textWidth(b.label(), 2) + 16);
+            int w = std::max(b.minW, font::textWidth(b.label(), 2) + (b.zone == 0 ? 12 : 16));
             if (b.zone == 0) {
                 if (b.right) { xr0 -= w; b.r = SDL_Rect{xr0, y0, w, TB_H}; xr0 -= BTN_GAP; }
                 else { x0 += b.gap; b.r = SDL_Rect{x0, y0, w, TB_H}; x0 += w + BTN_GAP; }
@@ -424,6 +440,8 @@ struct Game {
         phys.gravity = Vec2(0, 260.f);
         phys.motorInput = 0;
         heatView = false;
+        focusBody = -1;
+        setCam(0);
         playing = false;
         paused = false;
     }
@@ -463,7 +481,7 @@ struct Game {
         rect(97, 160, 100, 239, M_WALL);
         rect(14, 190, 96, 235, M_WATER);
         for (int x = 0; x < 70; ++x) rect(120 + x, 235 - x / 4, 120 + x, 239, M_STONE);
-        rect(190, 217, 399, 239, M_STONE);
+        rect(190, 217, World::W - 1, 239, M_STONE);
         rect(330, 180, 345, 216, M_WOOD);
         rect(350, 205, 358, 216, M_TNT);
         rect(150, 40, 175, 70, M_SAND);
@@ -567,7 +585,7 @@ struct Game {
         warm(18, 136, 160, 206, 105.f);              // a warmed-up engine: cold walls would just condense the steam
         warm(23, 172, 69, 202, 96.f);
         for (auto& b : phys.bodies) if (b.alive) b.temp = 105.f;
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(22, 140, "BOILER");
         label(78, 124, "VALVE CHEST + GATE");
         label(112, 170, "EXHAUST PORT + DRAIN");
@@ -590,7 +608,7 @@ struct Game {
         rect(90, 152, 90, 156, M_IGNITER);                     // spark plug set into the head wall
         sparkIdx = 5;
         world.sparkPeriod = SPARK_RATES[sparkIdx];
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(60, 124, "GASOLINE VAPOUR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "SPARK PLUG");
@@ -612,7 +630,7 @@ struct Game {
         rect(90, 152, 90, 156, M_HEATER);                      // glow plug: diesel needs heat, not a spark, to light
         sparkIdx = 0;
         world.sparkPeriod = 0;
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(60, 124, "DIESEL VAPOUR SUPPLY");
         label(78, 118, "GATE VALVE (DRIVEN BY ECCENTRIC)");
         label(60, 168, "GLOW PLUG");
@@ -646,7 +664,7 @@ struct Game {
         phys.addDistance(wheel, Vec2(118, 130), mp, Vec2(104, 178), 0.f);
         phys.addSlider(mp, Vec2(0, 1));
         phys.addSlider(slave, Vec2(0, 1));
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(70, 76, "MASTER 8 WIDE");
         label(150, 76, "SLAVE 24 WIDE: 3X FORCE");
         label(112, 206, "HYDRAULIC FLUID");
@@ -664,7 +682,7 @@ struct Game {
             rect(30, y, 190, y + 8, mats[i]);
             label(196, (float)y + 1, MATS[mats[i]].name);
         }
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(10, 8, "THERMAL CONDUCTIVITY: HEATER AT LEFT, TOGGLE HEAT VIEW");
         phys.stampBodies();
     }
@@ -682,7 +700,7 @@ struct Game {
             rect(x0 + 2, 146, x0 + 2, 152, M_IGNITER);  // spark plug in the wall at the fuel surface
             label((float)x0, 180, MATS[fuels[i]].name);
         }
-        rect(0, 230, 399, 239, M_CONCRETE);
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(10, 100, "FLASH POINT ORDER: GASOLINE < ETHANOL < KEROSENE/JET < DIESEL < OIL < HYDRAULIC");
         label(10, 112, "PLATE WARMS FROM THE LEFT; SPARK PLUGS FIRE PERIODICALLY (SPARK BUTTON)");
         world.sparkPeriod = 60;
@@ -704,7 +722,7 @@ struct Game {
     // Developer test scenes (used with --shot / --scene).
     void buildTestScene(int which) {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         if (which == 1) {
             for (int c = 0; c < 6; ++c) {
                 int x0 = 10 + c * 65;
@@ -744,7 +762,7 @@ struct Game {
     }
     void buildScriptedScene() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         simDrag(T_BOX, Vec2(40, 150), Vec2(100, 165));
         simDrag(T_WHEEL, Vec2(48, 175), Vec2(48, 183));
         simDrag(T_WHEEL, Vec2(48, 160), Vec2(48, 168));
@@ -861,7 +879,7 @@ struct Game {
             }
             fMat = b.mat; fStatic = b.isStatic;
             fields.push_back({"RATE", fmt(b.src.on ? b.src.rate : 0.f)});
-            if (b.shape == SHAPE_BOX) fields.push_back({"FAN", fmt(b.fan.strength)});
+            if (b.shape == SHAPE_BOX) { fields.push_back({"FAN", fmt(b.fan.strength)}); fields.push_back({"VACUUM", b.fan.vacuum ? "1" : "0"}); }
             fPayload = b.src.on ? b.src.mat : payload; fFace = b.src.face;
             return;
         }
@@ -873,7 +891,7 @@ struct Game {
             case T_BOND: openBondForm(); return;
             case T_FAN:
                 formKind = FK_FAN;
-                fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"THICKNESS", "6"}, {"DIAMETER", "24"}, {"ANGLE", "0"}, {"STRENGTH", fmt(lastFan)}};
+                fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"THICKNESS", "6"}, {"DIAMETER", "24"}, {"ANGLE", "0"}, {"STRENGTH", fmt(lastFan)}, {"VACUUM", fanVacuumDefault ? "1" : "0"}};
                 break;
             case T_EMITTER:
                 formKind = FK_EMITTER; fPayload = payload;
@@ -959,6 +977,8 @@ struct Game {
                 lastFan = std::clamp(std::fabs(fv(5)), 1.f, 300.f);
                 int id = phys.addBox(Vec2(fv(0), fv(1)), Vec2(std::max(1.f, fv(2)), std::max(2.f, fv(3))) * 0.5f, fv(4) * PI / 180.f, bodyMat, anchored);
                 phys.bodies[id].fan.strength = fv(5) < 0 ? -lastFan : lastFan;
+                phys.bodies[id].fan.vacuum = fv(6) > 0.5f ? 1 : 0;
+                fanVacuumDefault = fv(6) > 0.5f;
                 sel = {id}; primary = id; partMode = false;
                 formMsg = "CREATED FAN " + fmt(phys.bodies[id].fan.strength) + " (ARROW = AIRFLOW)";
                 break;
@@ -981,6 +1001,7 @@ struct Game {
                 phys.reshape(primary, Vec2(fv(0), fv(1)), Vec2(fv(2), fv(3)) * 0.5f, 0, fv(4) * PI / 180.f, fMat, fStatic);
                 setEmitter(fv(5));
                 if (fields.size() > 6) setFan(fv(6));
+                if (fields.size() > 7) phys.bodies[primary].fan.vacuum = fv(7) > 0.5f ? 1 : 0;
                 formMsg = "UPDATED";
                 break;
             case FK_EDIT_CIRCLE:
@@ -998,6 +1019,21 @@ struct Game {
         rate = std::clamp(rate, 0.f, 1000.f);
         b.src.on = rate > 0; b.src.rate = rate; b.src.mat = fPayload; b.src.face = fFace;
         if (rate > 0) lastRate = rate;
+    }
+    bool fanModeVacuum() const {
+        if (primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive && phys.bodies[primary].fan.strength != 0.f)
+            return phys.bodies[primary].fan.vacuum != 0;
+        return fanVacuumDefault;
+    }
+    const char* fanModeLabel() const { return fanModeVacuum() ? "FAN: VACUUM" : "FAN: BLOW"; }
+    void toggleFanMode() {
+        bool next = !fanModeVacuum();
+        fanVacuumDefault = next;
+        if (primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive && phys.bodies[primary].fan.strength != 0.f) {
+            for (int id : sel) if (id >= 0 && id < (int)phys.bodies.size() && phys.bodies[id].alive && phys.bodies[id].fan.strength != 0.f) phys.bodies[id].fan.vacuum = next;
+            if (formKind == FK_EDIT_BOX) openForm();
+        }
+        notify(next ? "VACUUM MODE: PULLS THE GAS ON THE INTAKE SIDE THROUGH THE FAN AND ACCELERATES IT" : "BLOW MODE: DRAWS AMBIENT AIR IN AND PUSHES IT OUT");
     }
     void setFan(float strength) {
         Body& b = phys.bodies[primary];
@@ -1082,6 +1118,8 @@ struct Game {
             resetWorld();
             phys.stampBodies();
             clearSelection();
+            focusBody = -1;
+            setCam(0);
             currentFile.clear();
             newArmed = 0;
             notify("NEW EMPTY FILE");
@@ -1123,6 +1161,8 @@ struct Game {
         playing = false; paused = false;
         if (!restoreState(buf)) return false;
         clearSelection();
+        focusBody = -1;
+        setCam(0);
         phys.stampBodies();
         return true;
     }
@@ -1241,7 +1281,7 @@ struct Game {
     }
     void buildPrecisionTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         anchored = true;
         tool = T_BOX; clearSelection(); openForm(); typeInto({"40", "120", "60", "6", "0"}); applyForm();   // exact shelf 60 x 6
         tool = T_PIPE; closeForm(); clearSelection(); openForm(); typeInto({"40", "100", "100", "100", "12", "2"}); applyForm();
@@ -1267,7 +1307,7 @@ struct Game {
 
     void buildCutTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         anchored = true;
         tool = T_BOX; clearSelection(); openForm(); typeInto({"100", "150", "70", "24", "0"}); applyForm();
         int plate = primary;
@@ -1291,7 +1331,7 @@ struct Game {
     }
     void buildElectricTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         // A: 12 V / 20 A battery heats a tungsten filament, which lights gasoline vapour
         world.battV = 12.f; world.battA = 20.f;
         rect(20, 60, 22, 62, M_BATT_POS); rect(20, 80, 22, 82, M_BATT_NEG);
@@ -1324,7 +1364,7 @@ struct Game {
     }
     void buildBondTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         // 1: a steel block glued under a ledge with paraffin; a heater beside it warms it until the wax lets go
         phys.addBox(Vec2(50, 90), Vec2(30, 3), 0, M_STEEL, true);
         int w1 = phys.addBox(Vec2(50, 100), Vec2(8, 8), 0, M_STEEL, false);
@@ -1355,7 +1395,7 @@ struct Game {
     }
     void buildPrimerTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         // a steel firing pin on a slider strikes a primer cartridge; the flash from the far end lights gunpowder
         rect(92, 141, 130, 143, M_WALL); rect(92, 159, 130, 161, M_WALL);   // chamber roof and floor
         rect(126, 144, 130, 158, M_WALL);
@@ -1378,7 +1418,7 @@ struct Game {
     }
     void buildFanTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         // 1: a wind tunnel: the fan blows a smoke stream and keeps light blocks aloft
         int f1 = phys.addBox(Vec2(30, 100), Vec2(3, 14), 0, M_STEEL, true);
         phys.bodies[f1].fan.strength = 90.f;
@@ -1403,11 +1443,44 @@ struct Game {
         phys.bodies[tail].fan.strength = -250.f;
         phys.groupBodies({chassis, tail});
         label(30, 160, "A FAN ON A CAR RECOILS: IT DRIVES ITSELF");
+        // 4: a vacuum fan empties a chamber of smoke through its throat, accelerating the gas
+        rect(320, 60, 366, 62, M_WALL); rect(320, 98, 366, 100, M_WALL); rect(320, 60, 322, 100, M_WALL);
+        gasRect(323, 63, 365, 97, M_SMOKE, 1.f);
+        int f4 = phys.addBox(Vec2(367, 80), Vec2(2, 17.5f), 0, M_STEEL, true);
+        phys.bodies[f4].fan.strength = 90.f; phys.bodies[f4].fan.vacuum = 1;
+        label(312, 48, "VACUUM FAN DRAWS THE CHAMBER EMPTY");
         phys.stampBodies();
+    }
+    void buildRoadTest() {
+        resetWorld();
+        rect(0, 200, World::W - 1, 203, M_WALL);
+        for (int x0 = 260; x0 < World::W - 100; x0 += 170)   // rolling bumps along the way
+            for (int x = 0; x < 40; ++x) rect(x0 + x, 200 - (int)(6.f * std::sin(3.14159f * x / 40.f)), x0 + x, 200, M_STONE);
+        // car A: a fan on its tail blows backwards and drives it
+        int chassis = phys.addBox(Vec2(60, 190), Vec2(24, 5), 0, M_ALUMINUM, false);
+        for (int sx = -1; sx <= 1; sx += 2) {
+            int wh = phys.addCircle(Vec2(60.f + 16.f * sx, 196), 4.f, M_RUBBER, false, true);
+            phys.addPin(Vec2(60.f + 16.f * sx, 196), chassis, wh, false, false);
+        }
+        int tail = phys.addBox(Vec2(34, 183), Vec2(2, 7), 0, M_ALUMINUM, false);
+        phys.bodies[tail].fan.strength = -250.f;
+        phys.groupBodies({chassis, tail});
+        // car B: motor-driven wheels that spin on their own, a little behind
+        int b = phys.addBox(Vec2(20, 190), Vec2(18, 4), 0, M_STEEL, false);
+        for (int sx = -1; sx <= 1; sx += 2) {
+            int wh = phys.addCircle(Vec2(20.f + 12.f * sx, 195), 4.f, M_RUBBER, false, true);
+            phys.addPin(Vec2(20.f + 12.f * sx, 195), b, wh, true, false);
+        }
+        label(8, 160, "SELECT THE FAN CAR, PRESS FOCUS (Z), THEN PLAY: THE CAMERA FOLLOWS IT DOWN THE ROAD");
+        selectBody(chassis, false, false);
+        focusBody = chassis;
+        setCam(0);
+        phys.stampBodies();
+        notify("FOCUS IS ON THE FAN CAR: PRESS PLAY. Z TURNS FOCUS OFF, MIDDLE-DRAG PANS");
     }
     void buildEmitterTest() {
         resetWorld();
-        rect(0, 200, 399, 203, M_WALL);
+        rect(0, 200, World::W - 1, 203, M_WALL);
         rect(40, 100, 41, 199, M_WALL); rect(160, 100, 161, 199, M_WALL);
         tool = T_EMITTER; anchored = true; payload = M_WATER; clearSelection(); openForm(); typeInto({"100", "40", "6", "6", "60"}); applyForm();
         anchored = false;
@@ -1426,7 +1499,41 @@ struct Game {
     }
 
     // ---------------------------------------------------------------- input
-    Vec2 toWorld(int mx, int my) const { return Vec2((float)mx / S, (float)my / S); }
+    Vec2 toWorld(int mx, int my) const { return Vec2((float)mx / S + (float)camX, (float)my / S); }
+
+    // ---------------------------------------------------------------- camera
+    void setCam(float x) {
+        camXf = std::clamp(x, 0.f, (float)(World::W - VIEW_W));
+        camX = (int)std::lround(camXf);
+    }
+    Vec2 focusPoint(bool& ok) const {
+        ok = false;
+        if (focusBody < 0 || focusBody >= (int)phys.bodies.size() || !phys.bodies[focusBody].alive) return Vec2();
+        ok = true;
+        const Body& b = phys.bodies[focusBody];
+        if (b.group < 0) return b.pos;
+        double m = 0, x = 0, y = 0;   // a group is followed by its centre of mass
+        for (auto& o : phys.bodies) if (o.alive && o.group == b.group) { m += o.mass; x += o.pos.x * o.mass; y += o.pos.y * o.mass; }
+        return m > 0 ? Vec2((float)(x / m), (float)(y / m)) : b.pos;
+    }
+    void updateCamera(bool snap = false) {
+        bool ok;
+        Vec2 f = focusPoint(ok);
+        if (focusBody >= 0 && !ok) { focusBody = -1; notify("FOCUS LOST (THE BODY IS GONE)"); }
+        if (!ok || panning || scrubbing) return;
+        float target = f.x - VIEW_W * 0.5f;
+        setCam(snap ? target : camXf + (target - camXf) * 0.14f);
+    }
+    void toggleFocus() {
+        if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF: THE CAMERA STAYS PUT (MIDDLE-DRAG OR THE STRIP BELOW PANS)"); return; }
+        pruneSelection();
+        if (primary < 0) { notify("SELECT A BODY FIRST (SELECT TOOL), THEN PRESS FOCUS (Z)"); return; }
+        focusBody = primary;
+        updateCamera(true);
+        notify("FOCUS ON: THE CAMERA FOLLOWS THIS BODY. PRESS Z AGAIN TO RELEASE");
+    }
+    bool inScrollStrip(int my) const { return my >= SIM_H - 12 && my < SIM_H; }
+    void scrubTo(int mx) { setCam((float)mx / SIM_W * World::W - VIEW_W * 0.5f); }
 
     void createCircle(Vec2 c, float r, bool wheel) {
         int id = phys.addCircle(c, r, wheel && bodyMat == M_STEEL ? (uint8_t)M_RUBBER : bodyMat, anchored, wheel);
@@ -1464,6 +1571,7 @@ struct Game {
                 if (half.x > half.y) { std::swap(half.x, half.y); ang = PI * 0.5f; }   // the long side is the blade span
                 int id = phys.addBox(c, half, ang, bodyMat, anchored);
                 phys.bodies[id].fan.strength = lastFan;
+                phys.bodies[id].fan.vacuum = fanVacuumDefault ? 1 : 0;
                 sel = {id}; primary = id; partMode = false;
                 notify("FAN " + fmt(lastFan) + ". + / - CHANGE STRENGTH, \\ FLIPS DIRECTION, ENTER = EXACT VALUES");
                 break;
@@ -1592,11 +1700,23 @@ struct Game {
                     mouse = toWorld(e.motion.x, e.motion.y);
                     mousePx = e.motion.x; mousePy = e.motion.y;
                     inSim = e.motion.y < SIM_H;
+                    if (panning) setCam(panStartCam - (float)(e.motion.x - panStartPx) / S);
+                    if (scrubbing) scrubTo(e.motion.x);
                     break;
                 case SDL_MOUSEBUTTONDOWN:
                     mouse = toWorld(e.button.x, e.button.y);
                     if (e.button.button == SDL_BUTTON_LEFT && formClick(e.button.x, e.button.y)) break;
                     mousePx = e.button.x; mousePy = e.button.y;
+                    if (e.button.button == SDL_BUTTON_MIDDLE && e.button.y < SIM_H) {
+                        panning = true; panStartPx = e.button.x; panStartCam = camXf;
+                        if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU PANNED THE CAMERA)"); }
+                        break;
+                    }
+                    if (e.button.button == SDL_BUTTON_LEFT && inScrollStrip(e.button.y) && !helpOn && formKind == FK_NONE) {
+                        scrubbing = true; scrubTo(e.button.x);
+                        if (focusBody >= 0) { focusBody = -1; notify("FOCUS OFF (YOU MOVED THE CAMERA)"); }
+                        break;
+                    }
                     if (e.button.y >= SIM_H) {
                         layoutButtons();
                         if (e.button.button == SDL_BUTTON_LEFT)
@@ -1615,6 +1735,8 @@ struct Game {
                     break;
                 case SDL_MOUSEBUTTONUP:
                     mouse = toWorld(e.button.x, e.button.y);
+                    if (e.button.button == SDL_BUTTON_MIDDLE) { panning = false; break; }
+                    if (e.button.button == SDL_BUTTON_LEFT && scrubbing) { scrubbing = false; break; }
                     if (lmb || e.button.button == SDL_BUTTON_RIGHT) handleSimUp(e.button.button);
                     break;
                 case SDL_MOUSEWHEEL:
@@ -1634,6 +1756,12 @@ struct Game {
         switch (k) {
             case SDLK_RETURN: case SDLK_KP_ENTER: openForm(); break;
             case SDLK_F1: helpOn = !helpOn; break;
+            case SDLK_z: toggleFocus(); break;
+            case SDLK_m: toggleFanMode(); break;
+            case SDLK_HOME: if (focusBody >= 0) focusBody = -1; setCam(0); break;
+            case SDLK_END: if (focusBody >= 0) focusBody = -1; setCam((float)World::W); break;
+            case SDLK_PAGEUP: if (focusBody >= 0) focusBody = -1; setCam(camXf - VIEW_W * 0.5f); break;
+            case SDLK_PAGEDOWN: if (focusBody >= 0) focusBody = -1; setCam(camXf + VIEW_W * 0.5f); break;
             case SDLK_EQUALS: case SDLK_PLUS: case SDLK_KP_PLUS: case SDLK_MINUS: case SDLK_KP_MINUS: case SDLK_BACKSLASH: {
                 if (primary < 0 || !phys.bodies[primary].alive || phys.bodies[primary].fan.strength == 0.f) break;
                 float& st = phys.bodies[primary].fan.strength;
@@ -1725,6 +1853,7 @@ struct Game {
             world.step();
             stepOnce = false;
         }
+        updateCamera();
     }
 
     // ---------------------------------------------------------------- render
@@ -1765,38 +1894,45 @@ struct Game {
 
     void renderParticles() {
         const uint32_t bg = 0xFF000000u | MATS[M_EMPTY].color;
-        for (int i = 0; i < World::W * World::H; ++i) pixels[i] = cellColor(world.cells[i], bg);
+        const int x0 = camX, x1 = camX + VIEW_W;   // only the visible columns are coloured
+        for (int y = 0; y < World::H; ++y)
+            for (int x = x0; x < x1; ++x) { int i = y * World::W + x; pixels[i] = cellColor(world.cells[i], bg); }
         if (pressureView) {
-            for (int i = 0; i < World::W * World::H; ++i) {
-                const Cell& c = world.cells[i];
-                if (world.bodyMask[i] >= 0 || c.t == M_EMPTY) { pixels[i] = mix(pixels[i], bg, 0.35f); continue; }
-                Kind k = MATS[c.t].kind;
-                if (k == K_GAS && c.t != M_FIRE) {
-                    float p = c.amt * (c.temp + 273.f) / 293.f;     // 1 = ambient
-                    uint32_t col = p < 1.f ? mix(0x203a78, 0xe8eef8, std::sqrt(std::clamp(p, 0.f, 1.f)))
-                                           : mix(0xe8eef8, 0xe03020, std::clamp((p - 1.f) / 2.f, 0.f, 1.f));
-                    pixels[i] = col;
-                } else if (k == K_LIQUID && c.amt > 1.01f) pixels[i] = mix(pixels[i], 0xe03020, std::clamp((c.amt - 1.f) * 3.f, 0.f, 1.f));
-                else pixels[i] = mix(pixels[i], bg, 0.6f);
-            }
+            for (int y = 0; y < World::H; ++y)
+                for (int x = x0; x < x1; ++x) {
+                    int i = y * World::W + x;
+                    const Cell& c = world.cells[i];
+                    if (world.bodyMask[i] >= 0 || c.t == M_EMPTY) { pixels[i] = mix(pixels[i], bg, 0.35f); continue; }
+                    Kind k = MATS[c.t].kind;
+                    if (k == K_GAS && c.t != M_FIRE) {
+                        float p = c.amt * (c.temp + 273.f) / 293.f;     // 1 = ambient
+                        uint32_t col = p < 1.f ? mix(0x203a78, 0xe8eef8, std::sqrt(std::clamp(p, 0.f, 1.f)))
+                                               : mix(0xe8eef8, 0xe03020, std::clamp((p - 1.f) / 2.f, 0.f, 1.f));
+                        pixels[i] = col;
+                    } else if (k == K_LIQUID && c.amt > 1.01f) pixels[i] = mix(pixels[i], 0xe03020, std::clamp((c.amt - 1.f) * 3.f, 0.f, 1.f));
+                    else pixels[i] = mix(pixels[i], bg, 0.6f);
+                }
         }
         if (elecView && (int)world.volt.size() == World::W * World::H) {
-            for (int i = 0; i < World::W * World::H; ++i) {
-                int b = world.bodyMask[i];
-                float sg = b >= 0 ? (b < (int)world.bodySigma.size() ? world.bodySigma[b] : 0.f) : MATS[world.cells[i].t].elec;
-                if (sg <= 0.f) { pixels[i] = mix(pixels[i], bg, 0.65f); continue; }
-                float v = world.volt[i], f = world.vMax > 0.5f ? std::clamp(std::log1p(std::fabs(v)) / std::log1p(world.vMax), 0.f, 1.f) : 0.f;
-                uint32_t col = v > 0.01f ? mix(0x1c4a78, 0xfff060, f) : 0x203040;
-                float cur = std::min(1.f, world.curr[i] * 0.05f);
-                pixels[i] = mix(col, 0xff9040, cur * 0.6f);
-            }
+            for (int y = 0; y < World::H; ++y)
+                for (int x = x0; x < x1; ++x) {
+                    int i = y * World::W + x;
+                    int b = world.bodyMask[i];
+                    float sg = b >= 0 ? (b < (int)world.bodySigma.size() ? world.bodySigma[b] : 0.f) : MATS[world.cells[i].t].elec;
+                    if (sg <= 0.f) { pixels[i] = mix(pixels[i], bg, 0.65f); continue; }
+                    float v = world.volt[i], f = world.vMax > 0.5f ? std::clamp(std::log1p(std::fabs(v)) / std::log1p(world.vMax), 0.f, 1.f) : 0.f;
+                    uint32_t col = v > 0.01f ? mix(0x1c4a78, 0xfff060, f) : 0x203040;
+                    float cur = std::min(1.f, world.curr[i] * 0.05f);
+                    pixels[i] = mix(col, 0xff9040, cur * 0.6f);
+                }
         }
-        SDL_UpdateTexture(tex, nullptr, pixels.data(), World::W * 4);
+        SDL_Rect area{x0, 0, VIEW_W, World::H};
+        SDL_UpdateTexture(tex, &area, pixels.data() + x0, World::W * 4);
         SDL_Rect dst{0, 0, SIM_W, SIM_H};
-        SDL_RenderCopy(ren, tex, nullptr, &dst);
+        SDL_RenderCopy(ren, tex, &area, &dst);
     }
 
-    static SDL_FPoint sp(Vec2 p) { return SDL_FPoint{p.x * S, p.y * S}; }
+    SDL_FPoint sp(Vec2 p) const { return SDL_FPoint{(p.x - (float)camX) * S, p.y * S}; }
 
     void fillPoly(const std::vector<Vec2>& pts, uint32_t color) {
         std::vector<SDL_Vertex> v;
@@ -1861,9 +1997,19 @@ struct Game {
         lineWorld(tail, tip, ac, 3);
         lineWorld(tip, tip - dir * 5.f + nrm * 3.5f, ac, 3);
         lineWorld(tip, tip - dir * 5.f - nrm * 3.5f, ac, 3);
-        std::string lab = fmt(mag);
+        if (b.fan.vacuum) {   // converging chevrons on the intake side: gas is being drawn in
+            SDL_Color cy{120, 225, 255, 255};
+            for (int i = -1; i <= 1; ++i) {
+                Vec2 base = b.pos - dir * (b.half.x + 9.f) + nrm * (b.half.y * 0.55f * (float)i);
+                Vec2 tp = base + dir * 5.f;
+                lineWorld(base, tp, cy, 2);
+                lineWorld(tp, tp - dir * 3.f + nrm * 2.5f, cy, 2);
+                lineWorld(tp, tp - dir * 3.f - nrm * 2.5f, cy, 2);
+            }
+        }
+        std::string lab = std::string(b.fan.vacuum ? "VAC " : "") + fmt(mag);
         Vec2 lp = b.toWorld(Vec2(0.f, -b.half.y)) - Vec2(0.f, 7.f);
-        font::draw(ren, lab, (int)(lp.x * S) - font::textWidth(lab, 1) / 2, (int)(lp.y * S), 1, SDL_Color{255, 235, 120, 255});
+        font::draw(ren, lab, (int)((lp.x - camX) * S) - font::textWidth(lab, 1) / 2, (int)(lp.y * S), 1, SDL_Color{255, 235, 120, 255});
     }
 
     void renderBodies() {
@@ -1913,6 +2059,21 @@ struct Game {
         if (b.shape == SHAPE_CIRCLE) return circlePts(b.pos, b.radius + grow);
         Vec2 h = b.half + Vec2(grow, grow);
         return {b.toWorld(Vec2(-h.x, -h.y)), b.toWorld(Vec2(h.x, -h.y)), b.toWorld(Vec2(h.x, h.y)), b.toWorld(Vec2(-h.x, h.y))};
+    }
+
+    void renderFocusMark() {
+        bool ok;
+        Vec2 f = focusPoint(ok);
+        if (!ok) return;
+        const Body& b = phys.bodies[focusBody];
+        float r = std::max(6.f, b.bound + 3.f);
+        SDL_Color c{255, 214, 90, 230};
+        for (int sx = -1; sx <= 1; sx += 2)
+            for (int sy = -1; sy <= 1; sy += 2) {
+                Vec2 corner = f + Vec2(r * sx, r * sy);
+                lineWorld(corner, corner - Vec2(4.f * sx, 0), c, 2);
+                lineWorld(corner, corner - Vec2(0, 4.f * sy), c, 2);
+            }
     }
 
     void renderSelection() {
@@ -1984,12 +2145,38 @@ struct Game {
         }
     }
 
+    // a strip along the bottom of the view: the whole world, the visible part, and where the moving bodies are
+    void renderScrollStrip() {
+        const float k = (float)SIM_W / World::W;
+        SDL_Rect track{0, SIM_H - 8, SIM_W, 8};
+        SDL_SetRenderDrawColor(ren, 8, 12, 20, 210);
+        SDL_RenderFillRect(ren, &track);
+        for (auto& b : phys.bodies)
+            if (b.alive && !b.isStatic && (int)(&b - &phys.bodies[0]) != focusBody) {
+                SDL_Rect t{(int)(b.pos.x * k), SIM_H - 6, 2, 4};
+                SDL_SetRenderDrawColor(ren, 170, 185, 215, 255);
+                SDL_RenderFillRect(ren, &t);
+            }
+        SDL_Rect thumb{(int)(camX * k), SIM_H - 8, std::max(6, (int)(VIEW_W * k)), 8};
+        SDL_SetRenderDrawColor(ren, 70, 100, 160, 110);
+        SDL_RenderFillRect(ren, &thumb);
+        SDL_SetRenderDrawColor(ren, 140, 175, 240, 255);
+        SDL_RenderDrawRect(ren, &thumb);
+        bool ok;
+        Vec2 f = focusPoint(ok);
+        if (ok) {
+            SDL_Rect t{(int)(f.x * k) - 1, SIM_H - 8, 4, 8};
+            SDL_SetRenderDrawColor(ren, 255, 214, 90, 255);
+            SDL_RenderFillRect(ren, &t);
+        }
+    }
+
     void renderLabels() {
-        for (auto& l : labels) font::draw(ren, l.s, (int)(l.p.x * S), (int)(l.p.y * S), 1, SDL_Color{200, 210, 230, 200});
+        for (auto& l : labels) font::draw(ren, l.s, (int)((l.p.x - camX) * S), (int)(l.p.y * S), 1, SDL_Color{200, 210, 230, 200});
     }
 
     void ghostLabel(Vec2 at, const std::string& t) {
-        font::draw(ren, t, (int)(at.x * S) + 8, (int)(at.y * S) - 14, 2, SDL_Color{255, 240, 150, 255});
+        font::draw(ren, t, (int)((at.x - camX) * S) + 8, (int)(at.y * S) - 14, 2, SDL_Color{255, 240, 150, 255});
     }
 
     void renderGhost() {
@@ -2116,7 +2303,7 @@ struct Game {
         int bid = world.bodyMask[y * World::W + x];
         if (bid >= 0 && bid < (int)phys.bodies.size() && phys.bodies[bid].alive) {
             const Body& b = phys.bodies[bid];
-            if (b.fan.strength != 0.f) std::snprintf(buf, sizeof buf, "FAN %g/S%s", b.fan.strength, b.fan.strength < 0 ? " REVERSED" : "");
+            if (b.fan.strength != 0.f) std::snprintf(buf, sizeof buf, "FAN %s %g/S%s", b.fan.vacuum ? "VACUUM" : "BLOW", b.fan.strength, b.fan.strength < 0 ? " REVERSED" : "");
             else if (b.src.on) std::snprintf(buf, sizeof buf, "EMITTER %s %g/S", MATS[b.src.mat].name, b.src.rate);
             else std::snprintf(buf, sizeof buf, "BODY %s %dC", MATS[b.mat].name, (int)b.temp);
             return buf;
@@ -2237,7 +2424,8 @@ struct Game {
         line("CTRL+G GROUP     CTRL+U UNGROUP     C CLEAR CELLS     X CLEAR BODIES     R RELOAD DEMO");
         line("E HOLD = SPARK     , . SPARK RATE     V DROP A CAR     G FLIP GRAVITY");
         line("ARROWS OR A / D DRIVE MOTORS     UP OR W FIRE ROCKETS");
-        line("FAN SELECTED: + / - STRENGTH     BACKSLASH FLIPS DIRECTION     PRESSURE BUTTON SHOWS GAS PRESSURE");
+        line("FAN SELECTED: + / - STRENGTH     BACKSLASH FLIPS DIRECTION     M BLOW / VACUUM     PRESSURE BUTTON SHOWS GAS PRESSURE");
+        line("CAMERA: Z FOCUS ON THE SELECTED BODY (FOLLOWS IT)     MIDDLE-DRAG, THE STRIP AT THE BOTTOM, HOME / END / PAGE UP / PAGE DOWN SCROLL");
         y += 6;
         head("GOOD TO KNOW");
         line("ENGINES NEED A HOT GAS CYCLE: FUEL VAPOUR IN, SPARK OR GLOW PLUG, VALVES TIMED BY AN ECCENTRIC - SEE THE SCENES.");
@@ -2330,8 +2518,10 @@ struct Game {
         renderJoints();
         renderArcs();
         renderSelection();
+        renderFocusMark();
         renderLabels();
         renderGhost();
+        renderScrollStrip();
         renderForm();
         renderUI();
     }
@@ -2361,6 +2551,7 @@ int main(int argc, char** argv) {
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;
     bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false;
+    int camFlag = -1;
     int tabFlag = -1, hoverX = -1, hoverY = -1;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
@@ -2373,6 +2564,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--elec")) elecFlag = true;
         else if (!std::strcmp(argv[i], "--help-card")) helpFlag = true;
         else if (!std::strcmp(argv[i], "--pressure")) pressureFlag = true;
+        else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc) camFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--tab") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
@@ -2399,6 +2591,32 @@ int main(int argc, char** argv) {
             case 16: g.buildEmitterTest(); break;
             case 17: g.buildElectricTest(); break;
             case 22: g.buildFanTest(); break;
+            case 23: g.buildRoadTest(); break;
+            case 24: {   // camera controls through real SDL events
+                g.buildRoadTest();
+                g.focusBody = -1;
+                auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
+                SDL_Event e{};
+                e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = 600; e.button.y = 300; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEMOTION; e.motion.x = 300; e.motion.y = 300; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_MIDDLE; e.button.x = 300; e.button.y = 300; push(e);
+                std::printf("middle-drag 300px left: camera at %d (expected 100)\n", g.camX);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = 900; e.button.y = SIM_H - 4; push(e);
+                e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = 900; e.button.y = SIM_H - 4; push(e);
+                std::printf("scroll strip click at 900px: camera at %d (expected %d)\n", g.camX, (int)std::lround(900.f / SIM_W * World::W - VIEW_W * 0.5f));
+                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_HOME; push(e);
+                std::printf("Home: camera at %d\n", g.camX);
+                g.selectBody(g.phys.bodies.size() > 0 ? 0 : -1, false, false);
+                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_z; push(e);
+                std::printf("Z with a selection: focus body %d\n", g.focusBody);
+                g.play();
+                for (int i = 0; i < 600; ++i) g.update();
+                bool ok; Vec2 f = g.focusPoint(ok);
+                std::printf("after 600 frames the car is at x=%.0f and the camera at %d (view centre %d)\n", f.x, g.camX, g.camX + VIEW_W / 2);
+                e = SDL_Event{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_z; push(e);
+                std::printf("Z again: focus body %d\n", g.focusBody);
+                break;
+            }
             case 18: g.buildBondTest(); break;
             case 19: g.buildPrimerTest(); break;
             case 20: {   // run-mode and file round trips
@@ -2436,6 +2654,7 @@ int main(int argc, char** argv) {
         if (elecFlag) g.elecView = true;
         if (helpFlag) g.helpOn = true;
         if (pressureFlag) g.pressureView = true;
+        if (camFlag >= 0) g.setCam((float)camFlag);
         if (tabFlag >= 0) g.tab = (Tab)tabFlag;
         if (hoverX >= 0) { g.mousePx = hoverX; g.mousePy = hoverY; }
         if (g0) g.phys.gravity = Vec2(0, 0);
@@ -2444,6 +2663,7 @@ int main(int argc, char** argv) {
             if (scene == 1 || scene == 2) g.phys.thrustOn = scene == 2;
             g.phys.step(1.f / 60.f);
             g.world.step();
+            g.updateCamera(f == 0);
             if (!scene && f == 120) g.world.explode(352, 210, 24.f, 260.f);
             if (trace && f % (std::getenv("TRACE_EVERY") ? std::atoi(std::getenv("TRACE_EVERY")) : 120) == 0) {
                 double gasTot = 0; int water = 0, gcnt = 0, gp = 0; float tmax = 0;
