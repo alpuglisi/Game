@@ -320,6 +320,18 @@ struct Game {
         for (int id : em) phys.bodies[id].src.rate = std::clamp(phys.bodies[id].src.rate + d, 5.f, 1000.f);
         lastRate = phys.bodies[em[0]].src.rate;
     }
+    void setMeter(bool on) {
+        std::vector<int> em = selEmitters();
+        if (em.empty()) return;
+        pushUndo("meter");
+        for (int id : em) { Emitter& e = phys.bodies[id].src; e.meter = on; if (on && e.face == 0) e.face = 1; }
+    }
+    void adjustGain(float d) {
+        std::vector<int> em = selEmitters();
+        if (em.empty()) return;
+        pushUndo("gain");
+        for (int id : em) phys.bodies[id].src.gain = std::clamp(phys.bodies[id].src.gain + d, 0.f, 5000.f);
+    }
     void setEmitMaterial(uint8_t m) {
         payload = m;
         std::vector<int> em = selEmitters();
@@ -585,6 +597,22 @@ struct Game {
             } else if (J.type == J_SLIDER) {
                 line("KEEPS ONE BODY ON A LINE,", 0xb0bcd4);
                 line("ROTATION LOCKED.", 0xb0bcd4);
+                gap(4);
+                const bool act = J.drive > 0.f;
+                toggle("ARROW-KEY ACTUATOR", act, [this, act] {
+                    if (act) editJoint([](Joint& k) { k.drive = 0.f; });
+                    else { pushUndo(); phys.setActuator(selJoint, 10.f, 0.f, 12.f); }
+                }, "THE LEFT / RIGHT ARROWS (A / D) SLIDE THE BODY ALONG ITS LINE (RIGHT = THE WAY THE LINE POINTS) AND IT HOLDS WHERE YOU LEAVE IT: A THROTTLE, A VALVE, A RAM");
+                if (act) {
+                    stepper("SPEED (CELLS PER SEC)", fmt(J.drive), [this] { editJoint([](Joint& k) { k.drive = std::max(1.f, k.drive - 1.f); }); },
+                            [this] { editJoint([](Joint& k) { k.drive = std::min(100.f, k.drive + 1.f); }); }, "HOW FAST THE KEYS MOVE IT");
+                    stepper("TRAVEL FORWARD (CELLS)", fmt(J.sHi), [this] { editJoint([](Joint& k) { k.sHi = std::max(0.f, k.sHi - 1.f); }); },
+                            [this] { editJoint([](Joint& k) { k.sHi = std::min(300.f, k.sHi + 1.f); }); }, "HOW FAR IT MAY MOVE ALONG THE LINE FROM WHERE IT STARTS");
+                    stepper("TRAVEL BACK (CELLS)", fmt(-J.sLo), [this] { editJoint([](Joint& k) { k.sLo = std::min(0.f, k.sLo + 1.f); }); },
+                            [this] { editJoint([](Joint& k) { k.sLo = std::max(-300.f, k.sLo - 1.f); }); }, "HOW FAR IT MAY MOVE BACK THE OTHER WAY");
+                    button("START HERE", false, [this] { float here = phys.sliderPos(phys.joints[selJoint]); editJoint([here](Joint& k) { k.s0 = here; }); },
+                           "MAKE THE CURRENT POSITION THE START OF THE TRAVEL", x0, w); y += 30;
+                }
             } else {
                 line("A HINGE BETWEEN TWO BODIES", 0xb0bcd4);
                 line("(OR A BODY AND THE WORLD).", 0xb0bcd4);
@@ -656,7 +684,15 @@ struct Game {
                          [this](uint8_t m) { setEmitMaterial(m); }, 30);
                 line(std::string("EMITS ") + MATS[curMat].name, 0xe8eefc);
                 float rate = em.empty() ? lastRate : phys.bodies[em[0]].src.rate;
-                stepper("RATE (CELLS PER SECOND)", fmt(rate), [this] { adjustRate(-5.f); }, [this] { adjustRate(5.f); }, "HOW FAST IT PRODUCES THE MATERIAL");
+                const bool metered = !em.empty() && phys.bodies[em[0]].src.meter;
+                stepper(metered ? "IDLE RATE (CELLS PER SECOND)" : "RATE (CELLS PER SECOND)", fmt(rate), [this] { adjustRate(-5.f); }, [this] { adjustRate(5.f); },
+                        metered ? "THE FLOW WITH NO SUCTION (THE IDLE JET)" : "HOW FAST IT PRODUCES THE MATERIAL");
+                if (!em.empty()) {
+                    toggle("PRESSURE-FED (CARB JET)", metered, [this, metered] { setMeter(!metered); },
+                           "THE FLOW FOLLOWS HOW MUCH LOWER THE GAS PRESSURE IS AT THE OUTLET THAN AT THE BACK OF THE BLOCK: A CARBURETTOR JET. PIPE THE BACK TO AIR UPSTREAM OF A RESTRICTION");
+                    if (metered) stepper("MIXTURE (CELLS/S PER PRESSURE)", fmt(phys.bodies[em[0]].src.gain), [this] { adjustGain(-50.f); }, [this] { adjustGain(50.f); },
+                                         "MORE = RICHER: EXTRA FUEL FOR EACH UNIT OF PRESSURE DROP");
+                }
                 int face = em.empty() ? emitFace : phys.bodies[em[0]].src.face;
                 line("OUTLET SIDE (THROWS ALONG IT)", 0x8fa0c0);
                 row2("RIGHT >", face == 1, [this] { setSelectionFace(1); }, "THE OUTLET IS THE +X SIDE OF THE BLOCK (ROTATES WITH IT)",
@@ -707,6 +743,7 @@ struct Game {
             {"DEMO", &Game::buildDemo, "A LITTLE OF EVERYTHING"},
             {"STEAM ENGINE", &Game::buildSteamEngine, "BOILER, VALVE, PISTON AND FLYWHEEL"},
             {"GAS ENGINE", &Game::buildGasEngine, "SPARK-IGNITED GASOLINE VAPOUR ENGINE"},
+            {"CARBURETED ENGINE", &Game::buildCarburetedEngine, "CARBURETTOR, FUEL WELL AND A THROTTLE YOU DRIVE WITH A / D"},
             {"DIESEL ENGINE", &Game::buildDieselEngine, "GLOW-PLUG DIESEL ENGINE"},
             {"HYDRAULICS", &Game::buildHydraulics, "MASTER AND SLAVE CYLINDERS"},
             {"CONDUCTION", &Game::buildConduction, "HEAT FLOW THROUGH DIFFERENT MATERIALS"},
@@ -719,7 +756,7 @@ struct Game {
             {"JET ENGINE", &Game::buildJet, "A TURBOJET ON WHEELS: FAN, FUEL, SPARK PLUG, NOZZLE"},
             {"ROAD + FOCUS", &Game::buildRoadTest, "A FAN-DRIVEN CAR AND THE FOLLOWING CAMERA"},
         };
-        const int n = 14, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
+        const int n = 15, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
         int cw = cols * bw + (cols + 1) * gapx, ch = 70 + ((n + cols - 1) / cols) * (bh + gapy) + 16;
         SDL_Rect card{(SIM_W - cw) / 2, (SIM_H - ch) / 2, cw, ch};
         PItem bg; bg.kind = 5; bg.r = card; modal.push_back(bg);
@@ -844,14 +881,14 @@ struct Game {
     // 1 cell short of the head at top dead centre. Returns the piston id.
     int lastWheel = -1;
     Vec2 lastCrank;
-    int crankSlider(int headX, float pistonLen, float rod, float crankY, float crankR, float wheelR, uint8_t wheelMat) {
+    int crankSlider(int headX, float pistonLen, float rod, float crankY, float crankR, float wheelR, uint8_t wheelMat, float pistonHalfH = 5.5f) {
         const float boreY0 = 150, boreH = 12;
         float axisY = boreY0 + boreH * 0.5f;
         float crankX = headX + 1 + pistonLen * 0.5f + rod + crankR;
         float th = PI + 0.7f;
         Vec2 pin = Vec2(crankX, crankY) + Vec2(std::cos(th), std::sin(th)) * crankR;
         float px = pin.x - std::sqrt(rod * rod - (pin.y - axisY) * (pin.y - axisY));
-        int piston = phys.addBox(Vec2(px, axisY), Vec2(pistonLen * 0.5f, boreH * 0.5f - 0.5f), 0, M_ALUMINUM, false);
+        int piston = phys.addBox(Vec2(px, axisY), Vec2(pistonLen * 0.5f, pistonHalfH), 0, M_ALUMINUM, false);
         int wheel = phys.addCircle(Vec2(crankX, crankY), wheelR, wheelMat, false, false);
         phys.addPin(Vec2(crankX, crankY), wheel, -1, false, true);
         phys.addDistance(piston, Vec2(px, axisY), wheel, pin, 0.f);
@@ -865,8 +902,8 @@ struct Game {
     // Valve chest above the cylinder head. A sliding gate in it, driven by an eccentric on the flywheel, opens a
     // port into the front of the cylinder for part of every revolution (the inlet valve timing).
     //   chest interior: x 76..116, y 140..145;  port through the ceiling: x 93..96
-    void gateValve(uint8_t wall, float phase = 0.f) {
-        const float gateHalf = 10.f, ecc = 8.f, restX = 96.f;
+    void gateValve(uint8_t wall, float phase = 0.f, float ecc = 8.f, float restX = 96.f, float gateT = 1.0f) {
+        const float gateHalf = 10.f;
         rect(74, 134, 122, 149, wall);
         rect(76, 136, 120, 145, M_EMPTY);       // tall chest: steam flows over the gate, so the gate is pressure-balanced
         rect(92, 146, 97, 149, M_EMPTY);        // port: x 92..97
@@ -874,9 +911,9 @@ struct Game {
         float rod = crankX - restX;
         float ang = phase;   // eccentric phase: 0 = open from top dead centre to ~80 degrees after it; PI = open around bottom dead centre
         Vec2 pin = Vec2(crankX, crankY) + Vec2(std::cos(ang), std::sin(ang)) * ecc;
-        float gy = 145.0f;
+        float gy = 146.f - gateT;                // the plate rests on the floor of the chest, over the port
         float gx = pin.x - std::sqrt(rod * rod - (pin.y - gy) * (pin.y - gy));
-        int gate = phys.addBox(Vec2(gx, gy), Vec2(gateHalf, 1.0f), 0, M_STEEL, false);
+        int gate = phys.addBox(Vec2(gx, gy), Vec2(gateHalf, gateT), 0, M_STEEL, false);
         phys.addDistance(gate, Vec2(gx, gy), lastWheel, pin, 0.f);
         phys.addSlider(gate, Vec2(1, 0));
     }
@@ -945,8 +982,7 @@ struct Game {
         gateValve(M_STEEL);
         exhaustValve(M_STEEL);
         rect(76, 136, 76, 145, M_SOURCE, M_VAPOR);            // fuel/air supply on the left of the chest
-        float dens = 0.8f;
-        for (int y = 136; y <= 145; ++y) world.at(76, y).amt = dens;   // (gasoline vapour by default)
+        for (int y = 136; y <= 145; ++y) world.at(76, y).amt = 0.8f;   // (gasoline vapour)
         rect(90, 152, 90, 156, M_IGNITER);                     // spark plug set into the head wall
         sparkIdx = 5;
         world.sparkPeriod = SPARK_RATES[sparkIdx];
@@ -957,6 +993,65 @@ struct Game {
         label(196, 118, "FLYWHEEL (STARTED SPINNING)");
         label(76, 178, "EXHAUST GATE VALVE + DRAIN");
         phys.stampBodies();
+    }
+
+    // A spark-ignition engine fed through a carburettor and a throttle. The carburettor stands on the valve chest: outside air at
+    // the top (held a little above atmospheric), a fixed neck, a throttle plate across the throat, then the chest where the plug is.
+    // The fuel well is a reservoir of gasoline vapour behind a one-cell channel into the neck: vapour creeps down it at a rate set by
+    // how far the neck's own vapour content is below the well's, so the airflow itself sets the mixture, with no moving parts. The
+    // inlet gate is a thin plate (the same eccentric drive as the gas engine); the exhaust is a port in the cylinder floor that the
+    // piston uncovers a quarter of the way down its stroke. The throttle is an arrow-key actuator: Right / D opens it, Left / A
+    // closes it, and it holds where you leave it.
+    struct Carb { int throttle = -1, throttleJoint = -1, wheel = -1, brake = -1, piston = -1; };
+    Carb lastCarb;
+    void buildCarburetedEngine() {
+        resetWorld();
+        cylinder(91, 60, M_STEEL);
+        lastCarb.piston = crankSlider(91, 16, 100, 156, 18, 12, M_IRON);   // a light flywheel, so the engine's speed answers the throttle
+        lastCarb.wheel = lastWheel;
+        phys.bodies[lastWheel].w = 5.f;                                    // the starter's kick
+        gateValve(M_STEEL, 0.f, 10.f, 97.f, 0.5f);                         // a longer throw, a thin plate: it uncovers the whole port and drags less
+        rect(74, 144, 75, 145, M_VOID);                                    // the plate's slot is open at both ends, so it pumps no trapped air
+        rect(121, 144, 122, 145, M_VOID);
+        rect(96, 162, 101, 166, M_EMPTY);                                  // exhaust port in the cylinder floor, straight to the open air
+        rect(96, 167, 101, 170, M_VOID);
+        // the load: the flywheel's pivot becomes a brake (a motor aimed at standstill with limited torque); select it and change POWER
+        for (auto& j : phys.joints) if (j.alive && j.type == J_PIN && j.a == lastWheel && j.b < 0) { j.type = J_MOTOR; j.keyed = false; j.speed = 0.f; j.power = 0.1f; lastCarb.brake = j.id; }
+        // the carburettor body: a throat 10 wide through the chest roof, with outside air held at 1.5 atmospheres at the top
+        const float supply = 1.5f;
+        rect(74, 125, 92, 133, M_STEEL);
+        rect(81, 127, 90, 135, M_EMPTY);
+        rect(81, 127, 90, 127, M_SOURCE, M_AIR);
+        for (int x = 81; x <= 90; ++x) world.at(x, 127).amt = supply;
+        rect(88, 129, 90, 131, M_STEEL);                                   // the fixed neck: the throat narrows to 6 cells for three rows
+        // the fuel well (a fuel-pump pressure of 10) and its channel into the neck
+        rect(79, 129, 81, 131, M_STEEL);
+        rect(79, 130, 81, 130, M_EMPTY);
+        rect(75, 129, 78, 131, M_SOURCE, M_VAPOR);
+        for (int y = 129; y <= 131; ++y) for (int x = 75; x <= 78; ++x) world.at(x, y).amt = 10.f;
+        // the throttle: a plate sliding sideways in a slot through the right wall of the throat, closed at rest
+        rect(91, 130, 108, 135, M_STEEL);
+        rect(91, 131, 106, 134, M_EMPTY);
+        int gate = phys.addBox(Vec2(87.f, 133.f), Vec2(6.f, 1.f), 0, M_STEEL, false);
+        int sj = phys.addSlider(gate, Vec2(1, 0));
+        phys.setActuator(sj, 6.f, 0.f, 10.f);
+        lastCarb.throttle = gate; lastCarb.throttleJoint = sj;
+        rect(91, 137, 92, 141, M_IGNITER);                                 // the spark plug, in the chest where the mixture arrives
+        sparkIdx = 3;                                                      // a spark every 40 frames
+        world.sparkPeriod = SPARK_RATES[sparkIdx];
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
+        label(60, 120, "OUTSIDE AIR (TOP)");
+        label(44, 134, "FUEL WELL + CHANNEL");
+        label(110, 128, "THROTTLE PLATE: A / D");
+        label(60, 150, "SPARK PLUG + INLET GATE");
+        label(94, 176, "EXHAUST PORT");
+        label(196, 118, "FLYWHEEL + BRAKE (THE LOAD)");
+        selectJoint(sj);
+        tool = T_SELECT;
+        phys.stampBodies();
+        gasRect(79, 130, 81, 130, M_VAPOR, 1.f);                           // gas goes in last, once the bodies are in place
+        gasRect(81, 127, 90, 135, M_AIR, supply);
+        notify("THROTTLE: RIGHT / D OPENS THE PLATE, LEFT / A CLOSES IT. OPEN IT BEFORE THE FLYWHEEL SLOWS");
     }
 
     // Compression-ignition engine: no spark, the charge heats as the piston squeezes it and fires itself.
@@ -1149,6 +1244,7 @@ struct Game {
         sel.erase(std::remove_if(sel.begin(), sel.end(), [&](int id) { return id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive; }), sel.end());
         if (std::find(sel.begin(), sel.end(), primary) == sel.end()) primary = sel.empty() ? -1 : sel[0];
     }
+    float testMotor = 2.f;                      // dev: >1.5 = use the keyboard; otherwise forces the motor/actuator input (headless tests)
     int selJoint = -1;                          // a selected joint (spring, rod, motor, pin, slider, bond), edited in the right panel
     float springFreq = 2.5f, springDamp = 0.35f; // what new springs are made with
     bool jointValid(int j) const { return j >= 0 && j < (int)phys.joints.size() && phys.joints[j].alive && phys.joints[j].group < 0 && phys.joints[j].type != J_MOUSE; }
@@ -2651,7 +2747,7 @@ struct Game {
         float m = 0;
         if (ks[SDL_SCANCODE_RIGHT] || ks[SDL_SCANCODE_D]) m += 1;
         if (ks[SDL_SCANCODE_LEFT] || ks[SDL_SCANCODE_A]) m -= 1;
-        phys.motorInput = formKind != FK_NONE ? 0.f : m;
+        phys.motorInput = testMotor <= 1.5f ? testMotor : (formKind != FK_NONE ? 0.f : m);
         phys.thrustOn = formKind == FK_NONE && (ks[SDL_SCANCODE_UP] || ks[SDL_SCANCODE_W]);
         world.sparkHeld = ks[SDL_SCANCODE_E];
 
@@ -3856,6 +3952,30 @@ int main(int argc, char** argv) {
                 int sj = g.phys.addDistance(0, Vec2(100, 60), b2, Vec2(160, 60), 3.f);
                 g.phys.stampBodies();
                 g.tool = T_SELECT; g.selectJoint(sj);
+                break;
+            }
+            case 37: {   // the carburetted engine under different throttle settings
+                g.buildCarburetedEngine();
+                g.play();
+                const float plan[10] = {1.f, 0.f, 0.f, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f, 0.f};   // open, hold, then close
+                long lastBurn = 0;
+                double openW = 0; int openN = 0;
+                for (int f = 0; f <= 3000; ++f) {
+                    g.testMotor = plan[std::min(9, f / 300)];
+                    g.update();
+                    if (f >= 600 && f < 1200) { openW += g.phys.bodies[g.lastCarb.wheel].w; ++openN; }
+                    if (f % 150 == 0) {
+                        const Body& w = g.phys.bodies[g.lastCarb.wheel];
+                        const Joint& J = g.phys.joints[g.lastCarb.throttleJoint];
+                        double neckF = 0, neckA = 0;
+                        for (int y = 129; y <= 131; ++y) for (int x = 82; x <= 87; ++x) { const Cell& c = g.world.at(x, y); if (c.t == M_VAPOR) neckF += c.amt; else if (c.t == M_AIR) neckA += c.amt; }
+                        std::printf("f=%4d key %+0.f | plate open %4.1f | flywheel w=%5.1f | fuel in the neck %.0f%% | burn events +%ld\n", f, g.phys.motorInput, g.phys.sliderPos(J) - J.s0, w.w, 100.0 * neckF / std::max(0.1, neckF + neckA), g.world.burnEvents - lastBurn);
+                        lastBurn = g.world.burnEvents;
+                    }
+                }
+                const double wOpen = openW / std::max(1, openN), wEnd = g.phys.bodies[g.lastCarb.wheel].w;
+                std::printf("[%s] with the plate open the engine holds its speed under the brake (mean %.1f rad/s)\n", wOpen > 5.0 ? "PASS" : "FAIL", wOpen);
+                std::printf("[%s] with the plate closed it starves and the flywheel runs down (%.1f rad/s at the end)\n", wEnd < 0.7 * wOpen ? "PASS" : "FAIL", wEnd);
                 break;
             }
             case 36: {   // arrow keys nudge the selection in edit mode: a body, a group, a box-selection

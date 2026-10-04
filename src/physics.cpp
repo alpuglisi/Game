@@ -339,6 +339,25 @@ int Physics::addSliderRel(int a, int b, Vec2 anchor, Vec2 axis) {
     return id;
 }
 
+float Physics::sliderPos(const Joint& j) const {
+    const Body& A = j.a >= 0 ? bodies[j.a] : worldBody;
+    if (j.b >= 0) {
+        const Body& Bb = bodies[j.b];
+        Vec2 ax = rotate(j.u, Bb.angle);
+        return dot(ax, (A.pos + rotate(j.la, A.angle)) - (Bb.pos + rotate(j.lb, Bb.angle)));
+    }
+    return dot(j.u, A.pos - j.lb);
+}
+
+void Physics::setActuator(int joint, float speed, float travelBack, float travelForward) {
+    if (joint < 0 || joint >= (int)joints.size() || !joints[joint].alive || joints[joint].type != J_SLIDER) return;
+    Joint& j = joints[joint];
+    j.drive = std::max(0.f, speed);
+    j.s0 = sliderPos(j);
+    j.sLo = -std::max(0.f, travelBack);
+    j.sHi = std::max(0.f, travelForward);
+}
+
 void Physics::setMouseTarget(int joint, Vec2 target) {
     if (joint >= 0 && joint < (int)joints.size() && joints[joint].alive) joints[joint].lb = target;
 }
@@ -435,6 +454,9 @@ void Physics::stampBodies() {
                 if (b.contains(Vec2(x + 0.5f + dx * o, y + 0.5f + dy * o))) return true;
         return false;
     };
+    // Two passes: first every covered cell is marked, then the fluid in them is pushed out. Displacing while still marking let
+    // the search for a free cell run through the part of a piston not yet marked and drop gas behind it: the seal leaked.
+    std::vector<int> displaceList;
     for (auto& b : bodies) {
         if (!b.alive) continue;
         int x0, y0, x1, y1;
@@ -445,10 +467,11 @@ void Physics::stampBodies() {
                 if (mask[i] >= 0 || !covers(b, x, y)) continue;
                 if (MATS[world->cells[i].t].kind == K_SOLID && world->cells[i].t != M_EMPTY) continue;
                 mask[i] = (int16_t)b.id;
-                if (world->cells[i].t != M_EMPTY) world->displace(x, y);
+                if (world->cells[i].t != M_EMPTY) displaceList.push_back(i);
             }
         }
     }
+    for (int i : displaceList) if (world->cells[i].t != M_EMPTY) world->displace(i % World::W, i / World::W);
 }
 
 // Gas / liquid pressure on every body, measured on the relaxed grid at the start of a step.
@@ -1057,12 +1080,14 @@ void Physics::prestepJoint(Joint& j, float h) {
         j.beta = std::clamp(dot(n, d) * 0.2f / h, -MAX_BIAS, MAX_BIAS);
         float ang = A.angle - Bb.angle - j.length;
         j.gamma = std::clamp(ang * 0.2f / h, -20.f, 20.f);
+        j.maxImp = (A.invMass + Bb.invMass) > 0.f ? j.actPower * h / (A.invMass + Bb.invMass) : 0.f;   // actPower is an acceleration the actuator can sustain
         return;
     }
     if (j.type == J_SLIDER) {
         Vec2 n(-j.u.y, j.u.x);
         j.beta = std::clamp(dot(n, A.pos - j.lb) * 0.2f / h, -MAX_BIAS, MAX_BIAS);       // perpendicular drift
         j.gamma = std::clamp((A.angle - j.length) * 0.2f / h, -20.f, 20.f);               // angle drift
+        j.maxImp = (A.invMass + Bb.invMass) > 0.f ? j.actPower * h / (A.invMass + Bb.invMass) : 0.f;   // actPower is an acceleration the actuator can sustain
         return;
     }
 
@@ -1121,6 +1146,25 @@ void Physics::prestepJoint(Joint& j, float h) {
 void Physics::solveJoint(Joint& j, float h) {
     Body& A = B(j.a);
     Body& Bb = B(j.b);
+    // the slider actuator: drive the body along its line with the arrow keys, hold it still otherwise, stay within the travel
+    auto actuate = [&](Vec2 ax) {
+        if (j.drive <= 0.f) return;
+        float iM = A.invMass + Bb.invMass;
+        if (iM <= 0.f) return;
+        float s = sliderPos(j) - j.s0;
+        float vt = motorInput * j.drive;
+        if (s >= j.sHi && vt > 0.f) vt = 0.f;
+        if (s <= j.sLo && vt < 0.f) vt = 0.f;
+        if (s > j.sHi) vt = std::min(vt, -(s - j.sHi) * 8.f);       // eased back from beyond a limit
+        if (s < j.sLo) vt = std::max(vt, (j.sLo - s) * 8.f);
+        float vrel = dot(ax, A.vel - Bb.vel);
+        float imp = (vt - vrel) / iM;
+        float old = j.accImp;
+        j.accImp = std::clamp(old + imp, -j.maxImp, j.maxImp);
+        imp = j.accImp - old;
+        A.vel += ax * (imp * A.invMass);
+        Bb.vel -= ax * (imp * Bb.invMass);
+    };
     if (j.type == J_SLIDER && j.b >= 0) {
         Vec2 ax = rotate(j.u, Bb.angle), n(-ax.y, ax.x);
         float iI = A.invI + Bb.invI;
@@ -1133,6 +1177,7 @@ void Physics::solveJoint(Joint& j, float h) {
         float P = -(cdot + j.beta) * j.effMass;
         A.vel += n * (P * A.invMass); A.w += A.invI * P * cA;
         Bb.vel -= n * (P * Bb.invMass); Bb.w -= Bb.invI * P * cB;
+        actuate(ax);
         return;
     }
     if (j.type == J_SLIDER) {
@@ -1141,6 +1186,7 @@ void Physics::solveJoint(Joint& j, float h) {
             Vec2 n(-j.u.y, j.u.x);
             A.vel -= n * (dot(n, A.vel) + j.beta);        // keep to the line
         }
+        actuate(j.u);
         return;
     }
     if (j.type == J_PIN || j.type == J_MOTOR) {
@@ -1703,7 +1749,24 @@ void Physics::emitSources(float dt) {
     for (auto& b : bodies) {
         if (!b.alive || !b.src.on) continue;
         Emitter& e = b.src;
-        e.accum = std::min(e.accum + e.rate * dt, std::max(3.f, e.rate * dt * 2.f));   // a blocked outlet does not store up a burst
+        float rate = e.rate;
+        if (e.meter && e.face >= 1 && e.face <= 4) {   // pressure-fed: idle flow plus gain x (pressure behind the block - pressure at the outlet)
+            static const Vec2 nrm[5] = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+            Vec2 nl = nrm[e.face];
+            float ext = (e.face <= 2 ? b.half.x : b.half.y) + 1.6f;
+            auto psiAt = [&](Vec2 lp) {
+                Vec2 w = b.toWorld(lp);
+                int ix = (int)std::floor(w.x), iy = (int)std::floor(w.y);
+                if (!world->inb(ix, iy) || world->bodyMask[iy * World::W + ix] >= 0) return 0.f;
+                const Cell& c = world->at(ix, iy);
+                return MATS[c.t].kind == K_GAS ? c.amt * (c.temp + 273.f) / 293.f : 0.f;
+            };
+            float front = psiAt(nl * ext), back = psiAt(nl * -ext);
+            e.dp += (back - front - e.dp) * 0.04f;
+            rate += e.gain * std::max(0.f, e.dp - 0.01f);
+        }
+        e.flow = rate;
+        e.accum = std::min(e.accum + rate * dt, std::max(3.f, rate * dt * 2.f));   // a blocked outlet does not store up a burst
         while (e.accum >= 1.f) {
             if (!emitOne(b)) break;
             e.accum -= 1.f;

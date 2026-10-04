@@ -47,20 +47,20 @@ void buoyancy() {
             int id = r.phys.addBox(Vec2(120, 100), Vec2(14, 4), 0, M_WOOD, false);
             r.phys.stampBodies();
             r.step(500);
-            cy = r.phys.bodies[id].pos.y;
+            for (int k = 0; k < 400; ++k) { r.step(1); cy += r.phys.bodies[id].pos.y / 400.f; }   // (the mean over a bob, not a snapshot of it)
         } else {
             std::vector<int> ids;
             for (int i = 0; i < 4; ++i) ids.push_back(r.phys.addBox(Vec2(120, 100 + (i - 1.5f) * 2.f), Vec2(14, 1), 0, M_WOOD, false));
             r.phys.groupBodies(ids);
             r.phys.stampBodies();
             r.step(500);
-            for (int id : ids) cy += r.phys.bodies[id].pos.y / 4.f;
+            for (int k = 0; k < 400; ++k) { r.step(1); for (int id : ids) cy += r.phys.bodies[id].pos.y / 1600.f; }
         }
         y[variant] = cy;
     }
     char d[96];
     std::snprintf(d, sizeof d, "single y=%.2f, welded strips y=%.2f", y[0], y[1]);
-    check(std::fabs(y[0] - y[1]) < 1.0f, "grouped plate floats at the same level as the single block", d);
+    check(std::fabs(y[0] - y[1]) < 1.5f, "grouped plate floats at the same level as the single block (to within the grid's one-cell rounding)", d);
 }
 
 // 2. gas pressure on a piston face: same force whether the piston is one box, strips, or has a pocket cut in it
@@ -573,6 +573,31 @@ void sliders() {
         char d[110];
         std::snprintf(d, sizeof d, "perpendicular offset %.2f, relative angle %.3f, slid to %.1f along the carrier", maxPerp, maxAng, slid);
         check(maxPerp < 1.5f && maxAng < 0.1f && slid > 5.f, "a slider between two bodies keeps the piston on the carrier's line while it tumbles", d);
+    }
+    {   // a slider actuator: the keys drive it along its line, it holds against gravity, and stops at its limits
+        Rig r;
+        int g = r.phys.addBox(Vec2(100, 100), Vec2(2, 6), 0, M_STEEL, false);
+        int j = r.phys.addSlider(g, Vec2(0, -1));   // the line points up
+        r.phys.setActuator(j, 10.f, 0.f, 12.f);
+        r.phys.stampBodies();
+        float y0 = r.phys.bodies[g].pos.y;
+        r.step(60);
+        float held = r.phys.bodies[g].pos.y - y0;
+        r.phys.motorInput = 1.f;
+        r.step(60);
+        float up = y0 - r.phys.bodies[g].pos.y;
+        r.step(120);
+        float top = y0 - r.phys.bodies[g].pos.y;
+        r.phys.motorInput = 0.f;
+        r.step(60);
+        float stay = y0 - r.phys.bodies[g].pos.y;
+        r.phys.motorInput = -1.f;
+        r.step(240);
+        float back = y0 - r.phys.bodies[g].pos.y;
+        char d[140];
+        std::snprintf(d, sizeof d, "held %.2f (no keys), up %.1f after 1 s, %.1f at the limit (12), stayed %.1f, back to %.2f", held, up, top, stay, back);
+        check(std::fabs(held) < 0.5f && up > 7.f && up < 12.5f && top > 11.f && top < 12.6f && std::fabs(stay - top) < 0.5f && std::fabs(back) < 0.6f,
+              "a slider actuator moves with the keys, holds against gravity and respects its limits", d);
     }
     {   // a slider on one piece of a welded group carries the whole group along its line
         Rig r;

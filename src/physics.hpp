@@ -15,6 +15,12 @@ struct Emitter {
     float rate = 30.f;   // cells per second
     float accum = 0.f;
     uint8_t face = 0;    // 0 = all sides, else 1:+x 2:-x 3:+y 4:-y of the body's own frame
+    // pressure-fed (a carburettor jet): rate is the idle flow and gain adds cells/s for every unit the gas pressure on the
+    // far side of the block exceeds the pressure at the outlet, so the flow follows how hard the engine is pulling
+    uint8_t meter = 0;
+    float gain = 300.f;
+    float flow = 0.f;    // the rate actually delivered last frame (for the panel and the tests)
+    float dp = 0.f;      // the pressure difference, smoothed over a few frames (an engine's intake pulses would otherwise whip the flow about)
 };
 
 // A fan / blower: pushes gas along the body's +x axis (negative strength = the other way).
@@ -73,7 +79,10 @@ struct Joint {
     int group = -1;  // >= 0: one half of a weld holding a group together
     int bondId = -1;       // >= 0: part of a frangible bond that lets go on heat or force
     float breakT = 1e9f, breakF = 1e9f, peak = 0.f;
-    float loadG = 0.f, fAvg = 0.f;   // bond rating in g (multiples of the bonded weight; 0 = use breakF) and the smoothed joint load
+    float loadG = 0.f, fAvg = 0.f;
+    // slider actuator: when drive > 0 the arrow keys (A / D) move the sliding body along its line at that speed and it holds still
+    // when they are released, between sLo and sHi cells from where it was when the actuator was set (s0)
+    float drive = 0.f, sLo = 0.f, sHi = 20.f, s0 = 0.f, actPower = 6000.f;   // bond rating in g (multiples of the bonded weight; 0 = use breakF) and the smoothed joint load
     // mouse
     float maxForce = 0;
     // solver cache
@@ -127,7 +136,9 @@ public:
     int addDistance(int a, Vec2 pa, int b, Vec2 pb, float freq);
     int addMouse(int body, Vec2 anchor);
     int addSlider(int body, Vec2 axis);   // confine a body to a line through its centre (fixed in the world); rotation locked
-    int addSliderRel(int a, int b, Vec2 anchor, Vec2 axis);   // a slides along a line fixed in b's frame (b dynamic or static)
+    int addSliderRel(int a, int b, Vec2 anchor, Vec2 axis);
+    float sliderPos(const Joint& j) const;   // how far along its line the sliding body is (raw, before the actuator's zero)
+    void setActuator(int joint, float speed, float travelBack, float travelForward);   // make a slider an arrow-key driven actuator from where it is now   // a slides along a line fixed in b's frame (b dynamic or static)
     void setMouseTarget(int joint, Vec2 target);
 
     // ---- groups ("layers"): members are welded into one rigid object but stay individually editable

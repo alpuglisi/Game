@@ -669,8 +669,20 @@ void World::voidCell(int x, int y) {
 void World::sourceCell(int x, int y) {
     Cell& c = at(x, y);
     uint8_t p = c.life;
-    if (p == 0 || p >= M_COUNT || !chance(0.3f)) return;
+    if (p == 0 || p >= M_COUNT) return;
     bool gas = MATS[p].kind == K_GAS;
+    if (!gas && !chance(0.3f)) return;
+    if (gas) {   // a gas source is a reservoir held at its own pressure: every open neighbour is topped up to it, every frame
+        for (int k = 0; k < 4; ++k) {
+            int nx = x + DX4[k], ny = y + DY4[k];
+            if (!inb(nx, ny) || bodyMask[ny * W + nx] >= 0) continue;
+            Cell& n = at(nx, ny);
+            if (n.t == M_EMPTY) { setCell(nx, ny, p); at(nx, ny).amt = c.amt; if (p == M_VAPOR && c.aux) at(nx, ny).life = c.aux; }
+            else if (n.t == p && n.amt < c.amt && (p != M_VAPOR || !c.aux || n.life == c.aux)) n.amt = c.amt;
+            else if (MATS[n.t].kind == K_GAS && n.t != p && n.t != M_FIRE && n.amt < c.amt * 0.3f) { setCell(nx, ny, p); at(nx, ny).amt = c.amt; if (p == M_VAPOR && c.aux) at(nx, ny).life = c.aux; }
+        }
+        return;
+    }
     for (int tries = 0; tries < 4; ++tries) {
         int k = rint(4);
         int nx = x + DX4[k], ny = y + DY4[k];
