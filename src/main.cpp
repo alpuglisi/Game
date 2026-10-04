@@ -210,6 +210,7 @@ struct Game {
     float lastFan = 60.f;
     uint8_t fPayload = M_WATER;
     uint8_t fFace = 0;
+    uint8_t emitFace = 1;   // outlet side of new emitters: 0 all sides, 1 +x, 2 -x, 3 +y (down), 4 -y (up), in the emitter's own frame
     float lastRate = 30.f, lastScale = 98.f;
     std::string note;
     int noteFrames = 0;
@@ -317,7 +318,9 @@ struct Game {
         for (int id : em) phys.bodies[id].src.mat = m;
     }
     void setSelectionFace(int f) {
+        emitFace = (uint8_t)f;
         std::vector<int> em = selEmitters();
+        if (!em.empty()) pushUndo("face");
         for (int id : em) phys.bodies[id].src.face = (uint8_t)f;
     }
 
@@ -641,6 +644,13 @@ struct Game {
                 line(std::string("EMITS ") + MATS[curMat].name, 0xe8eefc);
                 float rate = em.empty() ? lastRate : phys.bodies[em[0]].src.rate;
                 stepper("RATE (CELLS PER SECOND)", fmt(rate), [this] { adjustRate(-5.f); }, [this] { adjustRate(5.f); }, "HOW FAST IT PRODUCES THE MATERIAL");
+                int face = em.empty() ? emitFace : phys.bodies[em[0]].src.face;
+                line("OUTLET SIDE (THROWS ALONG IT)", 0x8fa0c0);
+                row2("RIGHT >", face == 1, [this] { setSelectionFace(1); }, "THE OUTLET IS THE +X SIDE OF THE BLOCK (ROTATES WITH IT)",
+                     "< LEFT", face == 2, [this] { setSelectionFace(2); }, "THE OUTLET IS THE -X SIDE");
+                row2("DOWN v", face == 3, [this] { setSelectionFace(3); }, "THE OUTLET IS THE BOTTOM SIDE",
+                     "UP ^", face == 4, [this] { setSelectionFace(4); }, "THE OUTLET IS THE TOP SIDE");
+                toggle("ALL SIDES", face == 0, [this] { setSelectionFace(0); }, "SPILLS FROM EVERY SIDE (NO DIRECTION)");
                 gap(4);
             }
             if (!emitCtx && (creating || editing)) {
@@ -883,8 +893,8 @@ struct Game {
         // boiler (steel) with water, heated from below through a copper floor
         rect(20, 150, 72, 205, M_STEEL);
         rect(23, 153, 69, 202, M_EMPTY);
-        rect(23, 172, 69, 202, M_WATER);
-        rect(24, 208, 68, 216, M_HEATER);
+        rect(23, 178, 69, 202, M_WATER);
+        rect(30, 208, 52, 216, M_HEATER);               // a modest burner under part of the floor, so the water lasts
         rect(23, 203, 69, 207, M_COPPER);
         // insulated (ceramic) steam line: boiler -> riser -> valve chest
         rect(70, 150, 85, 164, M_CERAMIC);
@@ -897,14 +907,19 @@ struct Game {
         rect(76, 136, 83, 162, M_EMPTY);          // riser into the chest
         rect(70, 153, 83, 162, M_EMPTY);          // steam line (carved last so nothing walls it off)
         warm(18, 136, 160, 206, 105.f);              // a warmed-up engine: cold walls would just condense the steam
-        warm(23, 172, 69, 202, 96.f);
+        warm(23, 178, 69, 202, 96.f);
+        // feedwater: an outlet in the boiler wall at the working water level. When the water reaches it the outlet is blocked
+        // and feeding stops, like a float valve, so the boiler never overfills into the steam line
+        int feed = phys.addBox(Vec2(25.5f, 177.f), Vec2(1.5f, 1.5f), 0, M_STEEL, true);
+        phys.bodies[feed].src = Emitter{true, M_WATER, 150.f, 0.f, 1};
         for (auto& b : phys.bodies) if (b.alive) b.temp = 105.f;
         rect(0, 230, World::W - 1, 239, M_CONCRETE);
         label(22, 140, "BOILER");
         label(78, 124, "VALVE CHEST + GATE");
         label(112, 170, "EXHAUST PORT + DRAIN");
         label(196, 118, "FLYWHEEL");
-        label(24, 222, "HEATER");
+        label(24, 222, "BURNER");
+        label(26, 186, "FEEDWATER (STOPS AT THE WORKING LEVEL)");
         phys.stampBodies();
     }
 
@@ -1246,7 +1261,7 @@ struct Game {
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"THICKNESS", "6"}, {"DIAMETER", "24"}, {"ANGLE", "0"}, {"STRENGTH", fmt(lastFan)}, {"VACUUM", fanVacuumDefault ? "1" : "0"}};
                 break;
             case T_EMITTER:
-                formKind = FK_EMITTER; fPayload = payload;
+                formKind = FK_EMITTER; fPayload = payload; fFace = emitFace;
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"WIDTH", "6"}, {"HEIGHT", "6"}, {"RATE", fmt(lastRate)}};
                 break;
             case T_PIPE: case T_HOSE:
@@ -2223,7 +2238,7 @@ struct Game {
                 Vec2 c = (a + b) * 0.5f;
                 if (half.x < 1.5f || half.y < 1.5f) { half = Vec2(3, 3); c = a; }
                 int id = phys.addBox(c, half, 0, bodyMat, anchored);
-                phys.bodies[id].src = Emitter{true, payload, lastRate, 0.f, 0};
+                phys.bodies[id].src = Emitter{true, payload, lastRate, 0.f, emitFace};
                 sel = {id}; primary = id; partMode = false;
                 notify(std::string("EMITTER OF ") + MATS[payload].name + " " + fmt(lastRate) + "/S. SELECT IT + ENTER TO ADJUST");
                 break;
@@ -2781,7 +2796,17 @@ struct Game {
                 if (b.src.on) {
                     fillPoly(circlePts(b.pos, std::min(2.f, std::min(b.half.x, b.half.y) * 0.6f), 10), 0xFF000000u | MATS[b.src.mat].color);
                     static const Vec2 fd[5] = {{0, 0}, {1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-                    if (b.src.face) lineWorld(b.pos, b.toWorld(Vec2(fd[b.src.face].x * b.half.x, fd[b.src.face].y * b.half.y)), SDL_Color{255, 255, 255, 220}, 2);
+                    if (b.src.face) {   // the outlet: a bright slot in the chosen face and an arrow out of it
+                        Vec2 nl = fd[b.src.face], tl(-nl.y, nl.x);
+                        float hw = std::fabs(tl.x) * b.half.x + std::fabs(tl.y) * b.half.y;   // half length of that face
+                        Vec2 fc(nl.x * b.half.x, nl.y * b.half.y);
+                        SDL_Color white{255, 255, 255, 235};
+                        lineWorld(b.toWorld(fc + tl * hw * 0.8f), b.toWorld(fc - tl * hw * 0.8f), white, 3);
+                        Vec2 tip = b.toWorld(fc + nl * 5.f), mid = b.toWorld(fc + nl * 1.f);
+                        lineWorld(mid, tip, white, 2);
+                        lineWorld(tip, b.toWorld(fc + nl * 2.5f + tl * 2.2f), white, 2);
+                        lineWorld(tip, b.toWorld(fc + nl * 2.5f - tl * 2.2f), white, 2);
+                    }
                 }
                 if (b.isStatic) {
                     lineWorld(b.toWorld(c[0]), b.toWorld(c[2]), SDL_Color{255, 255, 255, 50});
@@ -3670,6 +3695,15 @@ int main(int argc, char** argv) {
                 int sj = g.phys.addDistance(0, Vec2(100, 60), b2, Vec2(160, 60), 3.f);
                 g.phys.stampBodies();
                 g.tool = T_SELECT; g.selectJoint(sj);
+                break;
+            }
+            case 34: {
+                g.resetWorld();
+                int e = g.phys.addBox(Vec2(100, 100), Vec2(6, 6), 0, M_STEEL, true);
+                g.phys.bodies[e].src = Emitter{true, M_WATER, 60.f, 0.f, 1};
+                g.phys.addPipe(Vec2(110, 100), Vec2(180, 100), 12.f, 2.f, M_STEEL, true);
+                g.phys.stampBodies();
+                g.tool = T_SELECT; g.selectBody(e, false, false);
                 break;
             }
             case 32: g.buildShotgun(); break;

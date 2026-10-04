@@ -442,13 +442,45 @@ void World::liquid(int x, int y, int disp) {
     }
     float d = m.density;
     if (canDisplace(x, y + 1, d)) { moveTo(x, y, x, y + 1); return; }
+    // sideways a liquid flows through empty cells and shoves aside gas (the steam in a pipe is no wall to the water in it)
+    auto flowable = [&](int fx, int fy) {
+        if (isFree(fx, fy)) return true;
+        if (!inb(fx, fy) || bodyMask[fy * W + fx] >= 0) return false;
+        const Cell& n = cells[fy * W + fx];
+        return MATS[n.t].kind == K_GAS && n.t != M_FIRE;
+    };
+    // Gas pressure shoves liquid: the end of a column of liquid facing a free or gas cell moves into it when the gas
+    // behind the column is at a clearly higher pressure (a slug of water blown out of a pipe by the steam behind it).
+    {
+        auto psiAt = [&](int px, int py) -> float {
+            const Cell& n = cells[py * W + px];
+            return MATS[n.t].kind == K_GAS ? n.amt * (n.temp + 273.f) / 293.f : 0.f;
+        };
+        for (int k = 0; k < 4; ++k) {
+            int fx = x + DX4[k], fy = y + DY4[k];
+            if (!inb(fx, fy) || bodyMask[fy * W + fx] >= 0) continue;
+            const Cell& f = cells[fy * W + fx];
+            if (f.t != M_EMPTY && !(MATS[f.t].kind == K_GAS && f.t != M_FIRE)) continue;   // the front must be free or gas
+            // look back through the liquid for the gas that is pushing on it
+            int bx = x - DX4[k], by = y - DY4[k], steps = 0;
+            while (inb(bx, by) && bodyMask[by * W + bx] < 0 && MATS[cells[by * W + bx].t].kind == K_LIQUID && steps < 40) { bx -= DX4[k]; by -= DY4[k]; ++steps; }
+            if (!inb(bx, by) || bodyMask[by * W + bx] >= 0 || MATS[cells[by * W + bx].t].kind != K_GAS) continue;
+            float dp = psiAt(bx, by) - psiAt(fx, fy);
+            if (DY4[k] < 0) dp -= 0.8f;   // pushing it up against gravity needs more
+            if (DY4[k] > 0) dp += 0.8f;   // downwards gravity helps
+            if (dp < 0.25f || !chance(std::min(1.f, dp * 0.12f))) continue;
+            
+            moveTo(x, y, fx, fy);
+            return;
+        }
+    }
     int dir = (rnd() & 1) ? 1 : -1;
-    if (canDisplace(x + dir, y + 1, d) && isFree(x + dir, y)) { moveTo(x, y, x + dir, y + 1); return; }
-    if (canDisplace(x - dir, y + 1, d) && isFree(x - dir, y)) { moveTo(x, y, x - dir, y + 1); return; }
+    if (canDisplace(x + dir, y + 1, d) && flowable(x + dir, y)) { moveTo(x, y, x + dir, y + 1); return; }
+    if (canDisplace(x - dir, y + 1, d) && flowable(x - dir, y)) { moveTo(x, y, x - dir, y + 1); return; }
     for (int pass = 0; pass < 2; ++pass, dir = -dir) {
         int cx = x;
         for (int s = 1; s <= disp; ++s) {
-            if (isFree(x + dir * s, y)) cx = x + dir * s; else break;
+            if (flowable(x + dir * s, y)) cx = x + dir * s; else break;
         }
         if (cx != x) { moveTo(x, y, cx, y); return; }
     }

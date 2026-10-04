@@ -238,7 +238,7 @@ BoilerResult boiler(bool cut) {
         for (int x = cx - 15; x <= cx + 14; ++x)
             if (r.world.at(x, y).t == M_EMPTY && r.world.bodyMask[y * World::W + x] < 0) r.world.setCell(x, y, M_WATER);
     BoilerResult out{0, 0, 0, 0, 0};
-    for (int f = 0; f < 900; ++f) {
+    for (int f = 0; f < 2400; ++f) {
         r.phys.step(1.f / 60.f);
         r.world.step();
         if (f % 30 == 0)
@@ -624,6 +624,61 @@ void gunpowder() {
     check(x1 > 130.f, "burning powder drives a piston down a sealed bore", d2);
 }
 
+// liquid in pipes: it flows through gas-filled channels, and steam pressure pushes a slug of water out
+void liquids() {
+    std::printf("liquids\n");
+    {   // 1. a puddle in a steam-filled horizontal channel spreads out along it
+        Rig r;
+        for (int x = 100; x <= 160; ++x) { r.world.setCell(x, 99, M_STEEL); r.world.setCell(x, 106, M_STEEL); }
+        r.world.setCell(99, 100, M_STEEL); r.world.setCell(161, 100, M_STEEL);
+        for (int y = 100; y <= 105; ++y) for (int x = 100; x <= 160; ++x) { r.world.setCell(x, y, M_STEEL); }
+        for (int x = 100; x <= 160; ++x) for (int y = 103; y <= 105; ++y) r.world.setCell(x, y, M_EMPTY);   // channel 3 high
+        for (int y = 103; y <= 105; ++y) { r.world.setCell(99, y, M_STEEL); r.world.setCell(161, y, M_STEEL); }
+        r.gas(100, 103, 160, 105, M_STEAM, 0.6f, 105.f);
+        for (int y = 104; y <= 105; ++y) for (int x = 100; x <= 109; ++x) { r.world.setCell(x, y, M_WATER); }
+        r.step(240);
+        int minx = 999, maxx = -1; for (int y = 103; y <= 105; ++y) for (int x = 100; x <= 160; ++x) if (r.world.at(x, y).t == M_WATER) { minx = std::min(minx, x); maxx = std::max(maxx, x); }
+        char d[96]; std::snprintf(d, sizeof d, "20 cells of water spread over x %d..%d", minx, maxx);
+        check(maxx - minx > 15, "a puddle spreads along a channel full of steam instead of sitting in a heap", d);
+    }
+    {   // 2. a slug of water in a pipe is blown out by the steam pressure behind it
+        Rig r;
+        for (int x = 100; x <= 200; ++x) { for (int y = 100; y <= 102; ++y) r.world.setCell(x, y, M_STEEL); for (int y = 107; y <= 109; ++y) r.world.setCell(x, y, M_STEEL); }
+        for (int y = 100; y <= 109; ++y) for (int x = 96; x <= 99; ++x) r.world.setCell(x, y, M_STEEL);   // closed behind
+        r.gas(100, 103, 120, 106, M_AIR, 3.0f, 20.f);    // compressed gas behind...
+        for (int y = 103; y <= 106; ++y) for (int x = 121; x <= 126; ++x) r.world.setCell(x, y, M_WATER);   // ...a slug of water...
+        r.step(200);                                                                                       // ...and open pipe in front
+        int stay = 0, n = 0; for (int y = 103; y <= 106; ++y) for (int x = 100; x <= 200; ++x) if (r.world.at(x, y).t == M_WATER) { ++n; if (x <= 130) ++stay; }
+        char d[96]; std::snprintf(d, sizeof d, "of 24 cells, %d still within 5 cells of where the slug started (%d left in the pipe)", stay, n);
+        check(stay <= 8, "gas pressure behind a slug of water blows it down the pipe", d);
+    }
+}
+
+// emitters: a single-sided outlet puts its material out of that side only, thrown a few cells along the normal
+void emitters() {
+    std::printf("emitters\n");
+    for (int variant = 0; variant < 3; ++variant) {
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);   // so the cells stay where they appear
+        float ang = variant == 1 ? 1.5707963f : 0.f;   // variant 1: the block turned a quarter turn, so its right side faces down
+        int e = r.phys.addBox(Vec2(150.f, 150.f), Vec2(4.f, 3.f), ang, M_STEEL, true);
+        r.phys.bodies[e].src = Emitter{true, M_WATER, 120.f, 0.f, (uint8_t)(variant == 2 ? 0 : 1)};
+        r.phys.stampBodies();
+        for (int i = 0; i < 30; ++i) r.phys.step(1.f / 60.f);   // the physics step runs the emitters; leaving the grid frozen shows where the cells appear
+        int good = 0, total = 0, maxd = 0;
+        for (int y = 130; y <= 170; ++y) for (int x = 130; x <= 170; ++x) if (r.world.at(x, y).t == M_WATER && r.world.bodyMask[y * World::W + x] < 0) {
+            ++total;
+            bool right = x >= 154 && std::abs(y - 150) <= 3, down = y >= 153 && std::abs(x - 150) <= 4;
+            if (variant == 0 ? right : variant == 1 ? down : false) ++good;
+            maxd = std::max(maxd, std::max(std::abs(x - 150), std::abs(y - 150)));
+        }
+        char d[110]; std::snprintf(d, sizeof d, "%d cells out, %d of them in front of the outlet, the furthest %d cells from the block's centre", total, good, maxd);
+        if (variant == 0) check(total > 10 && good == total && maxd >= 8, "a right-hand outlet puts everything out of the right-hand side, thrown several cells", d);
+        if (variant == 1) check(total > 10 && good == total, "the outlet turns with the block", d);
+        if (variant == 2) std::printf("  [info] all-sides emitter for comparison: %s\n", d);
+    }
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -641,6 +696,8 @@ int runSelfTests() {
     jet();
     sliders();
     gunpowder();
+    liquids();
+    emitters();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

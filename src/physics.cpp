@@ -1585,9 +1585,12 @@ void Physics::applyFans(float dt) {
 // ------------------------------------------------------------------ emitters
 bool Physics::emitOne(Body& b) {
     const Emitter& e = b.src;
+    // A single-sided outlet throws its material out along the face's normal: the cell appears a random distance out
+    // (further for a higher rate), stopping short of the first obstruction, so a pipe or channel in front of the outlet is filled.
+    const float reach = e.face ? std::clamp(2.f + e.rate * 0.06f, 2.f, 14.f) : 0.f;
     for (int tries = 0; tries < 20; ++tries) {
         auto rf = [&]() { return (float)(world->rnd() & 0xFFFF) / 65535.f; };
-        Vec2 lp;
+        Vec2 lp, nl;   // start point on the face (local) and the outward direction (local)
         if (b.shape == SHAPE_BOX) {
             int f = e.face;
             if (f == 0) {  // choose a face in proportion to its length
@@ -1595,28 +1598,45 @@ bool Physics::emitOne(Body& b) {
                 f = r < px ? 1 : r < 2 * px ? 2 : r < 2 * px + py ? 3 : 4;
             }
             float u = (rf() * 2.f - 1.f) * 0.9f, off = 1.1f;
-            if (f == 1) lp = Vec2(b.half.x + off, u * b.half.y);
-            else if (f == 2) lp = Vec2(-b.half.x - off, u * b.half.y);
-            else if (f == 3) lp = Vec2(u * b.half.x, b.half.y + off);
-            else lp = Vec2(u * b.half.x, -b.half.y - off);
+            if (f == 1) { nl = Vec2(1, 0); lp = Vec2(b.half.x + off, u * b.half.y); }
+            else if (f == 2) { nl = Vec2(-1, 0); lp = Vec2(-b.half.x - off, u * b.half.y); }
+            else if (f == 3) { nl = Vec2(0, 1); lp = Vec2(u * b.half.x, b.half.y + off); }
+            else { nl = Vec2(0, -1); lp = Vec2(u * b.half.x, -b.half.y - off); }
         } else {
             float base = e.face == 1 ? 0.f : e.face == 2 ? PI : e.face == 3 ? PI * 0.5f : -PI * 0.5f;
             float a = e.face == 0 ? rf() * 2 * PI : base + (rf() - 0.5f) * 1.2f;
-            lp = Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.1f);
+            nl = Vec2(std::cos(a), std::sin(a));
+            lp = nl * (b.radius + 1.1f);
         }
-        Vec2 w = b.toWorld(lp);
+        Vec2 w0 = b.toWorld(lp);
+        Vec2 dir = rotate(nl, b.angle);
+        const bool gasOut = MATS[e.mat].kind == K_GAS;
+        // walk out along the normal while the way is clear (empty cells or gas)
+        float dist = reach * rf();
+        Vec2 w = w0;
+        auto passable = [&](Vec2 p) {
+            int px = (int)std::floor(p.x), py = (int)std::floor(p.y);
+            if (!world->inb(px, py) || world->bodyMask[py * World::W + px] >= 0) return false;
+            const Cell& c = world->at(px, py);
+            return c.t == M_EMPTY || (MATS[c.t].kind == K_GAS && c.t != M_FIRE);
+        };
+        for (float d = 1.f; d <= dist; d += 1.f) {
+            Vec2 p = w0 + dir * d;
+            if (!passable(p)) break;
+            w = p;
+        }
         int x = (int)std::floor(w.x), y = (int)std::floor(w.y);
         if (!world->inb(x, y) || world->bodyMask[y * World::W + x] >= 0) continue;
         Cell& c = world->at(x, y);
         if (c.t == M_EMPTY) {
             world->setCell(x, y, e.mat);
-            if (MATS[e.mat].kind == K_GAS) world->at(x, y).amt = 1.f;
+            if (gasOut) world->at(x, y).amt = 1.f;
             return true;
         }
-        if (MATS[e.mat].kind == K_GAS && c.t == e.mat && c.amt < 1.f) { c.amt = std::min(1.f, c.amt + 0.5f); return true; }
+        if (gasOut && c.t == e.mat && c.amt < 1.f) { c.amt = std::min(1.f, c.amt + 0.5f); return true; }
         if (MATS[c.t].kind == K_GAS && c.t != e.mat && c.t != M_FIRE) {   // an outlet in a gas-filled space (a duct full of air) still pushes its material out, displacing the gas
             world->setCell(x, y, e.mat);
-            if (MATS[e.mat].kind == K_GAS) world->at(x, y).amt = 1.f;
+            if (gasOut) world->at(x, y).amt = 1.f;
             return true;
         }
     }
