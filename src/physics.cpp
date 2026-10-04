@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 
 namespace {
 constexpr float PI = 3.14159265f;
@@ -121,27 +122,35 @@ bool Physics::load(Reader& r) {
     Vec2 g = r.pod<Vec2>();
     int sc = r.pod<int>(), gc = r.pod<int>(), bc = r.pod<int>();
     if (!r.ok) return false;
-    // a damaged or foreign file must not be able to crash the engine: check every index before using any of it
+    // a damaged or foreign file must not be able to crash the engine or poison the world: check every index and every
+    // number before using any of it. A NaN anywhere spreads through contacts and heat to everything it touches.
+    auto finite = [](std::initializer_list<float> xs) { for (float x : xs) if (!std::isfinite(x)) return false; return true; };
+    if (!finite({g.x, g.y})) return false;
     const int nb = (int)b.size();
     int maxGroup = -1;
     for (auto& bd : b) {
-        if (bd.alive) {
-            if (bd.mat >= M_COUNT || (bd.shape != SHAPE_BOX && bd.shape != SHAPE_CIRCLE) || bd.src.mat >= M_COUNT ||
-                !std::isfinite(bd.pos.x) || !std::isfinite(bd.pos.y) || !std::isfinite(bd.half.x) || !std::isfinite(bd.half.y) || !std::isfinite(bd.radius) ||
-                bd.group >= 100000) return false;
-            maxGroup = std::max(maxGroup, bd.group);
-        }
+        if (!bd.alive) continue;
+        if (bd.mat >= M_COUNT || (bd.shape != SHAPE_BOX && bd.shape != SHAPE_CIRCLE) || bd.src.mat >= M_COUNT || bd.group >= 100000 ||
+            !finite({bd.pos.x, bd.pos.y, bd.vel.x, bd.vel.y, bd.angle, bd.w, bd.half.x, bd.half.y, bd.radius, bd.temp, bd.src.rate, bd.src.accum, bd.fan.strength}))
+            return false;
+        maxGroup = std::max(maxGroup, bd.group);
     }
     for (auto& jt : j) {
         if (!jt.alive) continue;
+        if ((int)jt.type < 0 || jt.type > J_SLIDER) return false;
+        // every constructor keeps the world (-1) on the b side, and the engine indexes bodies[a] without looking. A joint
+        // to nothing, to a body that is not there, or with a damaged number in it is dropped, not fatal.
         if (jt.a < -1 || jt.a >= nb || jt.b < -1 || jt.b >= nb || (jt.a >= 0 && !b[jt.a].alive) || (jt.b >= 0 && !b[jt.b].alive) ||
-            jt.group >= 100000 || (jt.type != J_MOUSE && jt.a < 0 && jt.b < 0)) jt.alive = false;   // a joint to nothing is dropped, not fatal
-        else if (jt.type > J_SLIDER) return false;
+            jt.group >= 100000 || (jt.type != J_MOUSE && jt.a < 0) ||
+            !finite({jt.la.x, jt.la.y, jt.lb.x, jt.lb.y, jt.u.x, jt.u.y, jt.length, jt.freq, jt.damping, jt.speed, jt.power, jt.maxForce,
+                     jt.breakT, jt.breakF, jt.loadG, jt.fAvg}))
+            jt.alive = false;
     }
     bodies = b; joints = j; gravity = g; seqCounter = sc; groupCounter = std::max(gc, maxGroup + 1); bondCounter = bc;
     contacts.clear(); hydro.clear(); noCollide.clear(); hits.clear(); primerStrikes.clear(); flashes.clear();
     eventFrames = 0; lastEvent.clear();
     for (auto& jt : joints) if (jt.alive && jt.type == J_MOUSE) jt.alive = false;
+    for (auto& bd : bodies) if (bd.alive) finalize(bd);   // mass, inertia and bounds are rebuilt from the shape, not trusted
     stampBodies();
     return true;
 }
@@ -435,6 +444,10 @@ void Physics::stampBodies() {
                 if (b.contains(Vec2(x + 0.5f + dx * o, y + 0.5f + dy * o))) return true;
         return false;
     };
+    // Two passes: every body's cover is marked first, and only then is the material under it moved out. Displacing while
+    // still marking let a fluid be shoved into a cell this body was about to cover, and from there on through the body:
+    // a piston moving left or up dropped the gas it swept up behind itself, and its seal leaked.
+    std::vector<int> buried;
     for (auto& b : bodies) {
         if (!b.alive) continue;
         int x0, y0, x1, y1;
@@ -445,10 +458,17 @@ void Physics::stampBodies() {
                 if (mask[i] >= 0 || !covers(b, x, y)) continue;
                 if (MATS[world->cells[i].t].kind == K_SOLID && world->cells[i].t != M_EMPTY) continue;
                 mask[i] = (int16_t)b.id;
-                if (world->cells[i].t != M_EMPTY) world->displace(x, y);
+                if (world->cells[i].t != M_EMPTY) buried.push_back(i);
             }
         }
     }
+    // Innermost cells first: a cell on the leading face can then pass its fluid on through the body's margin cells (still
+    // holding fluid of their own) to the open cells beyond them, instead of finding every neighbour masked.
+    std::sort(buried.begin(), buried.end(), [&](int i, int k) {
+        auto d = [&](int c) { const Body& b = bodies[mask[c]]; return lengthSq(Vec2((c % World::W) + 0.5f, (c / World::W) + 0.5f) - b.pos); };
+        return d(i) < d(k);
+    });
+    for (int i : buried) world->displace(i % World::W, i / World::W);
 }
 
 // Gas / liquid pressure on every body, measured on the relaxed grid at the start of a step.
@@ -769,41 +789,48 @@ void Physics::sampleFluids() {
     // Exposure of a body to liquid / grains is read from points just outside its outline. Members of a rigid
     // group are one object: points that fall inside a sibling's cover are interior and ignored, and the group's
     // totals are shared by every member, so a welded plate floats like the single box it replaces.
-    struct Acc { int wet = 0, gran = 0, n = 0; float rho = 0; Vec2 cen; };
+    // Each sample stands for the stretch of the body's own outline it sits on and is weighted by it, so a short edge
+    // with one sample and a long one with ten contribute in proportion to their length: a plate welded from thin strips
+    // (many short side edges) then floats where the single block does.
+    struct Acc { float wet = 0, gran = 0, n = 0, rho = 0; Vec2 cen; };
     std::vector<Acc> groupAcc;
     std::vector<Acc> own(bodies.size());
     for (auto& b : bodies) {
         b.wetFrac = b.granFrac = b.fluidRho = 0;
         if (!b.alive || b.isStatic) continue;
-        std::vector<Vec2> pts;
+        struct SP { Vec2 p; float w; };
+        std::vector<SP> pts;
         if (b.shape == SHAPE_CIRCLE) {
             int n = std::clamp((int)(2 * PI * (b.radius + 1.5f) / 3.f), 8, 48);
+            float w = 2 * PI * b.radius / n;
             for (int i = 0; i < n; ++i) {
                 float a = 2 * PI * i / n;
-                pts.push_back(b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f));
+                pts.push_back({b.pos + Vec2(std::cos(a), std::sin(a)) * (b.radius + 1.5f), w});
             }
         } else {
             float hx = b.half.x + 1.5f, hy = b.half.y + 1.5f;
             Vec2 c[4] = {{-hx, -hy}, {hx, -hy}, {hx, hy}, {-hx, hy}};
             for (int e = 0; e < 4; ++e) {
                 Vec2 p0 = c[e], p1 = c[(e + 1) & 3];
+                float len = (e & 1) ? 2.f * b.half.y : 2.f * b.half.x;   // the body's own edge length
                 int n = std::max(1, (int)(length(p1 - p0) / 3.f));
-                for (int i = 0; i < n; ++i) pts.push_back(b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)));
+                for (int i = 0; i < n; ++i) pts.push_back({b.toWorld(p0 + (p1 - p0) * ((i + 0.5f) / n)), len / n});
             }
         }
         Acc& ac = own[b.id];
-        for (Vec2 p : pts) {
+        for (const SP& sp : pts) {
+            Vec2 p = sp.p;
             int ix = (int)std::floor(p.x), iy = (int)std::floor(p.y);
             if (!world->inb(ix, iy)) continue;
             if (b.group >= 0) {
                 int m = world->bodyMask[iy * World::W + ix];
                 if (m >= 0 && m < (int)bodies.size() && bodies[m].group == b.group) continue;  // interior to the group
             }
-            ++ac.n;
+            ac.n += sp.w;
             uint8_t t = world->at(ix, iy).t;
             Kind k = MATS[t].kind;
-            if (k == K_LIQUID) { ++ac.wet; ac.rho += MATS[t].density; ac.cen += p; }
-            else if (k == K_POWDER) ++ac.gran;
+            if (k == K_LIQUID) { ac.wet += sp.w; ac.rho += MATS[t].density * sp.w; ac.cen += p * sp.w; }
+            else if (k == K_POWDER) ac.gran += sp.w;
         }
         if (b.group >= 0) {
             if ((int)groupAcc.size() <= b.group) groupAcc.resize(b.group + 1);
@@ -814,10 +841,10 @@ void Physics::sampleFluids() {
     for (auto& b : bodies) {
         if (!b.alive || b.isStatic) continue;
         const Acc& ac = b.group >= 0 ? groupAcc[b.group] : own[b.id];
-        if (ac.n <= 0) continue;
-        b.wetFrac = (float)ac.wet / ac.n;
-        b.granFrac = (float)ac.gran / ac.n;
-        if (ac.wet) { b.fluidRho = ac.rho / ac.wet; b.wetCentroid = ac.cen / (float)ac.wet; }
+        if (ac.n <= 0.f) continue;
+        b.wetFrac = ac.wet / ac.n;
+        b.granFrac = ac.gran / ac.n;
+        if (ac.wet > 0.f) { b.fluidRho = ac.rho / ac.wet; b.wetCentroid = ac.cen / ac.wet; }
     }
 }
 
@@ -865,7 +892,7 @@ void Physics::terrainContacts(Body& b) {
             Vec2 q = p + n * t;
             if (!world->isTerrain((int)std::floor(q.x), (int)std::floor(q.y))) { depth = t - 0.25f; break; }
         }
-        if (world->at(ix, iy).t == M_PRIMER) {
+        if (world->inb(ix, iy) && world->at(ix, iy).t == M_PRIMER) {   // the border is terrain too: a sample out there has no cell
             float closing = -dot(b.vel + cross(b.w, p - b.pos), n);
             if (closing > PRIMER_SPEED && 0.5f * b.mass * closing * closing >= PRIMER_ENERGY) primerStrikes.push_back({ix, iy});
         }
@@ -1055,14 +1082,14 @@ void Physics::prestepJoint(Joint& j, float h) {
         j.effMass = A.invMass + Bb.invMass + A.invI * cA * cA + Bb.invI * cB * cB;
         j.effMass = j.effMass > 0.f ? 1.f / j.effMass : 0.f;
         j.beta = std::clamp(dot(n, d) * 0.2f / h, -MAX_BIAS, MAX_BIAS);
-        float ang = A.angle - Bb.angle - j.length;
+        float ang = std::remainder(A.angle - Bb.angle - j.length, 2.f * PI);   // angles wrap: take the short way round
         j.gamma = std::clamp(ang * 0.2f / h, -20.f, 20.f);
         return;
     }
     if (j.type == J_SLIDER) {
         Vec2 n(-j.u.y, j.u.x);
-        j.beta = std::clamp(dot(n, A.pos - j.lb) * 0.2f / h, -MAX_BIAS, MAX_BIAS);       // perpendicular drift
-        j.gamma = std::clamp((A.angle - j.length) * 0.2f / h, -20.f, 20.f);               // angle drift
+        j.beta = std::clamp(dot(n, A.pos - j.lb) * 0.2f / h, -MAX_BIAS, MAX_BIAS);                            // perpendicular drift
+        j.gamma = std::clamp(std::remainder(A.angle - j.length, 2.f * PI) * 0.2f / h, -20.f, 20.f);        // angle drift
         return;
     }
 
@@ -1285,6 +1312,7 @@ void Physics::substep(float h) {
         b.w = std::clamp(b.w, -60.f, 60.f);
         b.pos += b.vel * h;
         b.angle += b.w * h;
+        if (b.angle > PI || b.angle < -PI) b.angle = std::remainder(b.angle, 2.f * PI);   // a wheel that has spun for an hour keeps its precision
         if (!std::isfinite(b.pos.x) || !std::isfinite(b.pos.y) || b.pos.y > World::H + 200 || b.pos.y < -400 ||
             b.pos.x < -200 || b.pos.x > World::W + 200)
             removeBody(b.id);
@@ -1921,21 +1949,43 @@ void Physics::reshape(int id, Vec2 pos, Vec2 half, float radius, float angle, ui
     if (b.group >= 0) rebuildGroup(b.group);
 }
 
+// Move / rotate a whole group rigidly about `primary`. Whatever is anchored in the world on a member travels with it: pins,
+// rods, bonds, and a slider's rail, which turns with the group. A joint reaching a body outside the group keeps its world
+// anchor, as translateBodies does, so nothing snaps when the simulation next runs.
 void Physics::transformGroup(int primary, Vec2 newPos, float newAngle) {
     if (primary < 0 || primary >= (int)bodies.size() || !bodies[primary].alive) return;
     Vec2 oldPos = bodies[primary].pos;
     float dA = newAngle - bodies[primary].angle;
     std::vector<int> m = bodies[primary].group >= 0 ? groupMembers(bodies[primary].group) : std::vector<int>{primary};
+    std::vector<char> in(bodies.size(), 0);
+    std::vector<Body> old(bodies.size());
+    auto move = [&](Vec2 p) { return newPos + rotate(p - oldPos, dA); };
     for (int id : m) {
         Body& b = bodies[id];
-        b.pos = newPos + rotate(b.pos - oldPos, dA);
+        in[id] = 1; old[id] = b;
+        b.pos = move(b.pos);
         b.angle += dA;
         b.vel = Vec2(); b.w = 0;
     }
-    for (auto& j : joints)  // pins to the world travel with their body
-        if (j.alive && j.group < 0 && j.b < 0 && j.a >= 0 && j.type != J_SLIDER && j.type != J_MOUSE &&
-            std::find(m.begin(), m.end(), j.a) != m.end())
-            j.lb = bodies[j.a].toWorld(j.la);
+    for (auto& j : joints) {
+        if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+        bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
+        if (!ia && !ib) continue;
+        if (ia && ib) continue;   // both ends moved as one: nothing changes in their frames
+        if (j.b < 0) {            // anchored in the world: the anchor (or the rail) travels with the group
+            j.lb = move(j.lb);
+            if (j.type == J_SLIDER) { j.u = rotate(j.u, dA); j.length += dA; }
+            continue;
+        }
+        // one end moved and the other body stayed: keep the world anchor
+        if (ia) j.la = bodies[j.a].toLocal(old[j.a].toWorld(j.la));
+        if (ib) j.lb = bodies[j.b].toLocal(old[j.b].toWorld(j.lb));
+        if (j.type == J_SLIDER) {   // the locked relative angle follows the body that turned; a rail in the carrier's frame stays put in the world
+            if (ia) j.length += dA;
+            else { j.length -= dA; j.u = rotate(j.u, -dA); }
+        }
+        if (j.type == J_DISTANCE && j.freq <= 0.f) j.length = length(jointAnchorB(j) - jointAnchorA(j));   // a rod keeps its new length; a spring its natural one
+    }
 }
 
 int Physics::addPipe(Vec2 a, Vec2 b, float outerD, float wall, uint8_t mat, bool stat) {

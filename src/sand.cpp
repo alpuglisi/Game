@@ -953,9 +953,15 @@ void World::displace(int x, int y) {
             int nx = px + DX4[d], ny = py + DY4[d];
             if (!inb(nx, ny)) continue;
             int j = ny * W + nx;
-            if (mark[j] == stamp || bodyMask[j] >= 0) continue;
+            if (mark[j] == stamp) continue;
             mark[j] = stamp;
             Cell& n = cells[j];
+            if (bodyMask[j] >= 0) {
+                // under a body: never a destination. A covered cell still holding the same fluid is one the body has just
+                // moved onto and is about to clear as well, so the fluid may pass through it to the open cells beyond.
+                if (n.t != M_EMPTY && n.t != M_FIRE && sameFluid(n, c)) queue.push_back(j);
+                continue;
+            }
             if (n.t == M_EMPTY) { place(j); return; }
             if (n.t != M_FIRE && sameFluid(n, c)) {
                 if (k == K_GAS) {

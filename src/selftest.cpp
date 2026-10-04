@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 #include "physics.hpp"
@@ -43,18 +44,21 @@ void buoyancy() {
         r.world.fillRect(199, 100, 200, 153, M_WALL);
         r.world.fillRect(42, 110, 198, 149, M_WATER);
         float cy = 0;
+        // the plate bobs for a while: compare the mean height over the last two seconds, not one snapshot
+        auto settle = [&](int id) { r.step(480); double s = 0; for (int i = 0; i < 120; ++i) { r.step(1); s += r.phys.bodies[id].pos.y; } return (float)(s / 120); };
         if (variant == 0) {
             int id = r.phys.addBox(Vec2(120, 100), Vec2(14, 4), 0, M_WOOD, false);
             r.phys.stampBodies();
-            r.step(500);
-            cy = r.phys.bodies[id].pos.y;
+            cy = settle(id);
         } else {
             std::vector<int> ids;
             for (int i = 0; i < 4; ++i) ids.push_back(r.phys.addBox(Vec2(120, 100 + (i - 1.5f) * 2.f), Vec2(14, 1), 0, M_WOOD, false));
             r.phys.groupBodies(ids);
             r.phys.stampBodies();
-            r.step(500);
-            for (int id : ids) cy += r.phys.bodies[id].pos.y / 4.f;
+            r.step(480);
+            double s = 0;
+            for (int i = 0; i < 120; ++i) { r.step(1); for (int id : ids) s += r.phys.bodies[id].pos.y / 4.0; }
+            cy = (float)(s / 120);
         }
         y[variant] = cy;
     }
@@ -770,6 +774,114 @@ void rigidReview() {
     }
 }
 
+// fixes from the second review of the rigid-body engine
+void rigidReview2() {
+    std::printf("rigid-body review fixes, round two\n");
+    const float kPi = 3.14159265f;
+    {   // a body against the border of the world: its outline samples lie outside the grid, where the primer check read the cell array
+        Rig r;
+        r.phys.gravity = Vec2(0, -260.f);
+        int b = r.phys.addBox(Vec2(600, 2.f), Vec2(6, 6), 0, M_STEEL, false);
+        r.phys.stampBodies();
+        r.step(60);
+        char d[96]; std::snprintf(d, sizeof d, "alive %d, resting at y=%.2f", (int)r.phys.bodies[b].alive, r.phys.bodies[b].pos.y);
+        check(r.phys.bodies[b].alive && r.phys.bodies[b].pos.y > 5.f && r.phys.bodies[b].pos.y < 8.f, "a body pressed against the top border of the world rests on it", d);
+    }
+    {   // a piston sweeping gas up keeps all of it in front of itself whichever way it moves (stamping used to push it through)
+        auto bore = [](Rig& r) {
+            r.phys.gravity = Vec2(0, 0);
+            r.world.fillRect(40, 90, 110, 94, M_WALL); r.world.fillRect(40, 105, 110, 109, M_WALL);
+            r.world.fillRect(100, 95, 110, 104, M_WALL); r.world.fillRect(40, 95, 49, 104, M_WALL);
+        };
+        auto gas = [](Rig& r, int x0, int x1) { float g = 0; for (int y = 95; y <= 104; ++y) for (int x = x0; x <= x1; ++x) if (MATS[r.world.at(x, y).t].kind == K_GAS) g += r.world.at(x, y).amt; return g; };
+        float behind[2], lost[2];
+        for (int dir = 0; dir < 2; ++dir) {   // 0: moving left, 1: moving right
+            Rig r; bore(r);
+            int p = r.phys.addBox(Vec2(dir ? 70.f : 80.f, 100), Vec2(6, 5), 0, M_STEEL, false);
+            r.phys.stampBodies();
+            int gx0 = dir ? 76 : 50, gx1 = dir ? 99 : 73;
+            for (int y = 95; y <= 104; ++y) for (int x = gx0; x <= gx1; ++x) if (r.world.bodyMask[y * World::W + x] < 0) { r.world.setCell(x, y, M_AIR); r.world.at(x, y).amt = 1.f; }
+            float total0 = gas(r, 50, 99);
+            for (int i = 0; i < 10; ++i) { r.phys.bodies[p].pos.x += dir ? 1.f : -1.f; r.phys.stampBodies(); }   // a cell a frame, as the solver would move it
+            float px = r.phys.bodies[p].pos.x;
+            behind[dir] = dir ? gas(r, 50, (int)(px - 7.f)) : gas(r, (int)(px + 7.f), 99);
+            lost[dir] = total0 - gas(r, 50, 99);
+        }
+        char d[128]; std::snprintf(d, sizeof d, "gas behind the piston: moving left %.1f, moving right %.1f; gas lost: %.1f / %.1f of about 240", behind[0], behind[1], lost[0], lost[1]);
+        check(behind[0] < 0.5f && behind[1] < 0.5f && std::fabs(lost[0]) < 0.5f && std::fabs(lost[1]) < 0.5f, "a piston keeps the gas it sweeps up in front of itself, and loses none", d);
+    }
+    {   // the group edit form (move / rotate): a world slider, a world pin and a rod to the world travel with the group
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int a = r.phys.addBox(Vec2(100, 100), Vec2(8, 4), 0, M_STEEL, false);
+        int c = r.phys.addBox(Vec2(112, 100), Vec2(4, 8), 0, M_STEEL, false);
+        r.phys.groupBodies({a, c});
+        r.phys.addSlider(a, Vec2(1, 0));
+        int e = r.phys.addBox(Vec2(300, 100), Vec2(8, 4), 0, M_STEEL, false);
+        int f = r.phys.addBox(Vec2(312, 100), Vec2(4, 8), 0, M_STEEL, false);
+        r.phys.groupBodies({e, f});
+        r.phys.addPin(Vec2(296, 100), e, -1, false, false);
+        r.phys.addDistance(f, Vec2(312, 108), -1, Vec2(312, 140), 0.f);
+        r.phys.stampBodies();
+        r.phys.transformGroup(a, Vec2(100, 150), 0.7f);
+        r.phys.transformGroup(e, Vec2(330, 160), -0.4f);
+        int ids[4] = {a, c, e, f};
+        Vec2 p[4]; for (int i = 0; i < 4; ++i) p[i] = r.phys.bodies[ids[i]].pos;
+        r.step(120);
+        float drift = 0.f;
+        for (int i = 0; i < 4; ++i) drift = std::max(drift, length(r.phys.bodies[ids[i]].pos - p[i]));
+        float angErr = std::max(std::fabs(r.phys.bodies[a].angle - 0.7f), std::fabs(r.phys.bodies[e].angle + 0.4f));
+        char d[96]; std::snprintf(d, sizeof d, "largest drift %.2f cells, angle error %.3f rad after 2 s", drift, angErr);
+        check(drift < 0.3f && angErr < 0.01f, "a moved and rotated group stays where the form put it (slider, pin and rod came along)", d);
+    }
+    {   // angles wrap: a wheel that spins for long stays within one turn, and sliders take the short way round the wrap
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        int wheel = r.phys.addCircle(Vec2(100, 100), 10.f, M_RUBBER, false, true);
+        r.phys.addPin(Vec2(100, 100), wheel, -1, true, false);                                  // motor at 6 rad/s
+        int carrier = r.phys.addBox(Vec2(300, 100), Vec2(20, 3), 0, M_STEEL, false);
+        int piston = r.phys.addBox(Vec2(300, 100), Vec2(3, 3), kPi - 0.1f, M_STEEL, false);   // locked 3.04 rad from the carrier: the two wrap at different moments
+        r.phys.addSliderRel(piston, carrier, Vec2(300, 100), Vec2(1, 0));
+        r.phys.addPin(Vec2(300, 100), carrier, piston, false, false);
+        r.phys.bodies[carrier].w = r.phys.bodies[piston].w = 6.f;
+        int locked = r.phys.addBox(Vec2(500, 100), Vec2(6, 6), 3.3f, M_STEEL, false);         // a world slider on a body whose angle is already past pi
+        r.phys.addSlider(locked, Vec2(1, 0));
+        r.phys.stampBodies();
+        float maxWheel = 0.f, maxRel = 0.f, maxW = 0.f;
+        for (int i = 0; i < 1200; ++i) {
+            r.phys.step(1.f / 60.f);
+            maxWheel = std::max(maxWheel, std::fabs(r.phys.bodies[wheel].angle));
+            maxRel = std::max(maxRel, std::fabs(std::remainder(r.phys.bodies[piston].angle - r.phys.bodies[carrier].angle - (kPi - 0.1f), 2 * kPi)));
+            maxW = std::max(maxW, std::fabs(r.phys.bodies[locked].w));
+        }
+        char d[160]; std::snprintf(d, sizeof d, "wheel |angle| <= %.2f, slider relative-angle error <= %.3f, locked body |w| <= %.2f, carrier still at %.1f rad/s", maxWheel, maxRel, maxW, r.phys.bodies[carrier].w);
+        check(maxWheel < kPi + 0.01f && maxRel < 0.05f && maxW < 0.5f && std::fabs(r.phys.bodies[carrier].w) > 3.f, "angles stay within one turn and sliders hold their angle across the wrap", d);
+    }
+    {   // damaged saves: a pin with the world on its a side is dropped, a NaN is refused, mass and inertia are rebuilt from the shape
+        Rig r;
+        r.world.fillRect(0, 200, 400, 210, M_WALL);
+        int a = r.phys.addBox(Vec2(100, 195), Vec2(5, 5), 0, M_STEEL, false);
+        int c = r.phys.addBox(Vec2(100, 185), Vec2(5, 5), 0, M_STEEL, false);
+        int j = r.phys.addPin(Vec2(100, 190), a, c, false, false);
+        r.phys.joints[j].a = -1;
+        r.phys.bodies[a].invMass = std::numeric_limits<float>::infinity();
+        std::vector<uint8_t> buf; { Writer w{buf}; r.phys.save(w); }
+        Rig q; q.world.fillRect(0, 200, 400, 210, M_WALL);
+        Reader rd(buf);
+        bool ok = q.phys.load(rd);
+        int alive = 0; for (auto& jt : q.phys.joints) alive += jt.alive;
+        q.step(30);
+        bool stood = q.phys.bodies[a].alive && q.phys.bodies[c].alive && std::fabs(q.phys.bodies[a].invMass * q.phys.bodies[a].mass - 1.f) < 1e-3f;
+        r.phys.joints[j].a = a;
+        r.phys.bodies[a].temp = std::numeric_limits<float>::quiet_NaN();
+        std::vector<uint8_t> buf2; { Writer w{buf2}; r.phys.save(w); }
+        Rig s; Reader rd2(buf2);
+        bool refused = !s.phys.load(rd2);
+        char d[160]; std::snprintf(d, sizeof d, "loaded %d, bad pin dropped (%d joints left), bodies stood with a rebuilt mass %d, NaN temperature refused %d", (int)ok, alive, (int)stood, (int)refused);
+        check(ok && alive == 0 && stood && refused, "a damaged save is loaded safely or refused", d);
+    }
+}
+
 // fixes from the adversarial review of the grid engine
 void gridReview() {
     std::printf("grid review fixes\n");
@@ -887,6 +999,7 @@ int runSelfTests() {
     liquids();
     emitters();
     rigidReview();
+    rigidReview2();
     gridReview();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
