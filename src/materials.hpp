@@ -52,6 +52,8 @@ struct MatInfo {
     float acidK = 1.f;        // susceptibility to acid
     float bulk = 1.f;         // liquids: stiffness against compression
     float elec = 0.f;         // electrical conductance of one cell edge (siemens, game units); 0 = insulator
+    bool selfOx = false;      // carries its own oxidiser: burns without air, even packed solid or sealed in a chamber
+    float gasYield = 0.f;     // burning leaves this much hot exhaust gas in the cell instead of a residue (0 = use the residue)
     float burstP = 0.f;       // solids: cracks when the pressure on one side exceeds this (0 = never)
     float initT = AMBIENT_T;  // temperature of freshly created cells
     uint8_t freezeAs = M_EMPTY; // what a molten version of this solidifies into (default: itself)
@@ -78,7 +80,7 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
     { auto& m = def(M_SAND, "SAND", 0xe0c070, K_POWDER, 1.6f); th(m, 0.03f, 1.4f); fr(m, 0.5f, 0.05f); hi(m, 1700, M_MOLTEN); m.freezeAs = M_GLASS; }
     { auto& m = def(M_ASH, "ASH", 0x9a9a9a, K_POWDER, 0.5f); th(m, 0.02f, 0.8f); fr(m, 0.5f, 0.05f); }
     { auto& m = def(M_GUNPOWDER, "GUNPOWDER", 0x4a4a4a, K_POWDER, 1.7f); th(m, 0.02f, 1.2f);
-      burn(m, 300, 200, 1500, 6, 0.8f); m.blastR = 3.5f; m.blastP = 45.f; }
+      burn(m, 300, -50, 1500, 6, 0.8f); m.selfOx = true; m.gasYield = 3.f; }
     { auto& m = def(M_COAL, "COAL", 0x26262b, K_POWDER, 1.3f); th(m, 0.05f, 1.0f); fr(m, 0.6f, 0.05f);
       burn(m, 450, 400, 1100, 220, 0.05f, M_ASH); }
 

@@ -533,6 +533,97 @@ void jet() {
     check(vx[0] > 5.f && vx[1] > 1.3f * vx[0], "a burning jet engine drives itself forward harder than the cold fan alone", d);
 }
 
+// sliders: a body on a slider keeps to its line and its angle, and still moves freely along it
+void sliders() {
+    std::printf("sliders\n");
+    {   // horizontal slider under gravity, pushed sideways
+        Rig r;
+        r.phys.addBox(Vec2(100, 150), Vec2(60, 3), 0, M_STEEL, true);    // a floor to keep the world honest
+        int b = r.phys.addBox(Vec2(100, 100), Vec2(6, 6), 0, M_STEEL, false);
+        r.phys.addSlider(b, Vec2(1, 0));
+        r.phys.stampBodies();
+        r.phys.bodies[b].vel.x = 30.f;
+        r.step(120);
+        char d[96];
+        std::snprintf(d, sizeof d, "moved dx %.1f, dy %.2f, angle %.3f", r.phys.bodies[b].pos.x - 100.f, r.phys.bodies[b].pos.y - 100.f, r.phys.bodies[b].angle);
+        check(std::fabs(r.phys.bodies[b].pos.y - 100.f) < 1.f && r.phys.bodies[b].pos.x - 100.f > 20.f && std::fabs(r.phys.bodies[b].angle) < 0.05f,
+              "a horizontal slider holds the body against gravity but lets it slide", d);
+    }
+    {   // a slider between two bodies: the piston keeps to a line fixed in the carrier, wherever the carrier goes
+        Rig r;
+        int carrier = r.phys.addBox(Vec2(100, 60), Vec2(30, 3), 0.5f, M_STEEL, false);   // tilted 0.5 rad, and free to fall
+        Vec2 axis(std::cos(0.5f), std::sin(0.5f));
+        Vec2 side(-axis.y, axis.x);
+        int piston = r.phys.addBox(Vec2(100, 60) + axis * -10.f + side * -9.f, Vec2(4, 4), 0.5f, M_STEEL, false);   // beside the carrier, not overlapping it
+        r.phys.addSliderRel(piston, carrier, r.phys.bodies[piston].pos, axis);
+        r.phys.bodies[carrier].w = 1.5f;   // tumbling as it falls
+        r.phys.stampBodies();
+        r.phys.bodies[piston].vel = axis * 40.f;
+        float maxPerp = 0.f, maxAng = 0.f, slid = 0.f;
+        const float perp0 = cross(axis, r.phys.bodies[piston].pos - r.phys.bodies[carrier].pos), along0 = dot(axis, r.phys.bodies[piston].pos - r.phys.bodies[carrier].pos);
+        for (int i = 0; i < 90; ++i) {
+            r.step(1);
+            const Body& C = r.phys.bodies[carrier]; const Body& P = r.phys.bodies[piston];
+            Vec2 ax = rotate(Vec2(std::cos(0.5f), std::sin(0.5f)), C.angle - 0.5f);
+            Vec2 d = P.pos - C.pos;
+            maxPerp = std::max(maxPerp, std::fabs(cross(ax, d) - perp0));
+            maxAng = std::max(maxAng, std::fabs((P.angle - C.angle) - 0.f));
+            slid = dot(ax, d) - along0;
+        }
+        char d[110];
+        std::snprintf(d, sizeof d, "perpendicular offset %.2f, relative angle %.3f, slid to %.1f along the carrier", maxPerp, maxAng, slid);
+        check(maxPerp < 1.5f && maxAng < 0.1f && slid > 5.f, "a slider between two bodies keeps the piston on the carrier's line while it tumbles", d);
+    }
+    {   // a slider on one piece of a welded group carries the whole group along its line
+        Rig r;
+        int a = r.phys.addBox(Vec2(100, 100), Vec2(8, 4), 0, M_STEEL, false);
+        int c = r.phys.addBox(Vec2(112, 100), Vec2(4, 8), 0, M_STEEL, false);
+        r.phys.groupBodies({a, c});
+        r.phys.addSlider(a, Vec2(0, 1));
+        r.phys.stampBodies();
+        r.step(60);
+        char d[96];
+        std::snprintf(d, sizeof d, "x %.2f y %.1f, other piece x %.2f", r.phys.bodies[a].pos.x, r.phys.bodies[a].pos.y, r.phys.bodies[c].pos.x);
+        check(std::fabs(r.phys.bodies[a].pos.x - 100.f) < 1.f && r.phys.bodies[a].pos.y > 120.f && std::fabs(r.phys.bodies[c].pos.x - 112.f) < 1.5f,
+              "a slider on a group keeps it on the line and falls along it", d);
+    }
+}
+
+// gunpowder carries its own oxidiser: it burns packed solid inside a sealed chamber, and the gas it makes builds pressure
+void gunpowder() {
+    std::printf("gunpowder\n");
+    Rig r;
+    // a sealed steel box, completely full of powder except for the spark plug in one wall
+    for (int y = 100; y <= 119; ++y) for (int x = 100; x <= 129; ++x) r.world.setCell(x, y, M_STEEL);
+    for (int y = 103; y <= 116; ++y) for (int x = 103; x <= 126; ++x) r.world.setCell(x, y, M_GUNPOWDER);
+    r.world.setCell(102, 110, M_IGNITER);
+    r.world.sparkPeriod = 10;
+    int before = 0; for (auto& c : r.world.cells) before += c.t == M_GUNPOWDER;
+    float pmax = 0;
+    for (int i = 0; i < 120; ++i) {
+        r.step(1);
+        for (int y = 103; y <= 116; ++y) for (int x = 103; x <= 126; ++x) { const Cell& c = r.world.cells[y * World::W + x]; if (MATS[c.t].kind == K_GAS) pmax = std::max(pmax, c.amt * (c.temp + 273.f) / 293.f); }
+    }
+    int after = 0; for (auto& c : r.world.cells) after += c.t == M_GUNPOWDER;
+    char d[110];
+    std::snprintf(d, sizeof d, "powder cells %d -> %d, peak pressure %.1f", before, after, pmax);
+    check(after < before / 10 && pmax > 5.f, "gunpowder sealed in a chamber burns completely and builds pressure", d);
+    // and the pressure pushes a piston down a bore
+    Rig q;
+    for (int x = 100; x <= 160; ++x) { for (int y = 98; y <= 101; ++y) q.world.setCell(x, y, M_STEEL); for (int y = 114; y <= 117; ++y) q.world.setCell(x, y, M_STEEL); }
+    for (int y = 98; y <= 117; ++y) for (int x = 96; x <= 99; ++x) q.world.setCell(x, y, M_STEEL);
+    for (int y = 102; y <= 113; ++y) for (int x = 100; x <= 109; ++x) q.world.setCell(x, y, M_GUNPOWDER);
+    q.world.setCell(100, 107, M_IGNITER);
+    q.world.sparkPeriod = 10;
+    int piston = q.phys.addBox(Vec2(115, 107.5f), Vec2(4.f, 5.5f), 0, M_ALUMINUM, false);
+    q.phys.stampBodies();
+    q.step(60);
+    float x1 = q.phys.bodies[piston].pos.x;
+    char d2[96];
+    std::snprintf(d2, sizeof d2, "the piston moved %.0f cells down the bore", x1 - 115.f);
+    check(x1 > 130.f, "burning powder drives a piston down a sealed bore", d2);
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -548,6 +639,8 @@ int runSelfTests() {
     vacuumFans();
     bonds();
     jet();
+    sliders();
+    gunpowder();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

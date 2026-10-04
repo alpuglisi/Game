@@ -53,6 +53,7 @@ struct Body {
     Vec2 toWorld(Vec2 l) const { return pos + rotate(l, angle); }
     Vec2 toLocal(Vec2 p) const { return rotate(p - pos, -angle); }
     bool contains(Vec2 p) const;
+    float distanceTo(Vec2 p) const;   // 0 inside, otherwise the gap to the outline
 };
 
 enum JointType { J_PIN, J_MOTOR, J_DISTANCE, J_MOUSE, J_SLIDER };
@@ -124,7 +125,8 @@ public:
     int addPin(Vec2 anchor, int a, int b, bool motor, bool keyed);
     int addDistance(int a, Vec2 pa, int b, Vec2 pb, float freq);
     int addMouse(int body, Vec2 anchor);
-    int addSlider(int body, Vec2 axis);  // confine a body to a line through its centre; rotation locked
+    int addSlider(int body, Vec2 axis);   // confine a body to a line through its centre (fixed in the world); rotation locked
+    int addSliderRel(int a, int b, Vec2 anchor, Vec2 axis);   // a slides along a line fixed in b's frame (b dynamic or static)
     void setMouseTarget(int joint, Vec2 target);
 
     // ---- groups ("layers"): members are welded into one rigid object but stay individually editable

@@ -301,7 +301,7 @@ void World::sparkAt(int x, int y) {
     if (c.t == M_VAPOR) m = &MATS[c.life < M_COUNT ? c.life : (uint8_t)M_GASOLINE];
     if (m->ignT <= 0.f || c.burn > 0 || (c.t == M_TNT && c.life > 0)) return;
     if (c.temp < m->flashT) return;
-    if (m->kind != K_GAS && c.t != M_VAPOR) {
+    if (m->kind != K_GAS && c.t != M_VAPOR && !m->selfOx) {
         bool open = false;
         for (int k = 0; k < 4 && !open; ++k) {
             int nx = x + DX4[k], ny = y + DY4[k];
@@ -322,7 +322,7 @@ bool World::tryIgnite(int x, int y) {
     if (c.t == M_TNT && c.life > 0) return false;
 
     bool gasFuel = m->kind == K_GAS || c.t == M_VAPOR;
-    if (!gasFuel) {  // needs air: an open face
+    if (!gasFuel && !m->selfOx) {  // needs air: an open face
         bool open = false;
         for (int k = 0; k < 4 && !open; ++k) {
             int nx = x + DX4[k], ny = y + DY4[k];
@@ -393,7 +393,16 @@ void World::burnTick(int x, int y) {
             at(nx, ny).amt = 0.6f;
         }
     }
+    if (m.selfOx) {   // a burning grain lights its neighbours directly, even with no air about
+        for (int k = 0; k < 4; ++k) {
+            int nx = x + DX4[k], ny = y + DY4[k];
+            if (!inb(nx, ny)) continue;
+            Cell& n = cells[ny * W + nx];
+            if (n.t == c.t && n.burn == 0 && chance(m.burnSpeed)) burn(nx, ny, m);
+        }
+    }
     if (--c.burn == 0) {
+        if (m.gasYield > 0.f) { convert(x, y, M_EXHAUST, 0, m.burnT, m.gasYield); return; }   // the powder becomes a lot of very hot gas
         if (m.burnRes != M_EMPTY && chance(0.7f)) { setCell(x, y, m.burnRes); at(x, y).temp = 300.f; }
         else if (chance(0.4f)) { convert(x, y, M_SMOKE, 0, 300.f, 0.8f); }
         else c.t = M_EMPTY;

@@ -39,19 +39,19 @@ const char* TOOL_HINTS[] = {
     "DRAG FROM CENTRE TO SET RADIUS",
     "DRAG TO SIZE. AUTO-MOTORS ONTO A BODY UNDER ITS CENTRE (ARROWS DRIVE)",
     "DRAG TO SET THRUST DIRECTION. HOLD UP/W TO FIRE",
-    "CLICK WHERE TWO BODIES OVERLAP (OR ONE BODY = PIN TO WORLD)",
+    "CLICK WHERE TWO BODIES OVERLAP OR TOUCH (WITH ONLY ONE NEARBY, IT PINS TO THE WORLD)",
     "CLICK ON A JOINT SPOT. LEFT/RIGHT ARROWS (A/D) SPIN IT",
     "LIKE MOTOR BUT SPINS ALL THE TIME",
     "DRAG FROM ONE BODY/POINT TO ANOTHER",
     "DRAG FROM ONE BODY/POINT TO ANOTHER",
     "DRAG BODIES AROUND",
     "CLICK A BODY OR JOINT TO REMOVE IT",
-    "PRESS ON A BODY AND DRAG ALONG THE LINE IT MAY SLIDE ON (PISTONS, VALVES). ROTATION IS LOCKED",
-    "CLICK A BODY TO SELECT IT (CLICK AGAIN TO REACH THE ONE UNDER IT, SHIFT ADDS). DRAG SELECTED BODIES TO MOVE THEM. DRAG EMPTY SPACE TO BOX-SELECT",
+    "PRESS ON THE SLIDING BODY (A PISTON) AND DRAG ALONG ITS LINE, ENDING ON THE BODY IT SLIDES IN (THE CYLINDER) - OR ON EMPTY SPACE TO FIX THE LINE IN THE WORLD. ROTATION IS LOCKED",
+    "CLICK A BODY TO SELECT IT (CLICK AGAIN TO REACH THE ONE UNDER IT, SHIFT ADDS), OR CLICK A JOINT (SPRING, ROD, MOTOR...) TO EDIT IT. DRAG SELECTED BODIES TO MOVE THEM. DRAG EMPTY SPACE TO BOX-SELECT",
     "DRAG ALONG THE PIPE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/WALL",
     "DRAG ALONG THE HOSE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/SEGMENTS",
     "DRAG A SMALL BOX THAT ENDLESSLY PRODUCES THE SELECTED POWDER/LIQUID/GAS. PIN IT, OR LEAVE IT FREE TO TRAVEL. ENTER = RATE",
-    "CLICK WHERE TWO BODIES OVERLAP (OR ONE = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO ABOVE ITS MELT TEMPERATURE OR BREAKING FORCE. ENTER = SET BOTH",
+    "CLICK WHERE TWO BODIES OVERLAP OR TOUCH (ONE NEARBY = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO WHEN TOO HOT OR OVERLOADED. ENTER = SET BOTH",
     "DRAG A FAN: THE ARROW SHOWS WHICH WAY IT BLOWS. SELECT IT, THEN + / - CHANGE STRENGTH AND \\ FLIPS IT. ENTER = EXACT VALUES",
     "DRAG A BOX OR CIRCLE OVER BODIES: THE AREA UNDER IT IS CUT OUT OF EVERY BODY IT TOUCHES. CTRL+Z UNDOES",
 };
@@ -486,6 +486,7 @@ struct Game {
         const Body* pb = haveSel ? &phys.bodies[primary] : nullptr;
         const bool creating = tool == T_BOX || tool == T_CIRCLE || tool == T_WHEEL || tool == T_ROCKET || tool == T_PIPE || tool == T_HOSE ||
                               tool == T_FAN || tool == T_EMITTER;
+        const bool jointSel = tool == T_SELECT && jointValid(selJoint);
         const bool editing = tool == T_SELECT && haveSel;
         const bool fanCtx = tool == T_FAN || (editing && pb->fan.strength != 0.f);
         const bool emitCtx = tool == T_EMITTER || (editing && pb->src.on);
@@ -532,6 +533,48 @@ struct Game {
             gap(4);
             stepper("MELTS AT (C)", fmt(bondT), [this] { bondT = std::max(-50.f, bondT - 5.f); }, [this] { bondT = std::min(5000.f, bondT + 5.f); }, "TEMPERATURE AT WHICH THE BOND GIVES WAY");
             stepper("HOLDS (X WEIGHT)", fmt(bondG), [this] { bondG = std::max(1.f, bondG - (bondG > 20.f ? 10.f : 1.f)); }, [this] { bondG = std::min(1000.f, bondG + (bondG >= 20.f ? 10.f : 1.f)); }, "HOW MANY TIMES THE WEIGHT IT CARRIES THE BOND CAN HOLD BEFORE IT GIVES WAY");
+        } else if (jointSel) {
+            const Joint& J = phys.joints[selJoint];
+            const bool spring = J.type == J_DISTANCE && J.freq > 0.f;
+            const char* nm = J.bondId >= 0 ? "BOND" : J.type == J_DISTANCE ? (spring ? "SPRING" : "ROD") : J.type == J_MOTOR ? "MOTOR" : J.type == J_SLIDER ? "SLIDER" : "PIN";
+            header(nm);
+            if (J.type == J_DISTANCE) {
+                float cur = length(phys.jointAnchorB(J) - phys.jointAnchorA(J));
+                line(std::string("LENGTH NOW ") + fmt(cur) + "  REST " + fmt(J.length), 0xe8eefc);
+                gap(2);
+                if (spring) {
+                    stepper("STIFFNESS (BOUNCES PER SEC)", fmt(J.freq), [this] { editJoint([](Joint& k) { k.freq = std::max(0.2f, k.freq - (k.freq > 10.f ? 2.f : 0.5f)); }); },
+                            [this] { editJoint([](Joint& k) { k.freq = std::min(60.f, k.freq + (k.freq >= 10.f ? 2.f : 0.5f)); }); }, "HIGHER = STIFFER. THE SPRING PULLS HARDER IN PROPORTION TO THE MASS IT CARRIES");
+                    stepper("DAMPING (0 BOUNCY - 1 DEAD)", fmt(J.damping), [this] { editJoint([](Joint& k) { k.damping = std::max(0.f, k.damping - 0.05f); }); },
+                            [this] { editJoint([](Joint& k) { k.damping = std::min(2.f, k.damping + 0.05f); }); }, "HOW QUICKLY THE BOUNCING DIES AWAY");
+                }
+                stepper("REST LENGTH (CELLS)", fmt(J.length), [this] { editJoint([](Joint& k) { k.length = std::max(1.f, k.length - 1.f); }); },
+                        [this] { editJoint([](Joint& k) { k.length = std::min(400.f, k.length + 1.f); }); }, "THE LENGTH AT WHICH IT PULLS NEITHER WAY");
+                button("SET REST = NOW", false, [this] { float cur = length(phys.jointAnchorB(phys.joints[selJoint]) - phys.jointAnchorA(phys.joints[selJoint])); editJoint([cur](Joint& k) { k.length = std::max(1.f, cur); }); },
+                       "MAKE THE CURRENT LENGTH THE NATURAL ONE", x0, w); y += 30;
+                row2("SPRING", spring, [this] { editJoint([this](Joint& k) { if (k.freq <= 0.f) k.freq = springFreq; }); }, "A SOFT LINK THAT STRETCHES",
+                     "ROD", !spring, [this] { editJoint([](Joint& k) { k.freq = 0.f; }); }, "A RIGID LINK OF FIXED LENGTH");
+            } else if (J.type == J_MOTOR) {
+                stepper("SPEED (RADIANS PER SEC)", fmt(J.speed), [this] { editJoint([](Joint& k) { k.speed = k.speed - 0.5f; }); }, [this] { editJoint([](Joint& k) { k.speed = k.speed + 0.5f; }); },
+                        "TARGET TURNING SPEED; NEGATIVE TURNS THE OTHER WAY");
+                stepper("POWER (TORQUE)", fmt(J.power), [this] { editJoint([](Joint& k) { k.power = std::max(5.f, k.power - (k.power > 200.f ? 50.f : 10.f)); }); },
+                        [this] { editJoint([](Joint& k) { k.power = std::min(5000.f, k.power + (k.power >= 200.f ? 50.f : 10.f)); }); }, "HOW HARD THE MOTOR CAN TURN");
+                row2("ARROW KEYS", J.keyed, [this] { editJoint([](Joint& k) { k.keyed = true; }); }, "THE LEFT / RIGHT ARROW KEYS (A / D) DRIVE IT",
+                     "ALWAYS ON", !J.keyed, [this] { editJoint([](Joint& k) { k.keyed = false; }); }, "SPINS ALL THE TIME");
+            } else if (J.bondId >= 0) {
+                stepper("MELTS AT (C)", fmt(J.breakT), [this] { editJoint([](Joint& k) { k.breakT = std::max(-50.f, k.breakT - 5.f); }); }, [this] { editJoint([](Joint& k) { k.breakT = std::min(5000.f, k.breakT + 5.f); }); },
+                        "TEMPERATURE AT WHICH THE BOND GIVES WAY");
+                stepper("HOLDS (X WEIGHT)", fmt(J.loadG), [this] { editJoint([](Joint& k) { k.loadG = std::max(1.f, k.loadG - (k.loadG > 20.f ? 10.f : 1.f)); }); },
+                        [this] { editJoint([](Joint& k) { k.loadG = std::min(1000.f, k.loadG + (k.loadG >= 20.f ? 10.f : 1.f)); }); }, "HOW MANY TIMES THE WEIGHT IT CARRIES IT CAN HOLD");
+            } else if (J.type == J_SLIDER) {
+                line("KEEPS ONE BODY ON A LINE,", 0xb0bcd4);
+                line("ROTATION LOCKED.", 0xb0bcd4);
+            } else {
+                line("A HINGE BETWEEN TWO BODIES", 0xb0bcd4);
+                line("(OR A BODY AND THE WORLD).", 0xb0bcd4);
+            }
+            gap(6);
+            button("DELETE THIS JOINT", false, [this] { removeSelectedJoint(); }, "REMOVE THE SELECTED JOINT (DEL)", x0, w); y += 30;
         } else if (tool == T_PIN || tool == T_MOTOR || tool == T_AUTOMOTOR || tool == T_ROD || tool == T_SPRING || tool == T_SLIDER || tool == T_GRAB || tool == T_DELETE) {
             header(TOOL_NAMES[tool]);
             // plain-language help for the tool, wrapped to the panel
@@ -543,6 +586,14 @@ struct Game {
                 line(h.substr(pos, len), 0xb0bcd4);
                 pos += len;
                 while (pos < h.size() && h[pos] == ' ') ++pos;
+            }
+            if (tool == T_SPRING) {
+                gap(8);
+                header("NEW SPRINGS");
+                stepper("STIFFNESS (BOUNCES PER SEC)", fmt(springFreq), [this] { springFreq = std::max(0.2f, springFreq - (springFreq > 10.f ? 2.f : 0.5f)); },
+                        [this] { springFreq = std::min(60.f, springFreq + (springFreq >= 10.f ? 2.f : 0.5f)); }, "HIGHER = STIFFER (SELECT A SPRING LATER TO CHANGE IT)");
+                stepper("DAMPING (0 BOUNCY - 1 DEAD)", fmt(springDamp), [this] { springDamp = std::max(0.f, springDamp - 0.05f); },
+                        [this] { springDamp = std::min(2.f, springDamp + 0.05f); }, "HOW QUICKLY THE BOUNCING DIES AWAY");
             }
         } else {
             // body tools and selection: what the bodies are made of, and their machine settings
@@ -560,6 +611,8 @@ struct Game {
                 line("DRAG A SELECTED BODY TO MOVE.", 0xb0bcd4);
                 line("DRAG EMPTY SPACE TO SELECT", 0xb0bcd4);
                 line("SEVERAL. CTRL+C / CTRL+V COPY.", 0xb0bcd4);
+                line("CLICK A SPRING, ROD, MOTOR OR", 0xb0bcd4);
+                line("PIN TO EDIT THAT JOINT.", 0xb0bcd4);
                 gap(8);
             } else if (creating) {
                 header(std::string("NEW ") + TOOL_NAMES[tool]);
@@ -639,10 +692,11 @@ struct Game {
             {"BONDS", &Game::buildBondTest, "WAX AND SHEAR-PIN BONDS"},
             {"PRIMER", &Game::buildPrimerTest, "A FIRING PIN STRIKES A PRIMER"},
             {"FANS", &Game::buildFanTest, "BLOWERS, A CLOSED DUCT AND A VACUUM FAN"},
+            {"SHOTGUN", &Game::buildShotgun, "SPRING HAMMER, PRIMER, POWDER CHARGE, WAD AND SHOT"},
             {"JET ENGINE", &Game::buildJet, "A TURBOJET ON WHEELS: FAN, FUEL, SPARK PLUG, NOZZLE"},
             {"ROAD + FOCUS", &Game::buildRoadTest, "A FAN-DRIVEN CAR AND THE FOLLOWING CAMERA"},
         };
-        const int n = 13, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
+        const int n = 14, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
         int cw = cols * bw + (cols + 1) * gapx, ch = 70 + ((n + cols - 1) / cols) * (bh + gapy) + 16;
         SDL_Rect card{(SIM_W - cw) / 2, (SIM_H - ch) / 2, cw, ch};
         PItem bg; bg.kind = 5; bg.r = card; modal.push_back(bg);
@@ -1067,9 +1121,45 @@ struct Game {
         sel.erase(std::remove_if(sel.begin(), sel.end(), [&](int id) { return id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive; }), sel.end());
         if (std::find(sel.begin(), sel.end(), primary) == sel.end()) primary = sel.empty() ? -1 : sel[0];
     }
-    void clearSelection() { sel.clear(); primary = -1; partMode = false; }
+    int selJoint = -1;                          // a selected joint (spring, rod, motor, pin, slider, bond), edited in the right panel
+    float springFreq = 2.5f, springDamp = 0.35f; // what new springs are made with
+    bool jointValid(int j) const { return j >= 0 && j < (int)phys.joints.size() && phys.joints[j].alive && phys.joints[j].group < 0 && phys.joints[j].type != J_MOUSE; }
+    // the joint nearest to a point (within a few cells of its anchor, or of the line of a spring or rod), or -1
+    int jointAt(Vec2 p) const {
+        int best = -1; float bd = 3.2f;
+        for (auto& j : phys.joints) {
+            if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
+            Vec2 a = phys.jointAnchorA(j);
+            float d;
+            if (j.type == J_DISTANCE) {
+                Vec2 b = phys.jointAnchorB(j), ab = b - a;
+                float t = lengthSq(ab) > 1e-6f ? std::clamp(dot(p - a, ab) / lengthSq(ab), 0.f, 1.f) : 0.f;
+                d = length(p - (a + ab * t)) - 0.6f;
+            } else d = length(p - a);
+            if (d < bd) { bd = d; best = j.id; }
+        }
+        return best;
+    }
+    void selectJoint(int id) { clearSelection(); selJoint = id; }
+    void removeSelectedJoint() {
+        if (!jointValid(selJoint)) return;
+        pushUndo();
+        int bond = phys.joints[selJoint].bondId;
+        if (bond >= 0) { for (auto& k : phys.joints) if (k.alive && k.bondId == bond) phys.removeJoint(k.id); }
+        else phys.removeJoint(selJoint);
+        selJoint = -1;
+    }
+    template <class F> void editJoint(F f) {   // change the selected joint (every pin of a bond together)
+        if (!jointValid(selJoint)) return;
+        pushUndo("jointedit");
+        int bond = phys.joints[selJoint].bondId;
+        if (bond >= 0) { for (auto& k : phys.joints) if (k.alive && k.bondId == bond) f(k); }
+        else f(phys.joints[selJoint]);
+    }
+    void clearSelection() { sel.clear(); primary = -1; partMode = false; selJoint = -1; }
     void selectBody(int id, bool add, bool part) {
         if (id < 0) { if (!add) clearSelection(); return; }
+        selJoint = -1;
         std::vector<int> add_;
         const Body& b = phys.bodies[id];
         if (b.group >= 0 && !part) add_ = phys.groupMembers(b.group); else add_.push_back(id);
@@ -1335,6 +1425,7 @@ struct Game {
         w.pod(bodyMat);
     }
     bool restoreState(const std::vector<uint8_t>& buf) {
+        selJoint = -1;
         Reader r(buf);
         if (r.pod<uint32_t>() != STATE_MAGIC || r.pod<uint32_t>() != sizeof(Cell) || r.pod<uint32_t>() != sizeof(Body) ||
             r.pod<uint32_t>() != sizeof(Joint) || r.pod<uint32_t>() != (uint32_t)World::W || r.pod<uint32_t>() != (uint32_t)World::H || !r.ok)
@@ -1757,6 +1848,43 @@ struct Game {
         phys.stampBodies();
         return hull;
     }
+    // A shotgun: a spring-driven hammer on a slider strikes a primer, the flash lights the powder in the sealed chamber, the
+    // gas pressure drives a wad and a load of shot down the barrel.
+    struct Shotgun { int hammer = -1, wad = -1; std::vector<int> shot; };
+    Shotgun lastGun;
+    void buildShotgun() {
+        resetWorld();
+        rect(0, 230, World::W - 1, 239, M_CONCRETE);
+        const int bx0 = 120, by0 = 108;   // breech block top-left
+        const int ym = by0 + 12;           // bore centre line
+        rect(bx0 - 6, by0 - 6, bx0 + 150, by0 - 1, M_STEEL);        // barrel top wall
+        rect(bx0 - 6, by0 + 25, bx0 + 150, by0 + 30, M_STEEL);      // barrel bottom wall
+        rect(bx0 - 6, by0 - 6, bx0 + 7, by0 + 30, M_STEEL);         // breech block
+        rect(bx0 - 6, ym - 1, bx0 + 7, ym + 1, M_EMPTY);            // the firing-pin hole through it
+        // primer seated in the breech: struck on its left end, flashes out of its right end into the chamber
+        phys.addBox(Vec2(bx0 + 4, ym + 0.5f), Vec2(4.f, 1.5f), 0, M_PRIMER, true);
+        // powder charge
+        rect(bx0 + 8, by0, bx0 + 23, by0 + 24, M_GUNPOWDER);
+        // wad and shot
+        const float wx = bx0 + 27.f;
+        lastGun.wad = phys.addBox(Vec2(wx + 3.f, ym + 0.5f), Vec2(5.5f, 11.5f), 0, M_ALUMINUM, false);   // long enough that it can't tip over in the bore
+        lastGun.shot.clear();
+        for (int i = 0; i < 15; ++i) lastGun.shot.push_back(phys.addCircle(Vec2(wx + 11.f + 4.6f * (i / 5), ym - 8.8f + 4.4f * (i % 5) + 0.2f), 2.15f, M_LEAD, false, false));   // shot filling the bore, so the wad is pushed evenly
+        // hammer on a slider, driven by a compressed spring from a post behind it
+        int post = phys.addBox(Vec2(bx0 - 56, ym), Vec2(3.f, 8.f), 0, M_STEEL, true);
+        lastGun.hammer = phys.addBox(Vec2(bx0 - 28, ym + 0.5f), Vec2(8.f, 1.2f), 0, M_STEEL, false);
+        phys.addSlider(lastGun.hammer, Vec2(1, 0));
+        int sp = phys.addDistance(lastGun.hammer, Vec2(bx0 - 28, ym), post, Vec2(bx0 - 53, ym), 3.f);
+        if (sp >= 0) phys.joints[sp].length = 70.f;   // longer than it is: a compressed spring pushing the hammer at the primer
+        // targets down range
+        for (int i = 0; i < 4; ++i) phys.addBox(Vec2(bx0 + 215.f, 220.f - 11.f * i), Vec2(5.f, 5.5f), 0, M_WOOD, false);
+        phys.addBox(Vec2(bx0 + 232.f, 215.f), Vec2(4.f, 12.f), 0, M_BRICK, false);
+        label(bx0 - 64, by0 - 18, "SPRING-DRIVEN HAMMER (ON A SLIDER) STRIKES THE PRIMER");
+        label(bx0 + 10, by0 - 30, "POWDER CHARGE");
+        label(bx0 + 46, by0 - 18, "WAD + SHOT");
+        label(bx0 + 150, by0 - 10, "BARREL");
+        phys.stampBodies();
+    }
     void buildJet() { buildJetCar(); }
     void buildRoadTest() {
         resetWorld();
@@ -2118,21 +2246,47 @@ struct Game {
         if (formKind != FK_NONE && !sel.empty()) {}  // form keeps its current mode
     }
 
+    // The two bodies a click is meant to join: those under the pointer, or failing that the nearest ones within a few
+    // cells (bodies that merely touch have nothing under their seam). b = -1 means the world.
+    bool pairAt(Vec2 p, int& a, int& b, float reach = 3.5f) {
+        std::vector<int> under = phys.bodiesAt(p);
+        a = -1; b = -1;
+        auto nearest = [&](int skipA, int skipGroupOf) {
+            int best = -1; float bd = reach;
+            for (auto& o : phys.bodies) {
+                if (!o.alive || o.id == skipA) continue;
+                if (skipGroupOf >= 0 && o.group >= 0 && o.group == phys.bodies[skipGroupOf].group) continue;
+                float d = o.distanceTo(p);
+                if (d < bd) { bd = d; best = o.id; }
+            }
+            return best;
+        };
+        if (!under.empty()) a = under.back();
+        else a = nearest(-1, -1);
+        if (a < 0) return false;
+        for (int i = (int)under.size() - 1; i >= 0; --i) {
+            int o = under[i];
+            if (o == a || (phys.bodies[a].group >= 0 && phys.bodies[o].group == phys.bodies[a].group)) continue;
+            b = o; break;
+        }
+        if (b < 0) b = nearest(a, a);
+        return true;
+    }
+
     void clickJoint(Vec2 p) {
-        std::vector<int> ids = phys.bodiesAt(p);
-        if (ids.empty()) return;
-        int a = ids.back(), b = -1;
-        if (ids.size() >= 2) { a = ids[ids.size() - 2]; b = ids.back(); }
+        int a, b;
+        if (!pairAt(p, a, b)) { notify("CLICK ON A BODY, OR WHERE TWO BODIES MEET"); return; }
         bool motor = tool == T_MOTOR || tool == T_AUTOMOTOR;
+        if (b >= 0 && phys.bodies[b].seq < phys.bodies[a].seq) std::swap(a, b);
         phys.addPin(p, a, b, motor, tool != T_AUTOMOTOR);
+        notify(b >= 0 ? "JOINED THE TWO BODIES" : "PINNED TO THE WORLD (NO OTHER BODY NEAR THE CLICK)");
     }
 
     void clickBond(Vec2 p) {
-        std::vector<int> ids = phys.bodiesAt(p);
-        if (ids.empty()) { notify("CLICK ON A BODY (OR WHERE TWO OVERLAP)"); return; }
-        int a = ids.back(), b = ids.size() >= 2 ? ids[ids.size() - 2] : -1;
+        int a, b;
+        if (!pairAt(p, a, b)) { notify("CLICK ON A BODY, OR WHERE TWO BODIES MEET"); return; }
         phys.addBond(p, a, b, bondT, 0.f, bondG);
-        notify(std::string("BONDED: MELTS AT ") + fmt(bondT) + "C, HOLDS " + fmt(bondG) + "X ITS WEIGHT");
+        notify(std::string(b >= 0 ? "BONDED THE TWO BODIES" : "BONDED TO THE WORLD (NO OTHER BODY NEAR THE CLICK)") + ": MELTS AT " + fmt(bondT) + "C, HOLDS " + fmt(bondG) + "X ITS WEIGHT");
     }
 
     // Starts moving the selected bodies once the pointer has really dragged; also called on release so that a quick
@@ -2210,7 +2364,11 @@ struct Game {
                 if (moveArmed) updateMoveDrag();
                 if (moving) { moving = false; moveArmed = false; phys.stampBodies(); break; }
                 moveArmed = false;
-                if (length(mouse - dragStart) < 3.f) selectBody(pickCycling(mouse), add, part);
+                if (length(mouse - dragStart) < 3.f) {
+                    int jj = jointAt(mouse);
+                    if (jj >= 0) selectJoint(jj);
+                    else selectBody(pickCycling(mouse), add, part);
+                }
                 else boxSelect(dragStart, mouse, add, part);
                 break;
             }
@@ -2219,19 +2377,41 @@ struct Game {
                 int endBody = ids.empty() ? -1 : ids.back();
                 if (length(mouse - dragStart) > 3.f && (dragBody >= 0 || endBody >= 0) && dragBody != endBody) {
                     pushUndo();
-                    phys.addDistance(dragBody, dragStart, endBody, mouse, tool == T_SPRING ? 2.5f : 0.f);
+                    { int jid = phys.addDistance(dragBody, dragStart, endBody, mouse, tool == T_SPRING ? springFreq : 0.f); if (jid >= 0 && tool == T_SPRING) phys.joints[jid].damping = springDamp; }
                 }
                 dragBody = -1;
                 break;
             }
-            case T_SLIDER:
-                if (dragBody >= 0 && !phys.bodies[dragBody].isStatic) {
+            case T_SLIDER: {
+                if (dragBody < 0) { notify("PRESS ON THE BODY THAT SHOULD SLIDE, THEN DRAG ALONG ITS LINE"); break; }
+                Vec2 axis = mouse - dragStart;
+                if (length(axis) < 3.f) axis = Vec2(1, 0);
+                // the body it slides along: the one under the release point or the press point (not part of its own group)
+                int host = -1;
+                for (Vec2 q : {mouse, dragStart}) {
+                    std::vector<int> ids = phys.bodiesAt(q);
+                    for (int i = (int)ids.size() - 1; i >= 0 && host < 0; --i) {
+                        int o = ids[i];
+                        if (o == dragBody || (phys.bodies[dragBody].group >= 0 && phys.bodies[o].group == phys.bodies[dragBody].group)) continue;
+                        host = o;
+                    }
+                    if (host >= 0) break;
+                }
+                bool moving_ = !phys.bodies[dragBody].isStatic;
+                if (host >= 0 && (moving_ || !phys.bodies[host].isStatic)) {
                     pushUndo();
-                    Vec2 axis = mouse - dragStart;
-                    phys.addSlider(dragBody, length(axis) > 3.f ? axis : Vec2(1, 0));
+                    phys.addSliderRel(dragBody, host, dragStart, axis);
+                    notify("SLIDER: IT NOW SLIDES ALONG THE OTHER BODY, WHEREVER THAT GOES");
+                } else if (moving_) {
+                    pushUndo();
+                    phys.addSlider(dragBody, axis);
+                    notify("SLIDER: IT NOW SLIDES ALONG THIS LINE (FIXED IN THE WORLD)");
+                } else {
+                    notify("A FIXED BODY CAN'T SLIDE: UNCHECK 'FIXED IN PLACE' OR PICK A MOVING BODY");
                 }
                 dragBody = -1;
                 break;
+            }
             case T_GRAB:
                 if (grabJoint >= 0) phys.removeJoint(grabJoint);
                 grabJoint = -1;
@@ -2316,6 +2496,7 @@ struct Game {
     }
 
     void deleteSelection() {
+        if (jointValid(selJoint)) { removeSelectedJoint(); return; }
         pruneSelection();
         if (sel.empty()) {
             int id = phys.pickBody(mouse, true);
@@ -2662,6 +2843,14 @@ struct Game {
                 font::draw(ren, "CUTTER", (int)q.x - 36, (int)q.y - 22, 1, SDL_Color{255, 120, 120, 255});
             }
         }
+        if (jointValid(selJoint)) {   // a ring round the selected joint (and a halo along a spring or rod)
+            const Joint& j = phys.joints[selJoint];
+            Vec2 a = phys.jointAnchorA(j);
+            SDL_Color hl{255, 230, 90, 255};
+            if (j.type == J_DISTANCE) { Vec2 b = phys.jointAnchorB(j); lineWorld(a, b, SDL_Color{255, 230, 90, 90}, 9); outlinePoly(circlePts(b, 5.f, 16), hl); }
+            outlinePoly(circlePts(a, 5.f, 16), hl);
+            outlinePoly(circlePts(a, 6.f, 16), SDL_Color{255, 255, 255, 160});
+        }
         if (tool == T_SELECT && lmb && !moveArmed && !moving && length(mouse - dragStart) >= 3.f) {
             Vec2 a = dragStart, b = mouse;
             outlinePoly({a, Vec2(b.x, a.y), b, Vec2(a.x, b.y)}, SDL_Color{255, 220, 80, 200});
@@ -2676,6 +2865,12 @@ struct Game {
             Vec2 a = phys.jointAnchorA(j);
             if (j.type == J_MOUSE) {
                 lineWorld(a, j.lb, SDL_Color{255, 255, 255, 160});
+                continue;
+            }
+            if (j.type == J_SLIDER && j.b >= 0) {   // between two bodies: rails along the line fixed in the host
+                Vec2 ax = rotate(j.u, phys.bodies[j.b].angle), p = phys.jointAnchorA(j);
+                lineWorld(p - ax * 14.f, p + ax * 14.f, SDL_Color{255, 255, 255, 110}, 1);
+                for (int i = -2; i <= 2; ++i) { Vec2 q = p + ax * (float)(i * 6), nn(-ax.y, ax.x); lineWorld(q - nn * 2.f, q + nn * 2.f, SDL_Color{255, 255, 255, 150}, 1); }
                 continue;
             }
             if (j.type == J_SLIDER) {
@@ -3385,6 +3580,112 @@ int main(int argc, char** argv) {
                     g.update();
                     if (f % 100 == 0)
                         std::printf("f=%d cold block y=%.1f (hangs at 76), warm block y=%.1f temp %.0f, top block y=%.1f, bonds broken so far %ld\n", f, st(cold).y, st(warm).y, g.phys.bodies[warm].temp, st(top).y, g.phys.bondsBroken);
+                }
+                break;
+            }
+            case 30: {   // joints through real clicks: touching bodies bond, a piston slides in its host, a spring is selected and edited
+                g.resetWorld();
+                g.undoStack.clear();
+                auto push = [&](SDL_Event e) { SDL_PushEvent(&e); g.handleEvents(); };
+                auto px = [&](float x) { return SIM_X + (int)std::lround((x - g.camX) * S); };
+                auto py = [&](float y) { return SIM_Y + (int)std::lround(y * S); };
+                auto mouseTo = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = px(x); e.motion.y = py(y); push(e); };
+                auto down = [&](float x, float y) { mouseTo(x, y); SDL_Event e{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
+                auto up = [&](float x, float y) { SDL_Event e{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = px(x); e.button.y = py(y); push(e); };
+                auto drag = [&](float x0, float y0, float x1, float y1) { down(x0, y0); mouseTo((x0 + x1) / 2, (y0 + y1) / 2); g.update(); mouseTo(x1, y1); g.update(); up(x1, y1); };
+                auto clickWin = [&](int wx, int wy) { SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = wx; e.motion.y = wy; push(e); e = SDL_Event{}; e.type = SDL_MOUSEBUTTONDOWN; e.button.button = SDL_BUTTON_LEFT; e.button.x = wx; e.button.y = wy; push(e); e = SDL_Event{}; e.type = SDL_MOUSEBUTTONUP; e.button.button = SDL_BUTTON_LEFT; e.button.x = wx; e.button.y = wy; push(e); };
+                auto key = [&](SDL_Keycode k, Uint16 mod = 0) { SDL_SetModState((SDL_Keymod)mod); SDL_Event e{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = k; push(e); SDL_SetModState(KMOD_NONE); };
+                g.anchored = false;
+                // 1. two boxes that touch (do not overlap), bonded by clicking on their seam
+                int A = g.phys.addBox(Vec2(60, 100), Vec2(15, 8), 0, M_STEEL, false);
+                int Bx = g.phys.addBox(Vec2(91, 100), Vec2(15, 8), 0, M_STEEL, false);   // 1-cell gap, as touching bodies sit
+                g.phys.stampBodies();
+                g.tool = T_BOND;
+                down(75.5f, 100); up(75.5f, 100);
+                int bonds = 0; for (auto& j : g.phys.joints) if (j.alive && j.bondId >= 0) ++bonds;
+                int worldPins = 0; for (auto& j : g.phys.joints) if (j.alive && j.bondId >= 0 && (j.b < 0 || j.a < 0)) ++worldPins;
+                std::printf("bond tool on a seam between touching boxes: %d pins, %d of them to the world (expect 2 and 0)\n", bonds, worldPins);
+                g.phys.bodies[A].vel = Vec2(0, 0);
+                g.tool = T_SELECT;
+                for (int i = 0; i < 40; ++i) g.update();   // let them settle, then shove one
+                g.phys.bodies[A].vel = Vec2(-40, 0);
+                float gap0 = g.phys.bodies[Bx].pos.x - g.phys.bodies[A].pos.x;
+                g.play();
+                for (int i = 0; i < 60; ++i) g.update();
+                float gap1 = g.phys.bodies[Bx].pos.x - g.phys.bodies[A].pos.x;
+                std::printf("shoved one box: the other followed: centre gap %.1f -> %.1f, bonds broken %ld\n", gap0, gap1, g.phys.bondsBroken);
+                g.stopPlay();
+                // 2. a piston inside a host body, slider drawn by dragging from the piston along the host
+                g.resetWorld();
+                g.undoStack.clear();
+                int host = g.phys.addBox(Vec2(200, 100), Vec2(40, 10), 0, M_STEEL, false);
+                int piston = g.phys.addBox(Vec2(190, 130), Vec2(5, 5), 0, M_STEEL, false);   // beside it
+                g.phys.stampBodies();
+                g.tool = T_SLIDER;
+                drag(190, 130, 215, 100);   // press on the piston, release over the host
+                int rel = 0; for (auto& j : g.phys.joints) if (j.alive && j.type == J_SLIDER && j.b == host && j.a == piston) ++rel;
+                std::printf("slider tool: piston-to-host slider created: %d (expect 1)\n", rel);
+                g.play();
+                for (int i = 0; i < 90; ++i) g.update();
+                std::printf("after 90 frames the host fell to y=%.0f and the piston to y=%.0f; their vertical gap %.1f (started 30)\n", g.phys.bodies[host].pos.y, g.phys.bodies[piston].pos.y, g.phys.bodies[piston].pos.y - g.phys.bodies[host].pos.y);
+                g.stopPlay();
+                // 3. a spring between two bodies: select it, change its stiffness and rest length from the panel, delete it
+                g.resetWorld();
+                g.undoStack.clear();
+                int s1 = g.phys.addBox(Vec2(100, 60), Vec2(8, 8), 0, M_STEEL, true);
+                int s2 = g.phys.addBox(Vec2(160, 60), Vec2(8, 8), 0, M_STEEL, false);
+                (void)s1; (void)s2;
+                g.phys.stampBodies();
+                g.tool = T_SPRING;
+                drag(100, 60, 160, 60);
+                int sj = -1; for (auto& j : g.phys.joints) if (j.alive && j.type == J_DISTANCE) sj = j.id;
+                std::printf("spring tool: spring %s, rest %.0f, %.2f Hz\n", sj >= 0 ? "made" : "NOT made", sj >= 0 ? g.phys.joints[sj].length : 0.f, sj >= 0 ? g.phys.joints[sj].freq : 0.f);
+                g.tool = T_SELECT;
+                down(130, 60); up(130, 60);
+                std::printf("click on the spring selects it: %s\n", g.selJoint == sj ? "yes" : "NO");
+                g.layoutButtons();
+                float f0 = g.phys.joints[sj].freq, l0 = g.phys.joints[sj].length, d0 = g.phys.joints[sj].damping;
+                auto pressStepper = [&](const char* label, int which /*0 minus, 1 plus*/) {
+                    g.layoutButtons();
+                    for (size_t i = 0; i + 2 < g.rp.size(); ++i)
+                        if (g.rp[i].kind == 3 && g.rp[i].text.rfind(label, 0) == 0) {
+                            // the line is followed by - value + ; find the minus button after it
+                            for (size_t k = i + 1; k + 2 < g.rp.size(); ++k)
+                                if (g.rp[k].kind == 2 && g.rp[k].text == "-") { const SDL_Rect& r = g.rp[k + 2 * which + (which ? 1 : 0)].r; if (which == 0) { clickWin(r.x + r.w / 2, r.y + r.h / 2); } else { const SDL_Rect& rp2 = g.rp[k + 2].r; clickWin(rp2.x + rp2.w / 2, rp2.y + rp2.h / 2); } return true; }
+                        }
+                    return false;
+                };
+                bool a1 = pressStepper("STIFFNESS", 1), a2 = pressStepper("DAMPING", 1), a3 = pressStepper("REST LENGTH", 0);
+                std::printf("panel steppers found: %d %d %d; stiffness %.2f -> %.2f, damping %.2f -> %.2f, rest length %.0f -> %.0f\n", a1, a2, a3, f0, g.phys.joints[sj].freq, d0, g.phys.joints[sj].damping, l0, g.phys.joints[sj].length);
+                key(SDLK_DELETE);
+                std::printf("Delete removes the selected spring: %s\n", g.phys.joints[sj].alive ? "NO" : "yes");
+                key(SDLK_z, KMOD_CTRL);
+                std::printf("Ctrl+Z brings it back: %s\n", g.phys.joints[sj].alive ? "yes" : "NO");
+                break;
+            }
+            case 33: {
+                g.resetWorld();
+                g.phys.addBox(Vec2(100, 60), Vec2(8, 8), 0, M_STEEL, true);
+                int b2 = g.phys.addBox(Vec2(160, 60), Vec2(8, 8), 0, M_STEEL, false);
+                int sj = g.phys.addDistance(0, Vec2(100, 60), b2, Vec2(160, 60), 3.f);
+                g.phys.stampBodies();
+                g.tool = T_SELECT; g.selectJoint(sj);
+                break;
+            }
+            case 32: g.buildShotgun(); break;
+            case 31: {   // the shotgun, run
+                g.buildShotgun();
+                g.play();
+                for (int f = 0; f <= 600; ++f) {
+                    g.update();
+                    if (f % 20 == 0 || f == 5) {
+                        const Body& w = g.phys.bodies[g.lastGun.wad]; const Body& h = g.phys.bodies[g.lastGun.hammer];
+                        float pmax = 0; int gas = 0; double amt = 0, fire = 0;
+                        for (int y = 108; y <= 138; ++y) for (int x = 126; x <= 250; ++x) { const Cell& c = g.world.cells[y * World::W + x]; if (MATS[c.t].kind == K_GAS) { pmax = std::max(pmax, c.amt * (c.temp + 273.f) / 293.f); ++gas; amt += c.amt; } if (c.t == M_FIRE) ++fire; }
+                        int gp = 0; for (auto& c : g.world.cells) if (c.t == M_GUNPOWDER) ++gp;
+                        float vs = 0; for (int id : g.lastGun.shot) vs = std::max(vs, g.phys.bodies[id].vel.x);
+                        std::printf("f=%3d hammer x=%.0f vx=%.0f | powder cells %d gas cells %d total %.0f maxP %.1f | wad x=%.0f vx=%.0f | shot vx max %.0f | primer %s\n", f, h.pos.x, h.vel.x, gp, gas, amt, pmax, w.pos.x, w.vel.x, vs, g.phys.lastEvent.c_str());
+                    }
                 }
                 break;
             }

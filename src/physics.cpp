@@ -72,6 +72,13 @@ bool Body::contains(Vec2 p) const {
     return std::fabs(l.x) <= half.x && std::fabs(l.y) <= half.y;
 }
 
+float Body::distanceTo(Vec2 p) const {
+    if (shape == SHAPE_CIRCLE) return std::max(0.f, length(p - pos) - radius);
+    Vec2 l = toLocal(p);
+    float dx = std::max(0.f, std::fabs(l.x) - half.x), dy = std::max(0.f, std::fabs(l.y) - half.y);
+    return std::sqrt(dx * dx + dy * dy);
+}
+
 Physics::Physics(World* w) : world(w) {
     worldBody.alive = true;
     worldBody.isStatic = true;
@@ -207,7 +214,7 @@ void Physics::translateBodies(const std::vector<int>& ids, Vec2 delta) {
         bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
         if (!ia && !ib) continue;
         if (ia && ib) continue;
-        if (j.type == J_SLIDER) { if (ia) j.lb += delta; continue; }
+        if (j.type == J_SLIDER && j.b < 0) { if (ia) j.lb += delta; continue; }
         if (ia) {
             if (j.b < 0) j.lb += delta;
             else { const Body& B2 = bodies[j.a]; j.la = B2.toLocal((B2.pos - delta) + rotate(j.la, B2.angle)); }
@@ -282,6 +289,20 @@ int Physics::addSlider(int body, Vec2 axis) {
     j.u = normalize(axis);
     j.lb = bodies[body].pos;       // a point on the line
     j.length = bodies[body].angle; // the locked angle
+    return id;
+}
+
+int Physics::addSliderRel(int a, int b, Vec2 anchor, Vec2 axis) {
+    if (a < 0 || b < 0 || length(axis) < 1e-3f) return -1;
+    if (bodies[a].isStatic && !bodies[b].isStatic) std::swap(a, b);   // the moving body slides along the other
+    int id = allocJoint();
+    Joint& j = joints[id];
+    j.type = J_SLIDER;
+    j.a = a; j.b = b;
+    j.la = bodies[a].toLocal(anchor);
+    j.lb = bodies[b].toLocal(anchor);
+    j.u = rotate(normalize(axis), -bodies[b].angle);   // the line, in the frame of the body it slides along
+    j.length = bodies[a].angle - bodies[b].angle;      // the locked relative angle
     return id;
 }
 
@@ -550,6 +571,8 @@ void Physics::fluidForces() {
                     link->a += sm.n * sm.w;  // pointing from the body into the liquid
                 }
                 if (n.amt > 1.0001f) b.fluidC += LIQUID_DAMPING * sm.w;
+            } else if (k == K_POWDER && sm.edge >= 0 && faceCnt[sm.edge] > 0) {
+                p = faceSum[sm.edge] / faceCnt[sm.edge];   // gas pressure reaches the part of a face that lies against loose grains too (a charge of powder burning against a wad)
             } else {
                 continue;
             }
@@ -985,6 +1008,19 @@ void Physics::prestepJoint(Joint& j, float h) {
     j.rB = rotate(j.lb, Bb.angle);
     j.accImp = 0;
     j.accP = Vec2();
+    if (j.type == J_SLIDER && j.b >= 0) {   // a slider between two bodies: A keeps to a line fixed in B's frame, and to its angle relative to B
+        Vec2 ax = rotate(j.u, Bb.angle), n(-ax.y, ax.x);
+        j.rA = rotate(j.la, A.angle); j.rB = rotate(j.lb, Bb.angle);
+        Vec2 d = (A.pos + j.rA) - (Bb.pos + j.rB);
+        j.k11 = dot(ax, d);   // along-line separation: couples B's rotation into the perpendicular constraint
+        float cA = cross(j.rA, n), cB = cross(j.rB, n) + j.k11;
+        j.effMass = A.invMass + Bb.invMass + A.invI * cA * cA + Bb.invI * cB * cB;
+        j.effMass = j.effMass > 0.f ? 1.f / j.effMass : 0.f;
+        j.beta = std::clamp(dot(n, d) * 0.2f / h, -MAX_BIAS, MAX_BIAS);
+        float ang = A.angle - Bb.angle - j.length;
+        j.gamma = std::clamp(ang * 0.2f / h, -20.f, 20.f);
+        return;
+    }
     if (j.type == J_SLIDER) {
         Vec2 n(-j.u.y, j.u.x);
         j.beta = std::clamp(dot(n, A.pos - j.lb) * 0.2f / h, -MAX_BIAS, MAX_BIAS);       // perpendicular drift
@@ -1047,6 +1083,20 @@ void Physics::prestepJoint(Joint& j, float h) {
 void Physics::solveJoint(Joint& j, float h) {
     Body& A = B(j.a);
     Body& Bb = B(j.b);
+    if (j.type == J_SLIDER && j.b >= 0) {
+        Vec2 ax = rotate(j.u, Bb.angle), n(-ax.y, ax.x);
+        float iI = A.invI + Bb.invI;
+        if (iI > 0.f) {   // keep the angle relative to B
+            float imp = -((A.w - Bb.w) + j.gamma) / iI;
+            A.w += A.invI * imp; Bb.w -= Bb.invI * imp;
+        }
+        float cA = cross(j.rA, n), cB = cross(j.rB, n) + j.k11;
+        float cdot = dot(n, A.vel - Bb.vel) + A.w * cA - Bb.w * cB;
+        float P = -(cdot + j.beta) * j.effMass;
+        A.vel += n * (P * A.invMass); A.w += A.invI * P * cA;
+        Bb.vel -= n * (P * Bb.invMass); Bb.w -= Bb.invI * P * cB;
+        return;
+    }
     if (j.type == J_SLIDER) {
         if (A.invI > 0.f) A.w -= j.gamma + A.w;          // hold the angle
         if (A.invMass > 0.f) {
@@ -1606,7 +1656,7 @@ void Physics::scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot) {
         if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
         bool ia = j.a >= 0 && in[j.a], ib = j.b >= 0 && in[j.b];
         if (!ia && !ib) continue;
-        if (j.type == J_SLIDER) { if (ia) j.lb += bodies[j.a].pos - old[j.a].pos; continue; }
+        if (j.type == J_SLIDER && j.b < 0) { if (ia) j.lb += bodies[j.a].pos - old[j.a].pos; continue; }
         if (ia && ib) {  // both ends scale: anchors scale with them
             j.la = j.la * s; j.lb = j.lb * s;
             if (j.type == J_DISTANCE) j.length *= s;
@@ -1691,7 +1741,7 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
                 if (pieces.empty()) { j.alive = false; continue; }
                 bool isA = j.a == target;
                 Vec2 anchor = tc.toWorld(isA ? j.la : j.lb);
-                if (j.type == J_SLIDER) anchor = tc.pos;
+                if (j.type == J_SLIDER && j.b < 0) anchor = tc.pos;
                 int best = pieces[0];
                 float bd = 1e30f;
                 for (int pid : pieces) {
@@ -1699,7 +1749,7 @@ int Physics::cutBody(int target, const std::vector<int>& cutters) {
                     float d = pb.contains(anchor) ? -1.f : lengthSq(pb.pos - anchor);
                     if (d < bd) { bd = d; best = pid; }
                 }
-                if (j.type == J_SLIDER) { j.lb += bodies[best].pos - tc.pos; j.a = best; continue; }
+                if (j.type == J_SLIDER && j.b < 0) { j.lb += bodies[best].pos - tc.pos; j.a = best; continue; }
                 (isA ? j.a : j.b) = best;
                 (isA ? j.la : j.lb) = bodies[best].toLocal(anchor);
             }
@@ -1778,10 +1828,11 @@ void Physics::reshape(int id, Vec2 pos, Vec2 half, float radius, float angle, ui
     finalize(b);
     for (auto& j : joints) {
         if (!j.alive || j.group >= 0 || j.type == J_MOUSE) continue;
-        if (j.type == J_SLIDER) {
+        if (j.type == J_SLIDER && j.b < 0) {
             if (j.a == id) { j.lb += pos - old.pos; j.length += angle - old.angle; }
             continue;
         }
+        if (j.type == J_SLIDER) { if (j.a == id) j.length += angle - old.angle; if (j.b == id) j.length -= angle - old.angle; }
         if (j.a == id) j.la = b.toLocal(old.toWorld(j.la));   // keep the joint where it was in the world
         if (j.b == id) j.lb = b.toLocal(old.toWorld(j.lb));
     }
