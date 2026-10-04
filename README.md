@@ -7,15 +7,49 @@ A C++17 / SDL2 toy that mixes two genres in one world:
 
 The two halves are fully coupled: bodies shove particles aside, float (or sink) in water, oil and lava according to their mass, get slowed by sand, rest on sand piles, and are blasted around by explosions.
 
-## Build & run
+## Build and run
+
+SandBots is C++17 with SDL2 as its only dependency (the physics engine, sand engine and bitmap font are written from scratch).
+
+### 1. Install the dependencies
 
 ```bash
-sudo apt install libsdl2-dev cmake g++     # Debian/Ubuntu
-cmake -S . -B build && cmake --build build -j
-./build/sandbots
+./install_deps.sh            # checks everything, offers to install what is missing
+./install_deps.sh --yes      # install without asking
+./install_deps.sh --check    # only check (exit status 1 if something is missing)
 ```
 
-The physics engine, the sand engine and the bitmap font are all written from scratch – SDL2 is the only dependency.
+The script looks for a C++17 compiler, CMake 3.10 or newer, make (or ninja), pkg-config and the SDL2 development files, and installs the missing ones with apt, dnf, pacman, zypper, apk, Homebrew or MSYS2. It does not need a network if everything is already present.
+
+By hand instead:
+
+| System | Command |
+|---|---|
+| Debian / Ubuntu | `sudo apt install build-essential cmake pkg-config libsdl2-dev` |
+| Fedora | `sudo dnf install gcc-c++ make cmake pkgconf-pkg-config SDL2-devel` |
+| Arch | `sudo pacman -S base-devel cmake pkgconf sdl2` |
+| macOS | `xcode-select --install` then `brew install cmake pkg-config sdl2` |
+| Windows | install [MSYS2](https://www.msys2.org), open the *MSYS2 MinGW x64* shell, then `pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-SDL2 mingw-w64-x86_64-pkgconf make` |
+
+### 2. Compile
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+(On Windows/MSYS2 add `-G "MinGW Makefiles"` or `-G Ninja` to the first command.) The program is `build/sandbots`.
+
+### 3. Run
+
+```bash
+./build/sandbots            # from the repository folder; saves go to ./saves
+./build/sandbots --selftest # optional: headless regression checks, prints PASS/FAIL
+```
+
+The window is 1200 pixels wide and about 920 tall. Press **F1** in the program for a quick tour.
+
+Troubleshooting: if CMake says it cannot find SDL2, the development package is missing (`libsdl2-dev` / `SDL2-devel`, not just the runtime library); run `./install_deps.sh`. If you change compilers or move the folder, delete `build/` and configure again. On a machine with no display, use the headless `--shot` mode below.
 
 ## Controls
 
