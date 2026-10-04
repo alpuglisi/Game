@@ -474,6 +474,65 @@ void vacuumFans() {
     }
 }
 
+// bonds: a paraffin bond must hold a heavy block, give way when warmed and when overloaded
+void bonds() {
+    std::printf("bonds\n");
+    // cold: a heavy steel block hangs from a ledge by wax for 10 seconds
+    for (int variant = 0; variant < 3; ++variant) {
+        Rig r;
+        r.phys.addBox(Vec2(60, 60), Vec2(40, 3), 0, M_STEEL, true);
+        int blk = r.phys.addBox(Vec2(60, 76), Vec2(14, 10), 0, M_STEEL, false);
+        r.phys.addBond(Vec2(60, 63), blk, 0, 55.f, 0.f, 10.f);
+        if (variant == 1) for (int y = 68; y <= 84; ++y) for (int x = 75; x <= 80; ++x) r.world.setCell(x, y, M_HEATER);   // touching the block
+        r.phys.stampBodies();
+        float y0 = r.phys.bodies[blk].pos.y;
+        if (variant == 2) {   // hammer it: a lead ball dropped on the block is a brief jolt, not a failure
+            int ball = r.phys.addCircle(Vec2(38, 76), 3.f, M_LEAD, false, false);
+            r.phys.bodies[ball].vel = Vec2(70.f, 0.f);
+        }
+        r.step(600);
+        float dy = r.phys.bodies[blk].pos.y - y0;
+        char d[96];
+        std::snprintf(d, sizeof d, "block dropped %.1f cells, %ld bonds broken", dy, r.phys.bondsBroken);
+        if (variant == 0) check(dy < 1.f && r.phys.bondsBroken == 0, "a paraffin bond holds a heavy steel block indefinitely", d);
+        if (variant == 1) check(dy > 20.f && r.phys.bondsBroken == 1, "the same bond lets go when the block is warmed to its melting point", d);
+        if (variant == 2) check(dy < 1.f && r.phys.bondsBroken == 0, "a small jolt does not break it", d);
+    }
+}
+
+// jet engine: fan + fuel injector + spark plug in a duct with a nozzle, free in space. Burning must add thrust.
+void jet() {
+    std::printf("jet engine\n");
+    float vx[2];
+    for (int lit = 0; lit < 2; ++lit) {
+        Rig r;
+        r.phys.gravity = Vec2(0, 0);
+        const float cy = 100.f, xc = 260.f, half = 11.5f;
+        std::vector<int> parts;
+        auto box = [&](float u, float y, float hu, float hy, uint8_t m, float ang = 0.f) { int b = r.phys.addBox(Vec2(xc - u, y), Vec2(hu, hy), ang, m, false); parts.push_back(b); return b; };
+        box(15, cy - 13, 15, 1.5f, M_ALUMINUM);
+        box(15, cy + 13, 15, 1.5f, M_ALUMINUM);
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            Vec2 p0(xc - 30.f, cy + sgn * half), p1(xc - 40.f, cy + sgn * (half - 3.f)), d = p1 - p0;
+            parts.push_back(r.phys.addBox((p0 + p1) * 0.5f, Vec2(length(d) * 0.5f + 1.f, 1.5f), std::atan2(d.y, d.x), M_ALUMINUM, false));
+        }
+        int fan = box(8, cy, 1.5f, half, M_ALUMINUM);
+        r.phys.bodies[fan].fan.strength = -100.f;
+        int inj = box(14, cy - half + 1.6f, 1.5f, 1.5f, M_ALUMINUM);
+        r.phys.bodies[inj].src = Emitter{true, M_PROPANE, 150.f, 0.f, 0};
+        box(18, cy - half + 1.f, 1.5f, 1.f, M_IGNITER);
+        box(15, cy + 13.f + 5.5f, 16.f, 1.5f, M_ALUMINUM);   // the hull
+        r.phys.groupBodies(parts);
+        r.world.sparkPeriod = lit ? 20 : 0;
+        r.phys.stampBodies();
+        r.step(120);
+        vx[lit] = r.phys.bodies[fan].vel.x;
+    }
+    char d[96];
+    std::snprintf(d, sizeof d, "forward speed after 2 s: cold fan %.1f, burning %.1f cells/s", vx[0], vx[1]);
+    check(vx[0] > 5.f && vx[1] > 1.3f * vx[0], "a burning jet engine drives itself forward harder than the cold fan alone", d);
+}
+
 }  // namespace
 
 int runSelfTests() {
@@ -487,6 +546,8 @@ int runSelfTests() {
     flames();
     fans();
     vacuumFans();
+    bonds();
+    jet();
     std::printf("%s (%d failing)\n", failures ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
 }

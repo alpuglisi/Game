@@ -78,7 +78,7 @@ const int SNAPS[] = {0, 1, 2, 5, 10};
 // bond presets: melting temperature (deg C) and breaking force (engine units)
 const char* BOND_NAMES[] = {"PARAFFIN", "SOLDER", "EPOXY", "SHEAR PIN"};
 const float BOND_TEMP[] = {55.f, 190.f, 260.f, 5000.f};
-const float BOND_FORCE[] = {100000.f, 1000000.f, 3000000.f, 300000.f};
+const float BOND_G[] = {10.f, 40.f, 120.f, 30.f};   // load each bond holds, as a multiple of the weight it carries
 
 SDL_Color rgb(uint32_t c, uint8_t a = 255) {
     return SDL_Color{(uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c, a};
@@ -196,7 +196,7 @@ struct Game {
     int fileIdx = -1;
     int newArmed = 0;
     int bondType = 0;
-    float bondT = 55.f, bondF = 100000.f;
+    float bondT = 55.f, bondG = 10.f;
     // ---- camera: the window shows VIEW_W cells of the wider world
     float camXf = 0.f;
     int camX = 0;
@@ -527,11 +527,11 @@ struct Game {
             line("STRONGLY LOADED.", 0xb0bcd4);
             gap(4);
             for (int i = 0; i < 4; i += 2)
-                row2(BOND_NAMES[i], bondType == i, [this, i] { bondType = i; bondT = BOND_TEMP[i]; bondF = BOND_FORCE[i]; }, "BOND MATERIAL",
-                     BOND_NAMES[i + 1], bondType == i + 1, [this, i] { bondType = i + 1; bondT = BOND_TEMP[i + 1]; bondF = BOND_FORCE[i + 1]; }, "BOND MATERIAL");
+                row2(BOND_NAMES[i], bondType == i, [this, i] { bondType = i; bondT = BOND_TEMP[i]; bondG = BOND_G[i]; }, "BOND MATERIAL",
+                     BOND_NAMES[i + 1], bondType == i + 1, [this, i] { bondType = i + 1; bondT = BOND_TEMP[i + 1]; bondG = BOND_G[i + 1]; }, "BOND MATERIAL");
             gap(4);
             stepper("MELTS AT (C)", fmt(bondT), [this] { bondT = std::max(-50.f, bondT - 5.f); }, [this] { bondT = std::min(5000.f, bondT + 5.f); }, "TEMPERATURE AT WHICH THE BOND GIVES WAY");
-            stepper("BREAKS AT (KN)", fmt(bondF / 1000.f), [this] { bondF = std::max(1000.f, bondF - 50000.f); }, [this] { bondF = std::min(1e8f, bondF + 50000.f); }, "LOAD AT WHICH THE BOND GIVES WAY");
+            stepper("HOLDS (X WEIGHT)", fmt(bondG), [this] { bondG = std::max(1.f, bondG - (bondG > 20.f ? 10.f : 1.f)); }, [this] { bondG = std::min(1000.f, bondG + (bondG >= 20.f ? 10.f : 1.f)); }, "HOW MANY TIMES THE WEIGHT IT CARRIES THE BOND CAN HOLD BEFORE IT GIVES WAY");
         } else if (tool == T_PIN || tool == T_MOTOR || tool == T_AUTOMOTOR || tool == T_ROD || tool == T_SPRING || tool == T_SLIDER || tool == T_GRAB || tool == T_DELETE) {
             header(TOOL_NAMES[tool]);
             // plain-language help for the tool, wrapped to the panel
@@ -639,7 +639,7 @@ struct Game {
             {"BONDS", &Game::buildBondTest, "WAX AND SHEAR-PIN BONDS"},
             {"PRIMER", &Game::buildPrimerTest, "A FIRING PIN STRIKES A PRIMER"},
             {"FANS", &Game::buildFanTest, "BLOWERS, A CLOSED DUCT AND A VACUUM FAN"},
-            {"JET ENGINE", &Game::buildJetEngine, "FAN, FUEL, SPARK PLUG AND NOZZLE ON A TEST STAND"},
+            {"JET ENGINE", &Game::buildJet, "A TURBOJET ON WHEELS: FAN, FUEL, SPARK PLUG, NOZZLE"},
             {"ROAD + FOCUS", &Game::buildRoadTest, "A FAN-DRIVEN CAR AND THE FOLLOWING CAMERA"},
         };
         const int n = 13, cols = 3, bw = 220, bh = 34, gapx = 10, gapy = 10;
@@ -1233,8 +1233,8 @@ struct Game {
                 selectMaterial(M_BATT_POS);
                 break;
             case FK_BOND:
-                bondT = std::clamp(fv(0), -50.f, 5000.f); bondF = std::clamp(fv(1), 1.f, 1e5f) * 1000.f;
-                formMsg = "NEXT BOND: MELTS " + fmt(bondT) + "C / BREAKS " + fmt(bondF / 1000.f) + " KN";
+                bondT = std::clamp(fv(0), -50.f, 5000.f); bondG = std::clamp(fv(1), 1.f, 1000.f);
+                formMsg = "NEXT BOND: MELTS " + fmt(bondT) + "C / HOLDS " + fmt(bondG) + "X ITS WEIGHT";
                 break;
             case FK_FAN: {
                 lastFan = std::clamp(std::fabs(fv(5)), 1.f, 300.f);
@@ -1307,8 +1307,8 @@ struct Game {
 
     void cycleBond() {
         bondType = (bondType + 1) % 4;
-        bondT = BOND_TEMP[bondType]; bondF = BOND_FORCE[bondType];
-        notify(std::string("BOND: ") + BOND_NAMES[bondType] + " LETS GO ABOVE " + fmt(bondT) + "C OR " + fmt(bondF / 1000.f) + " KN");
+        bondT = BOND_TEMP[bondType]; bondG = BOND_G[bondType];
+        notify(std::string("BOND: ") + BOND_NAMES[bondType] + " MELTS AT " + fmt(bondT) + "C, HOLDS " + fmt(bondG) + "X ITS WEIGHT");
     }
     void openBatteryForm() {
         formKind = FK_BATTERY; fActive = 0; fFresh = true;
@@ -1317,7 +1317,7 @@ struct Game {
     }
     void openBondForm() {
         formKind = FK_BOND; fActive = 0; fFresh = true;
-        fields = {{"MELT C", fmt(bondT)}, {"BREAK KN", fmt(bondF / 1000.f)}};
+        fields = {{"MELT C", fmt(bondT)}, {"HOLDS X WEIGHT", fmt(bondG)}};
         formMsg = "";
     }
     // ---------------------------------------------------------------- run mode, snapshots and files
@@ -1635,7 +1635,7 @@ struct Game {
         // 1: a steel block glued under a ledge with paraffin; a heater beside it warms it until the wax lets go
         phys.addBox(Vec2(50, 90), Vec2(30, 3), 0, M_STEEL, true);
         int w1 = phys.addBox(Vec2(50, 100), Vec2(8, 8), 0, M_STEEL, false);
-        phys.addBond(Vec2(50, 93), w1, 0, BOND_TEMP[0], BOND_FORCE[0] * 8.f);
+        phys.addBond(Vec2(50, 93), w1, 0, BOND_TEMP[0], 0.f, BOND_G[0]);
         rect(59, 94, 66, 106, M_HEATER);
         label(20, 78, "PARAFFIN BOND MELTS WHEN HEATED (55C)");
         // 2: platforms pinned in mid-air by shear pins; a heavy ball dropped on one snaps its pin (the twin stays)
@@ -1718,30 +1718,46 @@ struct Game {
         label(312, 48, "VACUUM FAN DRAWS THE CHAMBER EMPTY");
         phys.stampBodies();
     }
-    // Turbojet test stand: a fan compresses air into a combustor, fuel burns, the hot gas leaves through a nozzle.
-    void buildJetEngine() {
+    // Flying turbojet: inlet at the front (right), nozzle at the back (left). The casing is a welded body group on wheels.
+    struct JetCfg { float fan = 100.f, fuel = 150.f, fuelU = 14.f, plugU = 18.f, len = 30.f, nozIn = 3.f, nozLen = 10.f, half = 11.5f; int spark = 1; bool space = false; };
+    static JetCfg& jet() { static JetCfg c; return c; }
+    int buildJetCar() {
         resetWorld();
         rect(0, 200, World::W - 1, 203, M_WALL);
-        // casing (steel walls, open at both ends) with a pinched nozzle at the back
-        rect(60, 86, 190, 88, M_STEEL); rect(60, 112, 190, 114, M_STEEL);
-        for (int i = 0; i < 12; ++i) {   // converging nozzle
-            rect(150 + i * 3, 89, 152 + i * 3, 89 + i / 2, M_STEEL);
-            rect(150 + i * 3, 111 - i / 2, 152 + i * 3, 111, M_STEEL);
+        const JetCfg& C = jet();
+        const float cy = C.space ? 100.f : 170.f, xc = 260.f;      // x = xc - u, where u runs from the inlet to the nozzle
+        const float wallT = 1.5f, H = C.half + wallT;
+        std::vector<int> parts;
+        auto box = [&](float u, float y, float hu, float hy, uint8_t m) { int b = phys.addBox(Vec2(xc - u, y), Vec2(hu, hy), 0, m, false); parts.push_back(b); return b; };
+        box(C.len * 0.5f, cy - H, C.len * 0.5f, wallT, M_ALUMINUM);
+        box(C.len * 0.5f, cy + H, C.len * 0.5f, wallT, M_ALUMINUM);
+        for (int sgn = -1; sgn <= 1; sgn += 2) {   // two angled plates make the converging nozzle
+            Vec2 p0(xc - C.len, cy + sgn * C.half), p1(xc - C.len - C.nozLen, cy + sgn * (C.half - C.nozIn));
+            Vec2 d = p1 - p0;
+            int b = phys.addBox((p0 + p1) * 0.5f, Vec2(length(d) * 0.5f + 1.f, wallT), std::atan2(d.y, d.x), M_ALUMINUM, false);
+            parts.push_back(b);
         }
-        // compressor: a blower filling the inlet
-        int comp = phys.addBox(Vec2(70, 100), Vec2(1.5f, 11.5f), 0, M_STEEL, true);
-        phys.bodies[comp].fan.strength = 120.f;
-        // fuel: an emitter feeding propane gas just behind the compressor, spark plug in the combustor
-        int fuel = phys.addBox(Vec2(80, 100), Vec2(1.5f, 1.5f), 0, M_STEEL, true);
-        phys.bodies[fuel].src = Emitter{true, M_PROPANE, 400.f, 0.f, 0};
-        rect(104, 89, 104, 92, M_IGNITER);
-        sparkIdx = 5; world.sparkPeriod = SPARK_RATES[sparkIdx];
-        label(58, 70, "COMPRESSOR FAN");
-        label(70, 78, "FUEL EMITTER (PROPANE)");
-        label(98, 124, "SPARK PLUG");
-        label(150, 124, "NOZZLE");
+        int comp = box(8, cy, 1.5f, C.half, M_ALUMINUM);
+        phys.bodies[comp].fan.strength = -C.fan;
+        int fuel = box(C.fuelU, cy - C.half + 1.6f, 1.5f, 1.5f, M_ALUMINUM);   // an injector on the wall, out of the airstream
+        phys.bodies[fuel].src = Emitter{true, M_PROPANE, C.fuel, 0.f, 0};
+        box(C.plugU, cy - C.half + 1.f, 1.5f, 1.f, M_IGNITER);
+        sparkIdx = 5; world.sparkPeriod = C.spark ? SPARK_RATES[sparkIdx] : 0;
+        int hull = box(C.len * 0.5f, cy + H + 4.f, C.len * 0.5f + 1.f, 1.5f, M_ALUMINUM);
+        if (!C.space)
+            for (int sx = -1; sx <= 1; sx += 2) {
+                int wh = phys.addCircle(Vec2(xc - C.len * 0.5f + 40.f * sx, cy + H + 9.f), 4.f, M_RUBBER, false, true);
+                phys.addPin(Vec2(xc - C.len * 0.5f + 40.f * sx, cy + H + 9.f), hull, wh, false, false);
+            }
+        phys.groupBodies(parts);
+        label(xc - 120, cy - 40, "TURBOJET: FAN COMPRESSES AIR, FUEL + SPARK PLUG BURN IT, NOZZLE EXHAUSTS LEFT");
+        selectBody(hull, false, false);
+        focusBody = hull;
+        setCam(100);
         phys.stampBodies();
+        return hull;
     }
+    void buildJet() { buildJetCar(); }
     void buildRoadTest() {
         resetWorld();
         rect(0, 200, World::W - 1, 203, M_WALL);
@@ -2115,8 +2131,8 @@ struct Game {
         std::vector<int> ids = phys.bodiesAt(p);
         if (ids.empty()) { notify("CLICK ON A BODY (OR WHERE TWO OVERLAP)"); return; }
         int a = ids.back(), b = ids.size() >= 2 ? ids[ids.size() - 2] : -1;
-        phys.addBond(p, a, b, bondT, bondF);
-        notify(std::string("BONDED: LETS GO ABOVE ") + fmt(bondT) + "C OR " + fmt(bondF / 1000.f) + " KN");
+        phys.addBond(p, a, b, bondT, 0.f, bondG);
+        notify(std::string("BONDED: MELTS AT ") + fmt(bondT) + "C, HOLDS " + fmt(bondG) + "X ITS WEIGHT");
     }
 
     // Starts moving the selected bodies once the pointer has really dragged; also called on release so that a quick
@@ -2652,7 +2668,9 @@ struct Game {
         }
     }
 
+    std::vector<int> bondsDrawn;
     void renderJoints() {
+        bondsDrawn.clear();
         for (auto& j : phys.joints) {
             if (!j.alive || j.group >= 0) continue;
             Vec2 a = phys.jointAnchorA(j);
@@ -2685,6 +2703,21 @@ struct Game {
                 }
                 fillPoly(circlePts(a, 2.f, 8), 0x303038);
                 fillPoly(circlePts(bb, 2.f, 8), 0x303038);
+                continue;
+            }
+            if (j.bondId >= 0) {   // a bond: a visible seam between its two pins, warming towards red as it nears melting
+                if (std::find(bondsDrawn.begin(), bondsDrawn.end(), j.bondId) != bondsDrawn.end()) continue;
+                bondsDrawn.push_back(j.bondId);
+                Vec2 other = a;
+                for (auto& k : phys.joints) if (k.alive && k.bondId == j.bondId && k.id != j.id) other = phys.jointAnchorA(k);
+                float T = phys.bodies[j.a].temp;
+                if (j.b >= 0) T = std::max(T, phys.bodies[j.b].temp);
+                float hot = std::clamp((T - 20.f) / std::max(10.f, j.breakT - 20.f), 0.f, 1.f);
+                SDL_Color base = j.breakT < 100.f ? SDL_Color{240, 232, 190, 255} : j.breakT < 230.f ? SDL_Color{190, 194, 206, 255} :
+                                 j.breakT < 1000.f ? SDL_Color{224, 160, 64, 255} : SDL_Color{120, 124, 134, 255};
+                SDL_Color c{(Uint8)(base.r + (255 - base.r) * hot), (Uint8)(base.g * (1.f - 0.75f * hot)), (Uint8)(base.b * (1.f - 0.85f * hot)), 255};
+                lineWorld(a, other, SDL_Color{30, 30, 40, 255}, 6);
+                lineWorld(a, other, c, 4);
                 continue;
             }
             bool motor = j.type == J_MOTOR;
@@ -3193,6 +3226,21 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--cam") && i + 1 < argc) camFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--tool") && i + 1 < argc) tabFlag = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--scenes")) scenesFlag = true;
+        else if (!std::strcmp(argv[i], "--jet") && i + 1 < argc) {   // --jet key=value,key=value
+            std::string kv = argv[++i];
+            size_t p = 0;
+            while (p < kv.size()) {
+                size_t e = kv.find(',', p); if (e == std::string::npos) e = kv.size();
+                std::string item = kv.substr(p, e - p); size_t q = item.find('=');
+                if (q != std::string::npos) {
+                    std::string k = item.substr(0, q); float v = (float)std::atof(item.c_str() + q + 1); auto& J = Game::jet();
+                    if (k == "fan") J.fan = v; else if (k == "fuel") J.fuel = v; else if (k == "fuelU") J.fuelU = v; else if (k == "plugU") J.plugU = v;
+                    else if (k == "len") J.len = v; else if (k == "noz") J.nozIn = v; else if (k == "nozLen") J.nozLen = v; else if (k == "half") J.half = v;
+                    else if (k == "spark") J.spark = (int)v; else if (k == "space") J.space = v > 0.5f;
+                }
+                p = e + 1;
+            }
+        }
         else if (!std::strcmp(argv[i], "--hover") && i + 2 < argc) { hoverX = std::atoi(argv[i + 1]); hoverY = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
     }
@@ -3219,7 +3267,8 @@ int main(int argc, char** argv) {
             case 17: g.buildElectricTest(); break;
             case 22: g.buildFanTest(); break;
             case 23: g.buildRoadTest(); break;
-            case 26: g.buildJetEngine(); break;
+            case 26: g.buildJetCar(); break;
+            case 27: g.buildJetCar(); break;
             case 24: {   // camera controls through real SDL events
                 g.buildRoadTest();
                 g.focusBody = -1;
@@ -3314,6 +3363,42 @@ int main(int argc, char** argv) {
                 g.cutSelection();
                 std::printf("subtract selection: circle %s, centre of the hole empty: %s\n", g.keepCutter ? "kept" : "consumed", !covered(310, 75) ? "yes" : "NO");
                 (void)before2;
+                break;
+            }
+            case 28: {   // paraffin bonds: they hold a heavy block, give way when warmed, and melt in a flame
+                g.resetWorld();
+                g.rect(0, 200, World::W - 1, 203, M_WALL);
+                g.phys.addBox(Vec2(60, 60), Vec2(50, 3), 0, M_STEEL, true);            // ledge
+                int cold = g.phys.addBox(Vec2(30, 76), Vec2(14, 10), 0, M_STEEL, false);      // heavy block, wax glued under the ledge
+                g.phys.addBond(Vec2(30, 63), cold, 0, BOND_TEMP[0], 0.f, BOND_G[0]);
+                int warm = g.phys.addBox(Vec2(90, 76), Vec2(14, 10), 0, M_STEEL, false);
+                g.phys.addBond(Vec2(90, 63), warm, 0, BOND_TEMP[0], 0.f, BOND_G[0]);
+                g.rect(105, 68, 111, 84, M_HEATER);                                        // a heater next to the second block
+                // two stacked blocks glued with wax, the lower one resting on the ground
+                int low = g.phys.addBox(Vec2(160, 188), Vec2(12, 8), 0, M_STEEL, false);
+                int top = g.phys.addBox(Vec2(160, 172), Vec2(10, 8), 0, M_STEEL, false);
+                g.phys.addBond(Vec2(160, 180), top, low, BOND_TEMP[0], 0.f, BOND_G[0]);
+                g.phys.stampBodies();
+                g.play();
+                auto st = [&](int id) { return g.phys.bodies[id].pos; };
+                for (int f = 0; f <= 900; ++f) {
+                    g.update();
+                    if (f % 100 == 0)
+                        std::printf("f=%d cold block y=%.1f (hangs at 76), warm block y=%.1f temp %.0f, top block y=%.1f, bonds broken so far %ld\n", f, st(cold).y, st(warm).y, g.phys.bodies[warm].temp, st(top).y, g.phys.bondsBroken);
+                }
+                break;
+            }
+            case 29: {   // the BONDS scene, run
+                g.buildBondTest();
+                g.play();
+                for (int f = 0; f <= 900; ++f) {
+                    g.update();
+                    if (f % 150 == 0) {
+                        std::printf("f=%d broken=%ld last=%s |", f, g.phys.bondsBroken, g.phys.lastEvent.c_str());
+                        for (auto& b : g.phys.bodies) if (b.alive && !b.isStatic) std::printf(" [%d %.0f,%.0f T%.0f]", b.id, b.pos.x, b.pos.y, b.temp);
+                        std::printf("\n");
+                    }
+                }
                 break;
             }
             case 13: g.buildPrecisionTest(); g.tool = Tool::T_HOSE; g.clearSelection(); g.openForm(); break;

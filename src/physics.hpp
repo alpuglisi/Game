@@ -71,6 +71,7 @@ struct Joint {
     int group = -1;  // >= 0: one half of a weld holding a group together
     int bondId = -1;       // >= 0: part of a frangible bond that lets go on heat or force
     float breakT = 1e9f, breakF = 1e9f, peak = 0.f;
+    float loadG = 0.f, fAvg = 0.f;   // bond rating in g (multiples of the bonded weight; 0 = use breakF) and the smoothed joint load
     // mouse
     float maxForce = 0;
     // solver cache
@@ -148,7 +149,9 @@ public:
     void translateBodies(const std::vector<int>& ids, Vec2 delta);
     void applyFans(float dt);   // directed airflow, suction/stall, thrust and wind on bodies
     // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
-    int addBond(Vec2 anchor, int a, int b, float breakT, float breakF);
+    int addBond(Vec2 anchor, int a, int b, float breakT, float breakF, float loadG = 0.f);
+    float bondMass(const Joint& j) const;   // the weight a bond carries: the lighter of the two bonded bodies (whole groups)
+    float groupMass(int body) const;
     long bondsBroken = 0;
     // dev: how often gas in each part of a fan lane hopped (0 far half behind, 1 near half behind, 2 ahead)
     long fanHopTries[3] = {0, 0, 0}, fanHopMoves[3] = {0, 0, 0};

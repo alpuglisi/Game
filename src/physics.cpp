@@ -1,3 +1,4 @@
+#include <functional>
 #include <cstdlib>
 #include <cstdio>
 #include "physics.hpp"
@@ -184,7 +185,7 @@ int Physics::addJointCopy(const Joint& src) {
     Joint& j = joints[id];
     j = src;
     j.id = id; j.alive = true;
-    j.accP = Vec2(); j.accImp = 0.f; j.peak = 0.f;
+    j.accP = Vec2(); j.accImp = 0.f; j.peak = 0.f; j.fAvg = 0.f;
     return id;
 }
 
@@ -439,6 +440,12 @@ void Physics::fluidForces() {
             groupMem[b.group].push_back(b.id);
         }
     std::vector<int> groupOf(closed.size(), -1);
+    // A machine built around a powered fan (a jet engine) gets its push from the fan model, which already accounts for
+    // the gas flowing through it. Counting the grid's pressure on its casing as well would add a second, noisy and
+    // off-axis force from the same flow, so those groups feel no gas pressure.
+    std::vector<char> fanGroup(groupMem.size(), 0);
+    for (size_t g = 0; g < groupMem.size(); ++g)
+        for (int m : groupMem[g]) if (bodies[m].fan.strength != 0.f) fanGroup[g] = 1;
 
     // Pressure of the gas / liquid touching each body, applied as force next frame. Sampled along the
     // body's true outline (outward normal, weighted by length) rather than the grid's coverage cells.
@@ -447,6 +454,7 @@ void Physics::fluidForces() {
         b.fluidT = 0;
         b.fluidC = 0;
         if (!b.alive || b.isStatic) continue;
+        if (b.group >= 0 && b.group < (int)fanGroup.size() && fanGroup[b.group]) continue;
         struct Sample { Vec2 p, n; float w; int edge; };
         std::vector<Sample> samples;
         if (b.shape == SHAPE_CIRCLE) {
@@ -1226,13 +1234,26 @@ void Physics::step(float dt) {
     hits.clear(); primerStrikes.clear();
     for (auto& j : joints) j.peak = 0.f;
     for (int s = 0; s < SUBSTEPS; ++s) substep(h);
+    for (auto& j : joints) if (j.alive && j.bondId >= 0) j.fAvg += 0.2f * (j.peak - j.fAvg);   // ~0.1 s of memory: a jolt is not a failure
     processEvents(dt);
     thermalStep();
     stampBodies();
 }
 
 // ------------------------------------------------------------------ bonds, primers
-int Physics::addBond(Vec2 anchor, int a, int b, float breakT, float breakF) {
+float Physics::groupMass(int id) const {
+    const Body& b = bodies[id];
+    if (b.group < 0) return b.mass;
+    double m = 0;
+    for (auto& o : bodies) if (o.alive && o.group == b.group) m += o.mass;
+    return (float)m;
+}
+float Physics::bondMass(const Joint& j) const {
+    auto mass = [&](int i) { return (i < 0 || !bodies[i].alive || bodies[i].isStatic) ? 1e12f : groupMass(i); };
+    return std::min(mass(j.a), mass(j.b));
+}
+
+int Physics::addBond(Vec2 anchor, int a, int b, float breakT, float breakF, float loadG) {
     if (a < 0) std::swap(a, b);
     if (a < 0) return -1;
     Vec2 d = rotate(Vec2(4.f, 0.f), bodies[a].angle);
@@ -1240,7 +1261,7 @@ int Physics::addBond(Vec2 anchor, int a, int b, float breakT, float breakF) {
     for (int k = -1; k <= 1; k += 2) {
         int j = addPin(anchor + d * (float)k, a, b, false, false);
         if (j < 0) continue;
-        joints[j].bondId = id; joints[j].breakT = breakT; joints[j].breakF = breakF;
+        joints[j].bondId = id; joints[j].breakT = breakT; joints[j].breakF = breakF; joints[j].loadG = loadG;
     }
     return id;
 }
@@ -1288,21 +1309,34 @@ void Physics::processEvents(float dt) {
     }
     flashes.erase(std::remove_if(flashes.begin(), flashes.end(), [](const Flash& f) { return f.frames <= 0; }), flashes.end());
 
-    // frangible bonds
+    // frangible bonds: they let go when the seam gets too hot, or when the sustained load exceeds what they can hold.
+    // A bond rated in g holds that many times the weight it carries; it also softens as it nears its melting point.
     std::vector<int> broken;
+    const float grav = std::max(60.f, std::fabs(gravity.y));
     for (auto& j : joints) {
         if (!j.alive || j.bondId < 0) continue;
         if (std::find(broken.begin(), broken.end(), j.bondId) != broken.end()) continue;
         float F = 0.f, T = bodies[j.a].temp;
         for (auto& k : joints)
-            if (k.alive && k.bondId == j.bondId) F += k.peak;
+            if (k.alive && k.bondId == j.bondId) F += k.fAvg;
         if (j.b >= 0) T = std::max(T, bodies[j.b].temp);
-        Vec2 w = jointAnchorA(j);
-        int ix = (int)std::floor(w.x), iy = (int)std::floor(w.y);
-        if (world->inb(ix, iy) && world->at(ix, iy).t != M_EMPTY) T = std::max(T, world->at(ix, iy).temp);
-        if (F > j.breakF || T > j.breakT) {
+        // the seam itself: flame, hot gas or molten metal within a few cells of either pin warms it directly
+        {
+            Vec2 w = jointAnchorA(j);
+            for (int dy = -3; dy <= 3; ++dy)
+                for (int dx = -3; dx <= 3; ++dx) {
+                    int ix = (int)std::floor(w.x) + dx, iy = (int)std::floor(w.y) + dy;
+                    if (!world->inb(ix, iy)) continue;
+                    if (world->bodyMask[iy * World::W + ix] >= 0 || world->at(ix, iy).t == M_EMPTY) continue;
+                    T = std::max(T, world->at(ix, iy).temp);
+                }
+        }
+        float allowed = j.loadG > 0.f ? j.loadG * bondMass(j) * grav : j.breakF;
+        const float band = std::max(5.f, 0.5f * (j.breakT - 20.f));
+        allowed *= std::clamp((j.breakT - T) / band, 0.f, 1.f);                           // softens towards the melting point
+        if (F > allowed || T >= j.breakT) {
             broken.push_back(j.bondId);
-            lastEvent = T > j.breakT ? "BOND MELTED" : "BOND BROKE (FORCE)";
+            lastEvent = T >= j.breakT ? "BOND MELTED" : (T > j.breakT - band ? "BOND SOFTENED AND GAVE WAY" : "BOND BROKE (LOAD)");
             eventFrames = 240;
         }
     }
@@ -1318,6 +1352,8 @@ void Physics::processEvents(float dt) {
 // (through the fan itself). Pressure dynamics come from the rest of the gas model: the moved gas piles up
 // ahead of the fan and drains from behind it, and a fan curve lowers the flow as the pressure it works
 // against approaches its stall pressure. The intake draws in fresh ambient air.
+// Air an intake draws in is thin, like the ambient gas the grid actually holds: a dense intake builds a pressure cloud that shoves the machine back
+static float intakeAmt() { return 0.25f; }
 void Physics::applyFans(float dt) {
     constexpr float THRUST_K = 300.f, WIND_K = 40.f;
     World& w = *world;
@@ -1392,18 +1428,18 @@ void Physics::applyFans(float dt) {
                     for (int dy = -3; dy <= 3 && !nearBody; ++dy)
                         for (int dx = -3; dx <= 3 && !nearBody; ++dx) {
                             int nx = i % World::W + dx, ny = i / World::W + dy;
-                            if (w.inb(nx, ny)) { int m = w.bodyMask[ny * World::W + nx]; nearBody = m >= 0 && m != b.id; }
+                            if (w.inb(nx, ny)) { int m = w.bodyMask[ny * World::W + nx]; nearBody = m >= 0 && m != b.id && !(b.group >= 0 && bodies[m].group == b.group); }
                         }
                     Cell& in = w.cells[i];
                     if (nearBody) {
                     } else if (in.t == M_EMPTY) {
                         w.setCell(i % World::W, i / World::W, M_AIR);
-                        w.cells[i].amt = 1.f;
+                        w.cells[i].amt = intakeAmt();
                         w.cells[i].life = 1;   // ambient air from an intake: it may thin out at the open void
-                    } else if (in.t == M_AIR && in.amt < 1.f) {   // the intake is open to ambient air: it tops the cell up
+                    } else if (in.t == M_AIR && in.amt < intakeAmt()) {   // the intake is open to ambient air: it tops the cell up
                         in.temp = (in.temp * in.amt + AMBIENT_T * (1.f - in.amt)) ;
                         in.temp = std::clamp(in.temp, -100.f, 2000.f);
-                        in.amt = 1.f;
+                        in.amt = std::max(in.amt, intakeAmt());
                     }
                 }
                 for (int k = (int)L.size() - 2; k >= 0; --k) {
@@ -1419,6 +1455,7 @@ void Physics::applyFans(float dt) {
                     if (!w.chance(std::min(1.f, pHop * prof))) continue;
                     ++fanHopMoves[zone];
                     Cell& c = w.cells[L[k + 1]];
+                    if (MATS[c.t].kind == K_GAS && psi(c) > psi(a) + 0.12f) continue;   // the stream cannot be pumped uphill: gas only moves on while the way ahead is not at a higher pressure
                     if (c.t == M_EMPTY) { c = a; a = Cell{}; }
                     else if (MATS[c.t].kind == K_GAS) {
                         if (c.t == a.t) {   // same gas: carry half over, mixing the temperatures
@@ -1432,10 +1469,49 @@ void Physics::applyFans(float dt) {
             }
         }
 
+        // the stream does not stop dead at the end of its lane: the last cell sheds gas forwards and to the sides, like the
+        // start of a free jet (a closed end is a wall, so the gas still piles up there as before)
+        for (int l = 0; l < lanes; ++l) {
+            const std::vector<int>& L = lane[l];
+            if (L.size() < 3) continue;
+            int last = L.back(), prev = L[L.size() - 2];
+            int fx = last % World::W - prev % World::W, fy = last / World::W - prev / World::W;
+            if (fx == 0 && fy == 0) continue;
+            fx = (fx > 0) - (fx < 0); fy = (fy > 0) - (fy < 0);
+            Cell& e = w.cells[last];
+            if (MATS[e.t].kind != K_GAS || e.amt < 0.05f || !w.chance(std::min(1.f, v * 0.9f))) continue;
+            const int pick = (int)(w.rnd() % 3u) - 1;   // -1, 0, +1: left, straight, right
+            int nx = last % World::W + fx - fy * pick, ny = last / World::W + fy + fx * pick;
+            if (!w.inb(nx, ny) || w.bodyMask[ny * World::W + nx] >= 0) continue;
+            Cell& t = w.cells[ny * World::W + nx];
+            if (t.t == M_EMPTY) { t = e; t.amt = e.amt * 0.5f; e.amt *= 0.5f; if (t.amt < 0.02f) t = Cell{}; }
+            else if (t.t == e.t && t.amt < e.amt) { float m = (e.amt - t.amt) * 0.5f; t.temp = (t.temp * t.amt + e.temp * m) / std::max(1e-4f, t.amt + m); t.amt += m; e.amt -= m; }
+        }
+
         // reaction on the fan, and wind on bodies in the stream
-        if (!b.isStatic) b.vel += axis * (-THRUST_K * mag * flow) * (b.invMass * dt);
+        // Gas carries no momentum in the grid, so the reaction on the fan is modelled from what the fan does: its throughput,
+        // times how fast the exhaust leaves. Heat added downstream (a burner in the duct) speeds the exhaust up, as
+        // v ~ sqrt(T), so a lit engine pushes harder than a cold fan: thrust = throughput x sqrt(exhaust T / ambient T).
+        float exhaustBoost = 1.f, hotT = AMBIENT_T;
+        {
+            // temperature of the hottest gas in the stream (the flame): the mean of its 12 hottest cells
+            std::vector<float> temps;
+            for (int l = 0; l < lanes; ++l)
+                for (size_t k = (size_t)split[l] + 2; k < lane[l].size(); ++k) {
+                    const Cell& c = w.cells[lane[l][k]];
+                    if (MATS[c.t].kind == K_GAS && c.amt > 0.05f) temps.push_back(c.temp);
+                }
+            const size_t topN = std::min<size_t>(12, temps.size());
+            if (topN >= 3) {
+                std::partial_sort(temps.begin(), temps.begin() + (long)topN, temps.end(), std::greater<float>());
+                double sum = 0; for (size_t i = 0; i < topN; ++i) sum += temps[i];
+                hotT = (float)(sum / topN);
+                exhaustBoost = std::clamp(std::sqrt((hotT + 273.f) / (AMBIENT_T + 273.f)), 1.f, 3.f);
+            }
+        }
+        if (!b.isStatic) b.vel += axis * (-THRUST_K * mag * flow * exhaustBoost) * (b.invMass * dt);
         for (auto& o : bodies) {
-            if (!o.alive || o.isStatic || o.id == b.id) continue;
+            if (!o.alive || o.isStatic || o.id == b.id || (b.group >= 0 && o.group == b.group)) continue;   // a fan doesn't blow on its own machine
             Vec2 rel = o.pos - b.pos;
             float t = dot(rel, axis), u = dot(rel, lat), reach = o.bound;
             if (std::fabs(u) > b.half.y + reach) continue;
@@ -1488,6 +1564,11 @@ bool Physics::emitOne(Body& b) {
             return true;
         }
         if (MATS[e.mat].kind == K_GAS && c.t == e.mat && c.amt < 1.f) { c.amt = std::min(1.f, c.amt + 0.5f); return true; }
+        if (MATS[c.t].kind == K_GAS && c.t != e.mat && c.t != M_FIRE) {   // an outlet in a gas-filled space (a duct full of air) still pushes its material out, displacing the gas
+            world->setCell(x, y, e.mat);
+            if (MATS[e.mat].kind == K_GAS) world->at(x, y).amt = 1.f;
+            return true;
+        }
     }
     return false;
 }
