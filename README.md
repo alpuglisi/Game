@@ -135,7 +135,7 @@ Liquids flow sideways through gas-filled channels (the steam in a pipe is no wal
 
 ### Known limits
 
-Found by an adversarial review and left as they are: welds between grouped bodies are soft, so a long heavy cantilever sags, and if a member is later removed the survivors are re-welded in their sagged pose; `transformGroup` (moving a group with the exact-value form) does not re-anchor pins to bodies outside the group; blast impulses do not depend on mass and are not blocked by walls; evaporating liquid makes less gas per cell than boiling it; the gas solver stops iterating where pressure differences have become tiny, so very small residual gradients can persist; and the saved format changes between versions (a build refuses files from a different layout or material list).
+Found by an adversarial review and left as they are: welds between grouped bodies are soft, so a long heavy cantilever sags, and if a member is later removed the survivors are re-welded in their sagged pose; blast impulses do not depend on mass and are not blocked by walls; evaporating liquid makes less gas per cell than boiling it; the gas solver stops iterating where pressure differences have become tiny, so very small residual gradients can persist; and the saved format changes between versions (a build refuses files from a different layout or material list).
 
 ### Jet engine
 
@@ -180,6 +180,6 @@ Other things to try: lava on water makes stone and steam; fire spreads through w
 
 ## Developer flags
 
-`sandbots --selftest` runs headless regression checks (no window): the same physical situation built from a single body and from compound shapes (welded strips, a pocket cut into a piston, a chamber or boiler cut out of a block, a plug scaled to 98 %) must agree on buoyancy, gas-pressure force, heat conduction, hydraulic transmission, sealing, combustion, boiling and flame burn-out.
+`sandbots --selftest` runs headless regression checks (no window): the same physical situation built from a single body and from compound shapes (welded strips, a pocket cut into a piston, a chamber or boiler cut out of a block, a plug scaled to 98 %) must agree on buoyancy, gas-pressure force, heat conduction, hydraulic transmission, sealing, combustion, boiling and flame burn-out. It also replays the bugs found by the reviews of the rigid-body and grid engines (a body against the border of the world, damaged save files, a group moved through the edit form, a piston sweeping gas up, angles wrapping, stacks, slopes, fans, bonds and emitters) so they stay fixed.
 
 `sandbots --shot out.bmp [frames] [--scene N] [--heat] [--elec] [--trace] [--g0]` runs headless (SDL dummy video driver), simulates, prints burn counts/wheel speed (and body/gas stats with `--trace`) and saves a screenshot. Scenes: `1` material reactions, `2` joints/springs/rockets, `3` scripted tool use, `11`–`13` precision/group/hose tests (13 shows the numeric form), `15` cut + scale, `16` emitters, `17` electricity, `18` bonds/wax, `19` primers, `22` fans, `23` road + focus, `24` camera controls via real events, `4` steam engine, `5` gasoline engine, `6` hydraulics, `7` conduction, `8` fuels, `9` pressure test, `10` diesel engine.
