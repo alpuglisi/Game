@@ -25,12 +25,12 @@ constexpr int WIN_W = SIM_W, WIN_H = SIM_H + UI_H;
 constexpr float PI = 3.14159265f;
 
 enum Tool {
-    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER
+    T_MAT, T_BOX, T_CIRCLE, T_WHEEL, T_ROCKET, T_PIN, T_MOTOR, T_AUTOMOTOR, T_ROD, T_SPRING, T_GRAB, T_DELETE, T_SLIDER, T_SELECT, T_PIPE, T_HOSE, T_EMITTER, T_BOND
 };
 enum Tab { TAB_POWDER, TAB_LIQUID, TAB_GAS, TAB_METAL, TAB_STRUCT, TAB_DEVICE, TAB_SCENE, TAB_COUNT };
 
 const char* TOOL_NAMES[] = {"PARTICLES", "BOX", "CIRCLE", "WHEEL", "ROCKET", "PIN JOINT", "MOTOR (ARROWS)",
-                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER"};
+                            "AUTO MOTOR", "ROD", "SPRING", "GRAB", "DELETE", "SLIDER", "SELECT", "PIPE", "HOSE", "EMITTER", "BOND"};
 const char* TOOL_HINTS[] = {
     "LMB: PAINT  RMB: ERASE  WHEEL: BRUSH SIZE",
     "DRAG TO SIZE A BOX OF THE SELECTED SOLID (CLICK = DEFAULT)",
@@ -49,20 +49,25 @@ const char* TOOL_HINTS[] = {
     "DRAG ALONG THE PIPE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/WALL",
     "DRAG ALONG THE HOSE. WHEEL = DIAMETER. ENTER = TYPE EXACT ENDS/DIAMETER/SEGMENTS",
     "DRAG A SMALL BOX THAT ENDLESSLY PRODUCES THE SELECTED POWDER/LIQUID/GAS. PIN IT, OR LEAVE IT FREE TO TRAVEL. ENTER = RATE",
+    "CLICK WHERE TWO BODIES OVERLAP (OR ONE = BOND TO WORLD): A TEMPORARY WELD THAT LETS GO ABOVE ITS MELT TEMPERATURE OR BREAKING FORCE. ENTER = SET BOTH",
 };
 
 const uint8_t PALETTE[TAB_COUNT][18] = {
     {M_SAND, M_ASH, M_GUNPOWDER, M_COAL},
     {M_WATER, M_OIL, M_GASOLINE, M_DIESEL, M_KEROSENE, M_JETFUEL, M_ETHANOL, M_HYDRAULIC, M_ACID, M_LAVA},
     {M_STEAM, M_FIRE, M_SMOKE, M_EXHAUST, M_VAPOR, M_PROPANE, M_HYDROGEN},
-    {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN},
-    {M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT},
-    {M_HEATER, M_COOLER, M_IGNITER, M_SOURCE, M_VOID, M_EMPTY},
+    {M_STEEL, M_IRON, M_COPPER, M_ALUMINUM, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN, M_SOLDER},
+    {M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT, M_PARAFFIN},
+    {M_HEATER, M_COOLER, M_IGNITER, M_SOURCE, M_VOID, M_EMPTY, M_BATT_POS, M_BATT_NEG, M_PRIMER},
     {},
 };
 const char* TAB_NAMES[TAB_COUNT] = {"POWDER", "LIQUID", "GAS", "METAL", "STRUCT", "DEVICE", "SCENES"};
 const int SPARK_RATES[] = {0, 120, 60, 40, 30, 20, 12};
 const int SNAPS[] = {0, 1, 2, 5, 10};
+// bond presets: melting temperature (deg C) and breaking force (engine units)
+const char* BOND_NAMES[] = {"PARAFFIN", "SOLDER", "EPOXY", "SHEAR PIN"};
+const float BOND_TEMP[] = {55.f, 190.f, 260.f, 5000.f};
+const float BOND_FORCE[] = {100000.f, 1000000.f, 3000000.f, 300000.f};
 
 SDL_Color rgb(uint32_t c, uint8_t a = 255) {
     return SDL_Color{(uint8_t)(c >> 16), (uint8_t)(c >> 8), (uint8_t)c, a};
@@ -134,7 +139,7 @@ struct Game {
     float pipeD = 12.f, pipeWall = 2.f;
     int hoseSegs = 0;          // 0 = automatic
     Tool lastTool = T_MAT;
-    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_SCALE, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
+    enum FormKind { FK_NONE, FK_BOX, FK_CIRCLE, FK_PIPE, FK_HOSE, FK_EMITTER, FK_SCALE, FK_BATTERY, FK_BOND, FK_EDIT_BOX, FK_EDIT_CIRCLE, FK_EDIT_GROUP };
     struct Field { std::string name, text; };
     FormKind formKind = FK_NONE;
     std::vector<Field> fields;
@@ -144,6 +149,9 @@ struct Game {
     bool fStatic = false;
     std::string formMsg;
     bool wheelForm = false;
+    int bondType = 0;
+    float bondT = 55.f, bondF = 100000.f;
+    bool elecView = false;
     uint8_t fPayload = M_WATER;
     uint8_t fFace = 0;
     float lastRate = 30.f, lastScale = 98.f;
@@ -192,7 +200,7 @@ struct Game {
         tool = T_MAT;
         mat = m;
         Kind k = MATS[m].kind;
-        if (k == K_SOLID && m != M_VOID && m != M_SOURCE) bodyMat = m;
+        if (k == K_SOLID && m != M_VOID && m != M_SOURCE && m != M_BATT_POS && m != M_BATT_NEG) bodyMat = m;
         if (k == K_POWDER || k == K_LIQUID || k == K_GAS) payload = m;
     }
 
@@ -242,9 +250,10 @@ struct Game {
         static const SceneDef scenes[] = {
             {"DEMO", &Game::buildDemo}, {"STEAM ENG", &Game::buildSteamEngine}, {"GAS ENGINE", &Game::buildGasEngine},
             {"HYDRAULIC", &Game::buildHydraulics}, {"CONDUCT", &Game::buildConduction}, {"FUELS", &Game::buildFuels},
-            {"DIESEL ENG", &Game::buildDieselEngine},
+            {"DIESEL ENG", &Game::buildDieselEngine}, {"ELECTRIC", &Game::buildElectricTest},
+            {"BONDS", &Game::buildBondTest}, {"PRIMER", &Game::buildPrimerTest},
         };
-        for (int i = 0; i < 7; ++i) {
+        for (int i = 0; i < 10; ++i) {
             auto fn = scenes[i].fn;
             std::string nm = scenes[i].name;
             add(1 + i / COLS, i % COLS, [nm] { return nm; }, [this, fn] { (this->*fn)(); }, [] { return false; },
@@ -284,11 +293,15 @@ struct Game {
         add(6, 0, [] { return std::string("CUT"); }, [this] { cutSelection(); }, [] { return false; });
         add(6, 1, [] { return std::string("SCALE"); }, [this] { openScaleForm(); }, [this] { return formKind == FK_SCALE; });
         add(6, 2, [] { return std::string("EMITTER"); }, [this] { tool = T_EMITTER; }, [this] { return tool == T_EMITTER; });
+        add(6, 3, [this] { return std::string("BATT ") + fmt(world.battV) + "V"; }, [this] { openBatteryForm(); }, [this] { return formKind == FK_BATTERY; });
+        add(6, 4, [this] { return std::string(elecView ? "ELEC VIEW:ON" : "ELEC VIEW"); }, [this] { elecView = !elecView; }, [this] { return elecView; });
+        add(6, 5, [] { return std::string("BOND"); }, [this] { tool = T_BOND; }, [this] { return tool == T_BOND; });
+        add(6, 6, [this] { return std::string(BOND_NAMES[bondType]); }, [this] { cycleBond(); }, [] { return false; });
     }
 
     void cycleBodyMat() {
         static const uint8_t order[] = {M_STEEL, M_ALUMINUM, M_COPPER, M_IRON, M_LEAD, M_GOLD, M_TITANIUM, M_TUNGSTEN,
-                                        M_WOOD, M_RUBBER, M_PLASTIC, M_GLASS, M_CONCRETE, M_BRICK, M_CERAMIC, M_STONE, M_ICE};
+                                        M_WOOD, M_RUBBER, M_PLASTIC, M_GLASS, M_CONCRETE, M_BRICK, M_CERAMIC, M_STONE, M_ICE, M_SOLDER, M_PARAFFIN, M_PRIMER};
         size_t i = 0;
         for (; i < sizeof(order); ++i) if (order[i] == bodyMat) break;
         bodyMat = order[(i + 1) % sizeof(order)];
@@ -750,6 +763,7 @@ struct Game {
                 formKind = FK_CIRCLE; wheelForm = tool == T_WHEEL;
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"RADIUS", fmt(lastR)}};
                 break;
+            case T_BOND: openBondForm(); return;
             case T_EMITTER:
                 formKind = FK_EMITTER; fPayload = payload;
                 fields = {{"X", fmt(m.x)}, {"Y", fmt(m.y)}, {"WIDTH", "6"}, {"HEIGHT", "6"}, {"RATE", fmt(lastRate)}};
@@ -806,6 +820,16 @@ struct Game {
                 formMsg = std::string("CREATED EMITTER OF ") + MATS[fPayload].name;
                 break;
             }
+            case FK_BATTERY:
+                world.battV = std::clamp(fv(0), 1.f, 70000.f);
+                world.battA = std::clamp(fv(1), 0.001f, 400.f);
+                formMsg = "BATTERY CELLS YOU PAINT NOW: " + fmt(world.battV) + "V " + fmt(world.battA) + "A (REPAINT TO UPDATE)";
+                selectMaterial(M_BATT_POS);
+                break;
+            case FK_BOND:
+                bondT = std::clamp(fv(0), -50.f, 5000.f); bondF = std::clamp(fv(1), 1.f, 1e5f) * 1000.f;
+                formMsg = "NEXT BOND: MELTS " + fmt(bondT) + "C / BREAKS " + fmt(bondF / 1000.f) + " KN";
+                break;
             case FK_SCALE: {
                 if (sel.empty()) { formMsg = "NOTHING SELECTED"; break; }
                 float pct = std::clamp(fv(0), 5.f, 1000.f);
@@ -843,6 +867,21 @@ struct Game {
     }
     static const char* faceName(int f) { static const char* n[] = {"ALL SIDES", "+X SIDE", "-X SIDE", "+Y SIDE", "-Y SIDE"}; return n[f % 5]; }
 
+    void cycleBond() {
+        bondType = (bondType + 1) % 4;
+        bondT = BOND_TEMP[bondType]; bondF = BOND_FORCE[bondType];
+        notify(std::string("BOND: ") + BOND_NAMES[bondType] + " LETS GO ABOVE " + fmt(bondT) + "C OR " + fmt(bondF / 1000.f) + " KN");
+    }
+    void openBatteryForm() {
+        formKind = FK_BATTERY; fActive = 0; fFresh = true;
+        fields = {{"VOLTS", fmt(world.battV)}, {"AMPS", fmt(world.battA)}};
+        formMsg = "";
+    }
+    void openBondForm() {
+        formKind = FK_BOND; fActive = 0; fFresh = true;
+        fields = {{"MELT C", fmt(bondT)}, {"BREAK KN", fmt(bondF / 1000.f)}};
+        formMsg = "";
+    }
     void openScaleForm() {
         pruneSelection();
         if (sel.empty()) { notify("SELECT BODIES TO SCALE FIRST"); return; }
@@ -971,6 +1010,93 @@ struct Game {
         clearSelection();
         phys.stampBodies();
     }
+    void buildElectricTest() {
+        resetWorld();
+        rect(0, 200, 399, 203, M_WALL);
+        // A: 12 V / 20 A battery heats a tungsten filament, which lights gasoline vapour
+        world.battV = 12.f; world.battA = 20.f;
+        rect(20, 60, 22, 62, M_BATT_POS); rect(20, 80, 22, 82, M_BATT_NEG);
+        rect(23, 61, 59, 61, M_COPPER); rect(60, 61, 79, 61, M_TUNGSTEN); rect(80, 61, 100, 61, M_COPPER);
+        rect(100, 61, 100, 81, M_COPPER); rect(23, 81, 100, 81, M_COPPER);
+        gasRect(60, 56, 80, 60, M_VAPOR, 0.6f);
+        label(24, 48, "12V 20A BATTERY, TUNGSTEN FILAMENT IN FUEL VAPOUR");
+        // B: 20 kV / 50 mA through a 2-cell air gap (a spark plug) in vapour
+        world.battV = 20000.f; world.battA = 0.05f;
+        rect(150, 60, 152, 62, M_BATT_POS); rect(150, 80, 152, 82, M_BATT_NEG);
+        rect(153, 61, 190, 61, M_COPPER); rect(190, 61, 190, 70, M_COPPER); rect(190, 70, 192, 70, M_COPPER);
+        rect(195, 70, 197, 70, M_COPPER); rect(197, 70, 197, 81, M_COPPER); rect(153, 81, 197, 81, M_COPPER);
+        gasRect(191, 66, 196, 70, M_VAPOR, 0.6f);
+        label(150, 48, "20KV, 2 CELL GAP = SPARK PLUG");
+        // C: a lead wire in the loop acts as a fuse when the circuit is shorted by a copper bar
+        world.battV = 12.f; world.battA = 60.f;
+        rect(250, 60, 252, 62, M_BATT_POS); rect(250, 80, 252, 82, M_BATT_NEG);
+        rect(253, 61, 280, 61, M_LEAD); rect(281, 61, 300, 61, M_COPPER); rect(300, 61, 300, 81, M_COPPER); rect(253, 81, 300, 81, M_COPPER);
+        label(250, 48, "SHORT CIRCUIT BLOWS THE LEAD FUSE WIRE");
+        // D: a loose copper bar falls across a gap in the wire, completing the circuit through a filament
+        world.battV = 12.f; world.battA = 30.f;
+        rect(320, 108, 322, 110, M_BATT_POS); rect(320, 130, 322, 132, M_BATT_NEG);
+        rect(323, 110, 355, 110, M_COPPER); rect(365, 110, 380, 110, M_COPPER);
+        rect(380, 110, 380, 116, M_COPPER); rect(380, 117, 380, 124, M_TUNGSTEN); rect(380, 125, 380, 131, M_COPPER);
+        rect(323, 131, 380, 131, M_COPPER);
+        rect(349, 96, 349, 109, M_WALL); rect(371, 96, 371, 109, M_WALL);
+        label(318, 86, "FALLING BAR CLOSES THE SWITCH");
+        phys.addBox(Vec2(360, 90), Vec2(8, 2), 0, M_COPPER, false);
+        phys.stampBodies();
+    }
+    void buildBondTest() {
+        resetWorld();
+        rect(0, 200, 399, 203, M_WALL);
+        // 1: a steel block glued under a ledge with paraffin; a heater beside it warms it until the wax lets go
+        phys.addBox(Vec2(50, 90), Vec2(30, 3), 0, M_STEEL, true);
+        int w1 = phys.addBox(Vec2(50, 100), Vec2(8, 8), 0, M_STEEL, false);
+        phys.addBond(Vec2(50, 93), w1, 0, BOND_TEMP[0], BOND_FORCE[0] * 8.f);
+        rect(59, 94, 66, 106, M_HEATER);
+        label(20, 78, "PARAFFIN BOND MELTS WHEN HEATED (55C)");
+        // 2: platforms pinned in mid-air by shear pins; a heavy ball dropped on one snaps its pin (the twin stays)
+        int p1 = phys.addBox(Vec2(135, 160), Vec2(14, 2), 0, M_STEEL, false);
+        phys.addBond(Vec2(135, 160), p1, -1, BOND_TEMP[3], 3.2e5f);
+        int p2 = phys.addBox(Vec2(185, 160), Vec2(14, 2), 0, M_STEEL, false);
+        phys.addBond(Vec2(185, 160), p2, -1, BOND_TEMP[3], 3.2e5f);
+        phys.addCircle(Vec2(135, 110), 5.f, M_LEAD, false, false);
+        label(110, 100, "SHEAR PIN SNAPS UNDER THE BALL (TWIN STAYS)");
+        // 3: a pressure-release plug: gas builds up behind a bonded plug in a tube until the bond breaks
+        phys.addPipe(Vec2(220, 150), Vec2(290, 150), 14.f, 2.f, M_STEEL, true);
+        rect(219, 143, 220, 157, M_WALL);
+        int plug = phys.addBox(Vec2(285, 150), Vec2(3, 4.8f), 0, M_PLASTIC, false);
+        phys.addBond(Vec2(285, 150), plug, -1, 55.f + 300.f, 8.0e4f);
+        phys.addBox(Vec2(224, 150), Vec2(2, 3), 0, M_STEEL, true);
+        phys.bodies.back().src = Emitter{true, M_STEAM, 300.f, 0.f, 1};
+        label(212, 128, "PLUG BOND LETS GO UNDER GAS PRESSURE");
+        // 4: a paraffin cell plug holds water back until warmed
+        rect(330, 120, 360, 122, M_WALL); rect(330, 120, 331, 180, M_WALL); rect(359, 120, 360, 180, M_WALL);
+        rect(332, 123, 358, 150, M_WATER); rect(344, 151, 346, 153, M_PARAFFIN); rect(332, 151, 343, 153, M_WALL); rect(347, 151, 358, 153, M_WALL);
+        rect(343, 154, 347, 158, M_HEATER);
+        label(318, 108, "WAX CELL PLUG MELTS, WATER DRAINS");
+        phys.stampBodies();
+    }
+    void buildPrimerTest() {
+        resetWorld();
+        rect(0, 200, 399, 203, M_WALL);
+        // a steel firing pin on a slider strikes a primer cartridge; the flash from the far end lights gunpowder
+        rect(92, 141, 130, 143, M_WALL); rect(92, 159, 130, 161, M_WALL);   // chamber roof and floor
+        rect(126, 144, 130, 158, M_WALL);
+        rect(109, 150, 125, 158, M_GUNPOWDER);
+        phys.addBox(Vec2(100, 155), Vec2(8, 3.f), 0, M_PRIMER, true);       // seated primer, flash hole to the right
+        rect(92, 144, 108, 151, M_WALL);
+        int pin = phys.addBox(Vec2(40, 155), Vec2(10, 1.5f), 0, M_STEEL, false);
+        phys.bodies[pin].vel = Vec2(160, 0);
+        phys.addSlider(pin, Vec2(1, 0));
+        label(30, 132, "FIRING PIN STRIKES THE PRIMER (LEFT END)");
+        label(90, 124, "FLASH EXITS THE FAR END: IGNITES THE POWDER");
+        // a primer cell rod, struck by a dropped weight, lights gasoline vapour at the other end
+        rect(250, 190, 270, 192, M_WALL);
+        rect(255, 185, 255, 189, M_PRIMER); rect(255, 189, 262, 189, M_PRIMER);
+        rect(256, 170, 264, 188, M_EMPTY);
+        gasRect(262, 184, 268, 188, M_VAPOR, 0.7f);
+        phys.addBox(Vec2(255, 150), Vec2(5, 5), 0, M_STEEL, false);
+        label(230, 138, "PRIMER CELLS: IMPACT FLASHES THROUGH THE ROD");
+        phys.stampBodies();
+    }
     void buildEmitterTest() {
         resetWorld();
         rect(0, 200, 399, 203, M_WALL);
@@ -1059,11 +1185,20 @@ struct Game {
         phys.addPin(p, a, b, motor, tool != T_AUTOMOTOR);
     }
 
+    void clickBond(Vec2 p) {
+        std::vector<int> ids = phys.bodiesAt(p);
+        if (ids.empty()) { notify("CLICK ON A BODY (OR WHERE TWO OVERLAP)"); return; }
+        int a = ids.back(), b = ids.size() >= 2 ? ids[ids.size() - 2] : -1;
+        phys.addBond(p, a, b, bondT, bondF);
+        notify(std::string("BONDED: LETS GO ABOVE ") + fmt(bondT) + "C OR " + fmt(bondF / 1000.f) + " KN");
+    }
+
     void handleSimDown(int button) {
         if (button == SDL_BUTTON_RIGHT) { rmb = true; return; }
         lmb = true;
         dragStart = smouse();
         switch (tool) {
+            case T_BOND: clickBond(mouse); break;
             case T_PIN: case T_MOTOR: case T_AUTOMOTOR: clickJoint(mouse); break;
             case T_ROD: case T_SPRING: case T_SLIDER: {
                 std::vector<int> ids = phys.bodiesAt(mouse);
@@ -1280,6 +1415,17 @@ struct Game {
     void renderParticles() {
         const uint32_t bg = 0xFF000000u | MATS[M_EMPTY].color;
         for (int i = 0; i < World::W * World::H; ++i) pixels[i] = cellColor(world.cells[i], bg);
+        if (elecView && (int)world.volt.size() == World::W * World::H) {
+            for (int i = 0; i < World::W * World::H; ++i) {
+                int b = world.bodyMask[i];
+                float sg = b >= 0 ? (b < (int)world.bodySigma.size() ? world.bodySigma[b] : 0.f) : MATS[world.cells[i].t].elec;
+                if (sg <= 0.f) { pixels[i] = mix(pixels[i], bg, 0.65f); continue; }
+                float v = world.volt[i], f = world.vMax > 0.5f ? std::clamp(std::log1p(std::fabs(v)) / std::log1p(world.vMax), 0.f, 1.f) : 0.f;
+                uint32_t col = v > 0.01f ? mix(0x1c4a78, 0xfff060, f) : 0x203040;
+                float cur = std::min(1.f, world.curr[i] * 0.05f);
+                pixels[i] = mix(col, 0xff9040, cur * 0.6f);
+            }
+        }
         SDL_UpdateTexture(tex, nullptr, pixels.data(), World::W * 4);
         SDL_Rect dst{0, 0, SIM_W, SIM_H};
         SDL_RenderCopy(ren, tex, nullptr, &dst);
@@ -1433,6 +1579,14 @@ struct Game {
         }
     }
 
+    void renderArcs() {
+        for (auto& a : world.arcs) {
+            Vec2 p0(a.x0 + 0.5f, a.y0 + 0.5f), p1(a.x1 + 0.5f, a.y1 + 0.5f);
+            lineWorld(p0, p1, SDL_Color{110, 150, 255, 140}, 7);
+            lineWorld(p0, p1, SDL_Color{230, 240, 255, 255}, 3);
+        }
+    }
+
     void renderLabels() {
         for (auto& l : labels) font::draw(ren, l.s, (int)(l.p.x * S), (int)(l.p.y * S), 1, SDL_Color{200, 210, 230, 200});
     }
@@ -1506,6 +1660,8 @@ struct Game {
             case FK_BOX: title = "NEW BOX (CELLS)"; break;
             case FK_CIRCLE: title = wheelForm ? "NEW WHEEL (CELLS)" : "NEW CIRCLE (CELLS)"; break;
             case FK_PIPE: title = "NEW PIPE (CELLS)"; break;
+            case FK_BATTERY: title = "BATTERY (VOLTS / AMPS)"; break;
+            case FK_BOND: title = "BOND SETTINGS"; break;
             case FK_EMITTER: title = "NEW EMITTER (CELLS, RATE = CELLS/S)"; break;
             case FK_SCALE: title = "SCALE SELECTION"; break;
             case FK_HOSE: title = "NEW HOSE (CELLS)"; break;
@@ -1553,6 +1709,10 @@ struct Game {
             return buf;
         }
         const Cell& c = world.at(x, y);
+        if (c.t == M_BATT_POS || c.t == M_BATT_NEG) {
+            std::snprintf(buf, sizeof buf, "%s %gV %gA", MATS[c.t].name, std::round(World::decV(c.life) * 10) / 10, std::round(World::decA(c.aux) * 1000) / 1000);
+            return buf;
+        }
         if (c.t == M_EMPTY) return "";
         const MatInfo& m = MATS[c.t];
         if (m.kind == K_GAS || (m.kind == K_LIQUID && c.amt > 1.01f))
@@ -1586,6 +1746,7 @@ struct Game {
         int sy = SIM_H + ROWS * (BTN_H + BTN_GAP) + 4;
         std::string status = std::string("TOOL: ") + (tool == T_MAT ? (mat == M_EMPTY ? "ERASER" : MATS[mat].name) : TOOL_NAMES[tool]);
         status += "  BODY: " + std::string(MATS[bodyMat].name);
+        if (tool == T_MAT && (mat == M_BATT_POS || mat == M_BATT_NEG)) status += "  PAINTS " + fmt(world.battV) + "V " + fmt(world.battA) + "A";
         if (mat == M_SOURCE) status += "  EMITS: " + std::string(MATS[payload].name);
         if (tool == T_PIPE || tool == T_HOSE) status += "  DIA " + fmt(pipeD) + " WALL " + fmt(pipeWall);
         else status += "  BRUSH " + std::to_string(brush);
@@ -1595,6 +1756,12 @@ struct Game {
         if (paused) status += "  [PAUSED]";
         font::draw(ren, status, 8, sy, 2, SDL_Color{255, 220, 120, 255});
         if (noteFrames > 0) font::draw(ren, note, 8, SIM_H - 14, 2, SDL_Color{255, 200, 120, 255});
+        else if (phys.eventFrames > 0) font::draw(ren, phys.lastEvent, 8, SIM_H - 14, 2, SDL_Color{255, 120, 90, 255});
+        if (world.vMax > 0.f) {
+            char eb[96];
+            std::snprintf(eb, sizeof eb, "ELEC: PEAK %.4g V  SOURCE %.3g A  ARCS %ld", world.vMax, world.iSource, world.arcCount);
+            font::draw(ren, eb, WIN_W - font::textWidth(eb, 1) - 6, 6, 1, SDL_Color{255, 240, 140, 255});
+        }
         std::string hover = hoverText();
         if (!hover.empty()) font::draw(ren, hover, 8, sy + 17, 2, SDL_Color{150, 230, 255, 255});
         font::draw(ren, TOOL_HINTS[tool], 8 + (hover.empty() ? 0 : font::textWidth(hover, 2) + 20), sy + 20, 1, SDL_Color{170, 180, 200, 255});
@@ -1609,6 +1776,7 @@ struct Game {
         renderParticles();
         renderBodies();
         renderJoints();
+        renderArcs();
         renderSelection();
         renderLabels();
         renderGhost();
@@ -1637,7 +1805,7 @@ int main(int argc, char** argv) {
     // Headless self-test: sandbots --shot out.bmp [frames] [--scene N] [--heat] [--trace]
     const char* shot = nullptr;
     int shotFrames = 300, scene = 0;
-    bool heat = false, trace = false, g0 = false;
+    bool heat = false, trace = false, g0 = false, elecFlag = false;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
             shot = argv[++i];
@@ -1646,6 +1814,7 @@ int main(int argc, char** argv) {
             scene = std::atoi(argv[++i]);
         } else if (!std::strcmp(argv[i], "--heat")) heat = true;
         else if (!std::strcmp(argv[i], "--trace")) trace = true;
+        else if (!std::strcmp(argv[i], "--elec")) elecFlag = true;
         else if (!std::strcmp(argv[i], "--g0")) g0 = true;
     }
     if (shot) SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
@@ -1668,10 +1837,14 @@ int main(int argc, char** argv) {
             case 12: g.buildPrecisionTest(); g.selectBody(g.sel.empty() ? -1 : g.sel[0], false, true); g.openForm(); g.formMsg = "UPDATED"; break;
             case 15: g.buildCutTest(); break;
             case 16: g.buildEmitterTest(); break;
+            case 17: g.buildElectricTest(); break;
+            case 18: g.buildBondTest(); break;
+            case 19: g.buildPrimerTest(); break;
             case 13: g.buildPrecisionTest(); g.tool = Tool::T_HOSE; g.clearSelection(); g.openForm(); break;
             default: g.buildTestScene(scene); break;
         }
         if (heat) g.heatView = true;
+        if (elecFlag) g.elecView = true;
         if (g0) g.phys.gravity = Vec2(0, 0);
         for (int f = 0; f < shotFrames; ++f) {
             g.phys.motorInput = (scene == 0 && f > 40) ? 1.f : 0.f;
@@ -1679,19 +1852,21 @@ int main(int argc, char** argv) {
             g.phys.step(1.f / 60.f);
             g.world.step();
             if (!scene && f == 120) g.world.explode(352, 210, 24.f, 260.f);
-            if (trace && f % 120 == 0) {
-                double gasTot = 0; int water = 0, gcnt = 0; float tmax = 0;
+            if (trace && f % (std::getenv("TRACE_EVERY") ? std::atoi(std::getenv("TRACE_EVERY")) : 120) == 0) {
+                double gasTot = 0; int water = 0, gcnt = 0, gp = 0; float tmax = 0;
                 for (auto& c : g.world.cells) {
                     if (MATS[c.t].kind == K_GAS && c.t != M_FIRE) { gasTot += c.amt; ++gcnt; tmax = std::max(tmax, c.temp); }
                     if (c.t == M_WATER) ++water;
+                    if (c.t == M_GUNPOWDER) ++gp;
                 }
-                std::printf("f=%4d water=%d gas cells=%d amt=%.1f Tmax=%.0f", f, water, gcnt, gasTot, tmax);
+                std::printf("f=%4d water=%d powder=%d gas cells=%d amt=%.1f Tmax=%.0f", f, water, gp, gcnt, gasTot, tmax);
                 for (auto& b : g.phys.bodies)
                     if (b.alive && !b.isStatic) std::printf(" [%d x=%.1f y=%.1f vx=%.1f F=%.0f w=%.2f]", b.id, b.pos.x, b.pos.y, b.vel.x, b.fluidF.x, b.w);
                 std::printf("\n");
             }
         }
         std::printf("burn events: %ld\n", g.world.burnEvents);
+        std::printf("elec: vMax=%.4g iSource=%.3g arcs=%ld\n", g.world.vMax, g.world.iSource, g.world.arcCount);
         for (auto& b : g.phys.bodies) if (b.alive && b.shape == SHAPE_CIRCLE) std::printf("wheel w=%.2f angle=%.1f\n", b.w, b.angle);
         g.render();
         g.screenshot(shot);

@@ -16,6 +16,8 @@ enum Mat : uint8_t {
     M_WALL, M_STONE, M_CONCRETE, M_BRICK, M_CERAMIC, M_GLASS, M_WOOD, M_RUBBER, M_PLASTIC, M_ICE, M_PLANT, M_TNT,
     // devices
     M_HEATER, M_COOLER, M_IGNITER, M_SOURCE, M_VOID,
+    // electrical, frangible and impact-sensitive
+    M_BATT_POS, M_BATT_NEG, M_SOLDER, M_PARAFFIN, M_WAX, M_PRIMER,
     M_COUNT
 };
 
@@ -49,6 +51,8 @@ struct MatInfo {
     float buoy = 0.f;         // gases: >0 rises when hot, <0 sinks
     float acidK = 1.f;        // susceptibility to acid
     float bulk = 1.f;         // liquids: stiffness against compression
+    float elec = 0.f;         // electrical conductance of one cell edge (siemens, game units); 0 = insulator
+    float burstP = 0.f;       // solids: cracks when the pressure on one side exceeds this (0 = never)
     float initT = AMBIENT_T;  // temperature of freshly created cells
     uint8_t freezeAs = M_EMPTY; // what a molten version of this solidifies into (default: itself)
 };
@@ -79,7 +83,7 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
       burn(m, 450, 400, 1100, 220, 0.05f, M_ASH); }
 
     // ---- liquids
-    { auto& m = def(M_WATER, "WATER", 0x2f6fe0, K_LIQUID, 1.0f); th(m, 0.06f, 4.2f);
+    { auto& m = def(M_WATER, "WATER", 0x2f6fe0, K_LIQUID, 1.0f); th(m, 0.06f, 4.2f); m.elec = 0.4f;
       hi(m, 100, M_STEAM, 120); lo(m, 0, M_ICE); m.expand = 6.f; }
     { auto& m = def(M_OIL, "OIL", 0x6b4a1e, K_LIQUID, 0.85f); th(m, 0.03f, 2.0f);
       burn(m, 330, 140, 900, 220, 0.15f); hi(m, 300, M_VAPOR, 60); m.expand = 6.f; m.volatility = 0.00005f; }
@@ -111,14 +115,14 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
       burn(m, 500, -100, 2000, 8, 1.0f); m.buoy = 1.2f; }
 
     // ---- metals
-    { auto& m = def(M_STEEL, "STEEL", 0x9aa4b2, K_SOLID, 7.8f); th(m, 0.06f, 3.8f); fr(m, 0.12f, 0.15f); hi(m, 1450, M_MOLTEN); m.acidK = 0.4f; }
-    { auto& m = def(M_IRON, "IRON", 0x6f6862, K_SOLID, 7.0f); th(m, 0.07f, 3.5f); fr(m, 0.2f, 0.1f); hi(m, 1530, M_MOLTEN); m.acidK = 0.6f; }
-    { auto& m = def(M_COPPER, "COPPER", 0xd2733c, K_SOLID, 8.9f); th(m, 0.24f, 3.4f); fr(m, 0.3f, 0.1f); hi(m, 1085, M_MOLTEN); m.acidK = 0.5f; }
-    { auto& m = def(M_ALUMINUM, "ALUMINUM", 0xc9d1d9, K_SOLID, 2.7f); th(m, 0.22f, 2.4f); fr(m, 0.2f, 0.15f); hi(m, 660, M_MOLTEN); m.acidK = 0.8f; }
-    { auto& m = def(M_LEAD, "LEAD", 0x4c5560, K_SOLID, 11.3f); th(m, 0.03f, 1.4f); fr(m, 0.6f, 0.02f); hi(m, 327, M_MOLTEN); m.acidK = 0.5f; }
-    { auto& m = def(M_GOLD, "GOLD", 0xffd24a, K_SOLID, 19.f); th(m, 0.2f, 2.4f); fr(m, 0.4f, 0.1f); hi(m, 1064, M_MOLTEN); m.acidK = 0.f; }
-    { auto& m = def(M_TITANIUM, "TITANIUM", 0x8d96a6, K_SOLID, 4.5f); th(m, 0.015f, 2.4f); fr(m, 0.5f, 0.2f); hi(m, 1668, M_MOLTEN); m.acidK = 0.f; }
-    { auto& m = def(M_TUNGSTEN, "TUNGSTEN", 0x5b5b66, K_SOLID, 19.3f); th(m, 0.1f, 2.5f); fr(m, 0.5f, 0.1f); hi(m, 3400, M_MOLTEN); m.acidK = 0.f; }
+    { auto& m = def(M_STEEL, "STEEL", 0x9aa4b2, K_SOLID, 7.8f); th(m, 0.06f, 3.8f); fr(m, 0.12f, 0.15f); hi(m, 1450, M_MOLTEN); m.acidK = 0.4f;  m.elec = 40.f;}
+    { auto& m = def(M_IRON, "IRON", 0x6f6862, K_SOLID, 7.0f); th(m, 0.07f, 3.5f); fr(m, 0.2f, 0.1f); hi(m, 1530, M_MOLTEN); m.acidK = 0.6f;  m.elec = 45.f;}
+    { auto& m = def(M_COPPER, "COPPER", 0xd2733c, K_SOLID, 8.9f); th(m, 0.24f, 3.4f); fr(m, 0.3f, 0.1f); hi(m, 1085, M_MOLTEN); m.acidK = 0.5f;  m.elec = 400.f;}
+    { auto& m = def(M_ALUMINUM, "ALUMINUM", 0xc9d1d9, K_SOLID, 2.7f); th(m, 0.22f, 2.4f); fr(m, 0.2f, 0.15f); hi(m, 660, M_MOLTEN); m.acidK = 0.8f;  m.elec = 250.f;}
+    { auto& m = def(M_LEAD, "LEAD", 0x4c5560, K_SOLID, 11.3f); th(m, 0.03f, 1.4f); fr(m, 0.6f, 0.02f); hi(m, 327, M_MOLTEN); m.acidK = 0.5f;  m.elec = 20.f;}
+    { auto& m = def(M_GOLD, "GOLD", 0xffd24a, K_SOLID, 19.f); th(m, 0.2f, 2.4f); fr(m, 0.4f, 0.1f); hi(m, 1064, M_MOLTEN); m.acidK = 0.f;  m.elec = 280.f;}
+    { auto& m = def(M_TITANIUM, "TITANIUM", 0x8d96a6, K_SOLID, 4.5f); th(m, 0.015f, 2.4f); fr(m, 0.5f, 0.2f); hi(m, 1668, M_MOLTEN); m.acidK = 0.f;  m.elec = 12.f;}
+    { auto& m = def(M_TUNGSTEN, "TUNGSTEN", 0x5b5b66, K_SOLID, 19.3f); th(m, 0.1f, 2.5f); fr(m, 0.5f, 0.1f); hi(m, 3400, M_MOLTEN); m.acidK = 0.f;  m.elec = 70.f;}
 
     // ---- structural and other solids
     { auto& m = def(M_WALL, "WALL", 0x8a9099, K_SOLID, 100.f); th(m, 0.1f, 3.0f); fr(m, 0.6f, 0.1f); m.acidK = 0.f; }
@@ -144,6 +148,17 @@ inline std::array<MatInfo, M_COUNT> buildMats() {
     { auto& m = def(M_IGNITER, "IGNITER", 0xffe94a, K_SOLID, 100.f); th(m, 0.2f, 0.3f); m.acidK = 0.f; }
     { auto& m = def(M_SOURCE, "SOURCE", 0xff40ff, K_SOLID, 100.f); th(m, 0.02f, 3.0f); m.acidK = 0.f; }
     { auto& m = def(M_VOID, "VOID", 0x2a0a3a, K_SOLID, 100.f); m.acidK = 0.f; }
+
+    // ---- electrical, frangible and impact-sensitive
+    { auto& m = def(M_BATT_POS, "BATTERY+", 0xd23a3a, K_SOLID, 100.f); th(m, 0.05f, 10.f); m.elec = 400.f; m.acidK = 0.f; }
+    { auto& m = def(M_BATT_NEG, "BATTERY-", 0x2d2f3a, K_SOLID, 100.f); th(m, 0.05f, 10.f); m.elec = 400.f; m.acidK = 0.f; }
+    { auto& m = def(M_SOLDER, "SOLDER", 0xb9bdc6, K_SOLID, 8.5f); th(m, 0.12f, 2.6f); fr(m, 0.3f, 0.05f);
+      hi(m, 190, M_MOLTEN); m.elec = 120.f; m.acidK = 0.6f; }
+    { auto& m = def(M_PARAFFIN, "PARAFFIN", 0xefe6c8, K_SOLID, 0.9f); th(m, 0.004f, 2.5f); fr(m, 0.2f, 0.05f);
+      hi(m, 55, M_WAX, 60); burn(m, 250, 200, 900, 60, 0.1f); m.burstP = 5.f; }
+    { auto& m = def(M_WAX, "WAX", 0xe8dca8, K_LIQUID, 0.8f); th(m, 0.004f, 2.5f);
+      lo(m, 48, M_PARAFFIN); m.latent = 60; burn(m, 250, 200, 900, 60, 0.1f); m.bulk = 1.f; }
+    { auto& m = def(M_PRIMER, "PRIMER", 0xc08a30, K_SOLID, 1.7f); th(m, 0.01f, 1.2f); fr(m, 0.3f, 0.05f); m.acidK = 0.5f; }
     return t;
 }
 

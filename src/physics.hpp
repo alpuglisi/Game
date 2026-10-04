@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "sand.hpp"
 #include "vec2.hpp"
@@ -31,6 +32,7 @@ struct Body {
     bool isStatic = false, isWheel = false, isRocket = false;
     bool touching = false, hasJoint = false;  // per-step bookkeeping for the rest clamp
     Emitter src;
+    bool spent = false;  // a fired primer
     int group = -1;     // rigid group (weld-linked bodies act as one object); -1 = none
     uint32_t color = 0xe0b060;
     // pressure of adjacent gas/liquid, refreshed once per frame
@@ -59,6 +61,8 @@ struct Joint {
     float speed = 6.f, power = 60.f;
     bool keyed = true;
     int group = -1;  // >= 0: one half of a weld holding a group together
+    int bondId = -1;       // >= 0: part of a frangible bond that lets go on heat or force
+    float breakT = 1e9f, breakF = 1e9f, peak = 0.f;
     // mouse
     float maxForce = 0;
     // solver cache
@@ -125,6 +129,11 @@ public:
     // scale bodies about a pivot by factor s; joints and welds follow
     void scaleBodies(const std::vector<int>& ids, float s, Vec2 pivot);
     void emitSources(float dt);
+    // frangible connection (wax, solder, shear pin): a weld that lets go above a temperature or a force
+    int addBond(Vec2 anchor, int a, int b, float breakT, float breakF);
+    long bondsBroken = 0;
+    std::string lastEvent;  // dev/UI: last thing that happened (bond broke, primer fired)
+    int eventFrames = 0;
     // hollow tube between two points: two welded walls. Returns the group id.
     int addPipe(Vec2 a, Vec2 b, float outerD, float wall, uint8_t mat, bool stat);
     // flexible tube: chain of pipe segments hinged together. Returns the first segment's group id.
@@ -150,6 +159,13 @@ private:
     int groupCounter = 0;
     void weldPair(int root, int member);
     bool emitOne(Body& b);
+    struct Hit { int body; Vec2 p; };
+    std::vector<Hit> hits;
+    std::vector<std::pair<int, int>> primerStrikes;
+    struct Flash { int body; Vec2 lp; int frames; };
+    std::vector<Flash> flashes;
+    int bondCounter = 0;
+    void processEvents(float dt);
 
     Body& B(int id) { return id >= 0 ? bodies[id] : worldBody; }
     int allocBody();

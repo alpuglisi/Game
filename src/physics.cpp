@@ -14,6 +14,8 @@ constexpr float GAS_PRESSURE = 20000.f;     // force per cell face for one unit 
 constexpr float LIQUID_PRESSURE = 600000.f;
 constexpr float LIQUID_DAMPING = 1500.f;
 constexpr float ROCKET_THRUST = 1.4e5f;
+constexpr float PRIMER_SPEED = 70.f;      // closing speed and energy needed to fire a primer
+constexpr float PRIMER_ENERGY = 3.0e4f;
 
 float cellFriction(const World& w, int ix, int iy) {
     return w.inb(ix, iy) ? MATS[w.at(ix, iy).t].friction : MATS[M_WALL].friction;
@@ -257,6 +259,8 @@ int Physics::nearestJoint(Vec2 p, float maxDist) const {
 
 void Physics::stampBodies() {
     auto& mask = world->bodyMask;
+    world->bodySigma.assign(bodies.size(), 0.f);
+    for (auto& b : bodies) if (b.alive) world->bodySigma[b.id] = MATS[b.mat].elec;
     std::fill(mask.begin(), mask.end(), (int16_t)-1);
     auto bounds = [&](const Body& b, int& x0, int& y0, int& x1, int& y1) {
         float r = b.shape == SHAPE_CIRCLE ? b.radius : b.bound;
@@ -606,6 +610,10 @@ void Physics::terrainContacts(Body& b) {
             Vec2 q = p + n * t;
             if (!world->isTerrain((int)std::floor(q.x), (int)std::floor(q.y))) { depth = t - 0.25f; break; }
         }
+        if (world->at(ix, iy).t == M_PRIMER) {
+            float closing = -dot(b.vel + cross(b.w, p - b.pos), n);
+            if (closing > PRIMER_SPEED && 0.5f * b.mass * closing * closing >= PRIMER_ENERGY) primerStrikes.push_back({ix, iy});
+        }
         float mu = std::sqrt(MATS[b.mat].friction * cellFriction(*world, ix, iy)) * (b.isWheel ? 1.25f : 1.f);
         float e = std::max(MATS[b.mat].restitution, cellRestitution(*world, ix, iy));
         contacts.emplace_back(-1, b.id, p, n, depth, std::min(mu, 1.5f), e);
@@ -740,6 +748,10 @@ void Physics::prestepContact(Contact& c, float h) {
     c.massT = kt > 0 ? 1.f / kt : 0.f;
     Vec2 vrel = Bb.vel + cross(Bb.w, c.rB) - A.vel - cross(A.w, c.rA);
     float vn = dot(vrel, c.n);
+    if (vn < -PRIMER_SPEED && 0.5f * c.massN * vn * vn >= PRIMER_ENERGY) {
+        if (c.a >= 0 && A.mat == M_PRIMER && !A.spent) hits.push_back({c.a, c.p});
+        if (c.b >= 0 && Bb.mat == M_PRIMER && !Bb.spent) hits.push_back({c.b, c.p});
+    }
     float bounce = vn < -60.f ? -c.e * vn : 0.f;
     float pen = std::min(BAUMGARTE / h * std::max(c.depth - SLOP, 0.f), MAX_BIAS);
     c.vt = std::max(bounce, pen);
@@ -868,6 +880,7 @@ void Physics::solveJoint(Joint& j, float h) {
         if (std::fabs(det) < 1e-20f) return;
         det = 1.f / det;
         Vec2 P((j.k22 * rhs.x - j.k12 * rhs.y) * det, (j.k11 * rhs.y - j.k12 * rhs.x) * det);
+        j.accP += P;  // total impulse this substep: its magnitude / h is the load a frangible bond feels
         A.vel -= P * A.invMass;
         A.w -= A.invI * cross(j.rA, P);
         Bb.vel += P * Bb.invMass;
@@ -968,6 +981,8 @@ void Physics::substep(float h) {
         solveHydro();
         for (auto& c : contacts) solveContact(c);
     }
+    for (auto& j : joints)
+        if (j.alive && j.bondId >= 0) j.peak = std::max(j.peak, length(j.accP) / h);
 
     for (auto& b : bodies) {
         if (!b.alive || b.isStatic) continue;
@@ -1017,9 +1032,93 @@ void Physics::step(float dt) {
     std::sort(noCollide.begin(), noCollide.end());
     noCollide.erase(std::unique(noCollide.begin(), noCollide.end()), noCollide.end());
     float h = dt / SUBSTEPS;
+    hits.clear(); primerStrikes.clear();
+    for (auto& j : joints) j.peak = 0.f;
     for (int s = 0; s < SUBSTEPS; ++s) substep(h);
+    processEvents(dt);
     thermalStep();
     stampBodies();
+}
+
+// ------------------------------------------------------------------ bonds, primers
+int Physics::addBond(Vec2 anchor, int a, int b, float breakT, float breakF) {
+    if (a < 0) std::swap(a, b);
+    if (a < 0) return -1;
+    Vec2 d = rotate(Vec2(4.f, 0.f), bodies[a].angle);
+    int id = bondCounter++;
+    for (int k = -1; k <= 1; k += 2) {
+        int j = addPin(anchor + d * (float)k, a, b, false, false);
+        if (j < 0) continue;
+        joints[j].bondId = id; joints[j].breakT = breakT; joints[j].breakF = breakF;
+    }
+    return id;
+}
+
+void Physics::processEvents(float dt) {
+    if (eventFrames > 0) --eventFrames;
+    // primers: a hard enough blow fires the body once; the flash leaves from the end opposite the strike
+    for (auto& h : hits) {
+        Body& b = bodies[h.body];
+        if (!b.alive || b.spent) continue;
+        b.spent = true;
+        b.color = 0x6a5a40;
+        flashes.push_back({b.id, b.toLocal(h.p), 8});
+        lastEvent = "PRIMER FIRED"; eventFrames = 240;
+    }
+    for (auto& s : primerStrikes) { world->primerStrike(s.first, s.second); lastEvent = "PRIMER STRUCK"; eventFrames = 240; }
+    for (auto& f : flashes) {
+        if (f.body < 0 || f.body >= (int)bodies.size() || !bodies[f.body].alive) { f.frames = 0; continue; }
+        const Body& b = bodies[f.body];
+        --f.frames;
+        Vec2 outDir;
+        float reach;
+        if (b.shape == SHAPE_BOX) {
+            int axis = b.half.x >= b.half.y ? 0 : 1;
+            float sgn = (axis == 0 ? f.lp.x : f.lp.y) >= 0 ? -1.f : 1.f;
+            outDir = axis == 0 ? Vec2(sgn, 0) : Vec2(0, sgn);
+            reach = axis == 0 ? b.half.x : b.half.y;
+            Vec2 perp = axis == 0 ? Vec2(0, 1) : Vec2(1, 0);
+            float ph = axis == 0 ? b.half.y : b.half.x;
+            for (int o = -2; o <= 2; ++o)
+                for (float d : {1.2f, 2.4f}) {
+                    Vec2 w = b.toWorld(outDir * (reach + d) + perp * (ph * 0.45f * (float)o));
+                    world->flashAt((int)std::floor(w.x), (int)std::floor(w.y));
+                }
+        } else {
+            outDir = f.lp.x * f.lp.x + f.lp.y * f.lp.y > 1e-4f ? normalize(-f.lp) : Vec2(0, -1);
+            for (int o = -2; o <= 2; ++o) {
+                Vec2 dir = rotate(outDir, 0.3f * (float)o);
+                for (float d : {1.2f, 2.4f}) {
+                    Vec2 w = b.toWorld(dir * (b.radius + d));
+                    world->flashAt((int)std::floor(w.x), (int)std::floor(w.y));
+                }
+            }
+        }
+    }
+    flashes.erase(std::remove_if(flashes.begin(), flashes.end(), [](const Flash& f) { return f.frames <= 0; }), flashes.end());
+
+    // frangible bonds
+    std::vector<int> broken;
+    for (auto& j : joints) {
+        if (!j.alive || j.bondId < 0) continue;
+        if (std::find(broken.begin(), broken.end(), j.bondId) != broken.end()) continue;
+        float F = 0.f, T = bodies[j.a].temp;
+        for (auto& k : joints)
+            if (k.alive && k.bondId == j.bondId) F += k.peak;
+        if (j.b >= 0) T = std::max(T, bodies[j.b].temp);
+        Vec2 w = jointAnchorA(j);
+        int ix = (int)std::floor(w.x), iy = (int)std::floor(w.y);
+        if (world->inb(ix, iy) && world->at(ix, iy).t != M_EMPTY) T = std::max(T, world->at(ix, iy).temp);
+        if (F > j.breakF || T > j.breakT) {
+            broken.push_back(j.bondId);
+            lastEvent = T > j.breakT ? "BOND MELTED" : "BOND BROKE (FORCE)";
+            eventFrames = 240;
+        }
+    }
+    for (int id : broken) {
+        for (auto& k : joints) if (k.alive && k.bondId == id) k.alive = false;
+        ++bondsBroken;
+    }
 }
 
 // ------------------------------------------------------------------ emitters

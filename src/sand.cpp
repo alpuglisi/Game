@@ -67,6 +67,7 @@ void World::setCell(int x, int y, uint8_t t) {
     c.clock = clk;
     c.life = initialLife(*this, t);
     if (t == M_VAPOR) c.life = M_GASOLINE;
+    if (t == M_BATT_POS || t == M_BATT_NEG) { c.life = encV(battV); c.aux = encA(battA); }
     c.temp = MATS[t].initT;
 }
 
@@ -122,6 +123,7 @@ void World::step() {
     ++sparkTimer;
     sparkNow = sparkHeld || (sparkPeriod > 0 && (int)(sparkTimer % (uint32_t)sparkPeriod) < 2);
 
+    electricity();
     thermalPass();
 
     bool ltr = tick & 1;
@@ -188,6 +190,7 @@ void World::updateCell(int x, int y) {
     const MatInfo& m = MATS[c.t];
     if (c.burn > 0 && m.kind != K_GAS) burnTick(x, y);
     if (c.t == M_EMPTY) return;
+    if (m.burstP > 0.f && m.kind == K_SOLID) { uint8_t t0 = c.t; burstCheck(x, y); if (c.t != t0) return; }
     if ((m.ignT > 0 || c.t == M_VAPOR) && c.burn == 0 && tryIgnite(x, y)) return;
 
     switch (c.t) {
@@ -198,6 +201,7 @@ void World::updateCell(int x, int y) {
         case M_FIRE: fireCell(x, y); break;
         case M_PLANT: plantCell(x, y); break;
         case M_TNT: tntCell(x, y); break;
+        case M_PRIMER: primerCell(x, y); break;
         case M_VOID: voidCell(x, y); break;
         case M_SOURCE: sourceCell(x, y); break;
         default:
@@ -460,6 +464,98 @@ void World::plantCell(int x, int y) {
 void World::tntCell(int x, int y) {
     Cell& c = at(x, y);
     if (c.life > 0 && --c.life == 0) explode(x, y, MATS[M_TNT].blastR, MATS[M_TNT].blastP);
+}
+
+// ---------------------------------------------------------------------------
+// Frangible solids and impact-sensitive primer
+// ---------------------------------------------------------------------------
+
+static float cellPressure(const Cell& c) {
+    const MatInfo& m = MATS[c.t];
+    if (c.t == M_EMPTY) return 0.f;
+    if (m.kind == K_GAS) return c.amt * (c.temp + 273.15f) / 293.15f;
+    if (m.kind == K_LIQUID) return c.amt > 1.f ? 1.f + (c.amt - 1.f) * 8.f : 1.f;
+    return -1.f;  // solid or powder: no fluid pressure
+}
+
+// A frangible plug (wax) fails layer by layer when the pressure difference across it exceeds burstP per cell of
+// thickness: a thicker plug holds more, and once the face goes the rest is weaker.
+void World::burstCheck(int x, int y) {
+    Cell& c = at(x, y);
+    const MatInfo& m = MATS[c.t];
+    for (int axis = 0; axis < 2; ++axis) {
+        int dx = axis == 0 ? 1 : 0, dy = axis == 0 ? 0 : 1;
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            int fx = x + dx * sgn, fy = y + dy * sgn;  // the exposed face
+            if (!inb(fx, fy) || bodyMask[fy * W + fx] >= 0) continue;
+            float pf = cellPressure(at(fx, fy));
+            if (pf < 0.f) continue;
+            int n = 1, bx = x, by = y;  // thickness of the plug behind this cell
+            while (n < 8) {
+                int nx = bx - dx * sgn, ny = by - dy * sgn;
+                if (!inb(nx, ny) || at(nx, ny).t != c.t) break;
+                bx = nx; by = ny; ++n;
+            }
+            int ox = bx - dx * sgn, oy = by - dy * sgn;  // what is behind the plug
+            float pb = 0.f;
+            if (inb(ox, oy)) {
+                if (bodyMask[oy * W + ox] >= 0) continue;  // propped by a rigid body: it holds
+                pb = cellPressure(at(ox, oy));
+                if (pb < 0.f) continue;                    // propped by a wall
+            }
+            if (pf - pb > m.burstP * (float)n) {
+                convert(x, y, m.hiTo, 0, c.temp, 1.f);
+                return;
+            }
+        }
+    }
+}
+
+// A primer cell lights when it is hot, touches flame, or has been struck (primerStrike sets its fuse).
+// It then flashes: the flash runs through neighbouring primer in a frame or two and lights whatever it touches.
+void World::primerCell(int x, int y) {
+    Cell& c = at(x, y);
+    if (c.life == 0) {
+        bool lit = c.temp >= 230.f;
+        for (int k = 0; k < 4 && !lit; ++k) {
+            int nx = x + DX4[k], ny = y + DY4[k];
+            if (inb(nx, ny) && at(nx, ny).t == M_FIRE) lit = true;
+        }
+        if (!lit) return;
+        c.life = 1;
+        return;
+    }
+    // detonate
+    for (int k = 0; k < 4; ++k) {
+        int nx = x + DX4[k], ny = y + DY4[k];
+        if (!inb(nx, ny)) continue;
+        Cell& n = at(nx, ny);
+        if (n.t == M_PRIMER) { if (n.life == 0) n.life = 1; continue; }
+        flashAt(nx, ny);
+    }
+    convert(x, y, M_FIRE, 0, 1800.f, 1.5f);
+    at(x, y).life = 8;
+}
+
+void World::primerStrike(int x, int y) {
+    if (inb(x, y) && at(x, y).t == M_PRIMER && at(x, y).life == 0) at(x, y).life = 1;
+}
+
+// A burst of flame at one cell: fire in free space, ignition (and a hot spot) in fuel.
+void World::flashAt(int x, int y) {
+    if (!inb(x, y) || bodyMask[y * W + x] >= 0) return;
+    Cell& c = at(x, y);
+    Kind k = MATS[c.t].kind;
+    if (c.t == M_EMPTY || (k == K_GAS && c.t != M_FIRE && MATS[c.t].ignT <= 0.f)) {
+        spawn(x, y, M_FIRE, (uint8_t)(6 + rint(8)), 1800.f);
+        at(x, y).amt = 1.5f;
+        return;
+    }
+    if (MATS[c.t].ignT > 0.f || c.t == M_VAPOR) {
+        c.temp = std::max(c.temp, 1200.f);
+        if (c.t != M_VAPOR && k != K_GAS && c.burn == 0) burn(x, y, MATS[c.t]);  // the flash lights fuel even without an open face
+        else sparkAt(x, y);
+    }
 }
 
 void World::voidCell(int x, int y) {
@@ -767,6 +863,8 @@ void World::paint(int cx, int cy, int r, uint8_t t, float amount, uint8_t payloa
             if (!inb(x, y)) continue;
             int i = y * W + x;
             if (t == M_EMPTY) { cells[i] = Cell{}; continue; }
+            bool batt = t == M_BATT_POS || t == M_BATT_NEG;
+            if (batt && (cells[i].t == M_BATT_POS || cells[i].t == M_BATT_NEG) && bodyMask[i] < 0) { setCell(x, y, t); continue; }  // repaint = new settings
             if (bodyMask[i] >= 0 || cells[i].t != M_EMPTY) continue;
             if (MATS[t].kind == K_SOLID || chance(amount)) {
                 setCell(x, y, t);

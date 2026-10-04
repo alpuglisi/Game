@@ -44,6 +44,23 @@ public:
     bool sparkHeld = false;
     bool sparkNow = false;
 
+    // ---- electricity (see elec.cpp): battery cells fix a potential, conductors form a resistor network
+    float battV = 12.f, battA = 20.f;            // settings stamped into battery cells as they are painted
+    std::vector<float> volt, curr;               // per-cell potential (V) and current (A), for display and arcs
+    std::vector<float> bodySigma;                // conductance of each rigid body (set by the physics step)
+    struct Arc { int x0, y0, x1, y1, frames; };
+    std::vector<Arc> arcs;                       // sparks that jumped an air gap recently
+    long arcCount = 0;
+    float vMax = 0.f, iSource = 0.f;             // dev/UI: highest potential, total source current
+    static uint8_t encV(float v);
+    static float decV(uint8_t c);
+    static uint8_t encA(float a);
+    static float decA(uint8_t c);
+
+    // impact-sensitive primer cells and the flash a spent primer body throws out
+    void primerStrike(int x, int y);
+    void flashAt(int x, int y);
+
     World();
     void clear();
     void step();
@@ -100,4 +117,10 @@ private:
     void tntCell(int x, int y);
     void voidCell(int x, int y);
     void sourceCell(int x, int y);
+    void primerCell(int x, int y);
+    void burstCheck(int x, int y);
+    void electricity();
+    std::vector<int> elecIdx, elecCool;
+    std::vector<float> elecRaw;
+    bool hadElec = false;
 };
