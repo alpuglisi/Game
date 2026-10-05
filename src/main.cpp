@@ -593,8 +593,11 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         for (int i = 0; i < 4; ++i) if (a[i] != b[i]) s += std::string(s.empty() ? "" : ", ") + names[i];
         return s;
     };
-    struct { Parts state; size_t depth = 0; bool valid = false; } cp;
-    bool trimmed = false;
+    // the checkpoint also fingerprints the undo entries beneath it: if the stack was trimmed by its cap (a mass draw pushes more
+    // than 60 entries) or the history branched (undo, then a new edit), undoing to that depth lands elsewhere and the check is skipped
+    auto hashEntry = [](const std::vector<uint8_t>& v) { uint64_t h = 1469598103934665603ull; for (uint8_t b : v) { h ^= b; h *= 1099511628211ull; } return h ^ (v.size() * 31); };
+    auto stackHashes = [&](size_t n) { std::vector<uint64_t> hs; for (size_t i = 0; i < n && i < g.undoStack.size(); ++i) hs.push_back(hashEntry(g.undoStack[i])); return hs; };
+    struct { Parts state; size_t depth = 0; std::vector<uint64_t> hashes; bool valid = false; } cp;
     auto settle = [&] {   // release everything and stop, so the state can be compared and undone
         for (int i = 0; i < 3; ++i) if (held[i]) button(i, false);
         SDL_SetModState(KMOD_NONE);
@@ -607,10 +610,9 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     g.frame();
     const Uint64 start = SDL_GetPerformanceCounter();
     for (frame = 0; frame < frames; ++frame) {
-        if (g.undoStack.size() >= 60 || g.undoBytes > ((size_t)100 << 20)) trimmed = true;
         if (frame % 300 == 0) {
             settle();
-            if (cp.valid && !trimmed && g.undoStack.size() >= cp.depth) {
+            if (cp.valid && g.undoStack.size() >= cp.depth && stackHashes(cp.depth) == cp.hashes) {
                 const size_t n = g.undoStack.size() - cp.depth;
                 Parts now, back, again;
                 digest(now);
@@ -629,7 +631,7 @@ int fuzz(Game& g, uint32_t seed, int frames) {
                 d = differs(again, now);
                 if (!d.empty()) bad("redoing " + std::to_string(n) + " steps did not restore the drawing: " + d + " differ");
             }
-            digest(cp.state); cp.depth = g.undoStack.size(); cp.valid = true; trimmed = false;
+            digest(cp.state); cp.depth = g.undoStack.size(); cp.hashes = stackHashes(cp.depth); cp.valid = true;
         }
         const int mods[] = {KMOD_NONE, KMOD_NONE, KMOD_NONE, KMOD_CTRL, KMOD_SHIFT, KMOD_CTRL | KMOD_SHIFT};
         if (rng.chance(30)) SDL_SetModState((SDL_Keymod)mods[rng.below(6)]);
