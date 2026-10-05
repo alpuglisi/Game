@@ -748,11 +748,33 @@ void Game::redo() {
     notify("Redo: " + undoLabels.back());
 }
 // The History tab lists every undo step, then "Now", then the redo steps; clicking a row undoes or redoes up to it.
+// The entries between here and the target move from one stack to the other as undo / redo would move them, but only the
+// target state is unpacked and restored: a click far down the list costs one restore, not one per step.
 void Game::jumpHistory(int row) {
     if (lmb) cancelDrag();
-    int now = (int)undoStack.size();
-    if (row < now) { for (int i = 0; i < now - row; ++i) undo(); }
-    else if (row > now) { for (int i = 0; i < row - now; ++i) redo(); }
+    if (playing) return;
+    const int now = (int)undoStack.size();
+    if (row == now || row < 0 || row > now + (int)redoStack.size()) return;
+    std::vector<uint8_t> raw;
+    captureState(raw);
+    std::vector<uint8_t> cur = packState(raw);   // the state the stacks see as "now", moving along as entries change sides
+    if (row < now) {
+        for (int i = 0; i < now - row; ++i) {
+            redoStack.push_back(std::move(cur)); redoLabels.push_back(undoLabels.back());
+            cur = std::move(undoStack.back()); undoBytes -= cur.size();
+            undoStack.pop_back(); undoLabels.pop_back();
+        }
+    } else {
+        for (int i = 0; i < row - now; ++i) {
+            undoBytes += cur.size();
+            undoStack.push_back(std::move(cur)); undoLabels.push_back(redoLabels.back());
+            cur = std::move(redoStack.back());
+            redoStack.pop_back(); redoLabels.pop_back();
+        }
+    }
+    if (!restoreState(unpackState(cur))) { notify("History jump failed"); return; }
+    lastUndoKey.clear();
+    notify(row < now ? "Undo: " + redoLabels.back() : "Redo: " + undoLabels.back());
 }
 
 // ---------------------------------------------------------------- copy / paste

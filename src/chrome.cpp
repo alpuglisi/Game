@@ -95,6 +95,7 @@ void Game::frame() {
     L = computeLayout(winW, winH, stripCollapsed);
     in.winW = L.winW; in.winH = L.winH; in.ticks = SDL_GetTicks();
     fieldRects.clear();
+    dockList = SDL_Rect{};   // set again by the Scene or History tab if it is drawn this frame
     ui.begin(ren, in);
     SDL_SetRenderDrawColor(ren, (uint8_t)(ui::theme().bg >> 16), (uint8_t)(ui::theme().bg >> 8), (uint8_t)ui::theme().bg, 255);
     SDL_RenderClear(ren);
@@ -115,9 +116,14 @@ void Game::canvasInput() {
     const bool overCanvas = inCanvasPx(in.mx, in.my) && !overFlyout;
     mouse = toWorld(in.mx, in.my);
     inSim = overCanvas && !popups;
-    // keys go to the dimension field while a shape or handle is dragged, else to the keyboard map
+    // keys go to the dimension field while a shape or handle is dragged, else to the keyboard map. Under a dialog or menu only
+    // Esc and F1 reach the map (the popup owns its own keys); a focused dock list owns the arrows, Home, End and Enter.
+    if (in.lPressed) dockListFocused = dockList.w > 0 && inRect(dockList, in.mx, in.my);
+    auto listKey = [](SDL_Keycode k) { return k == SDLK_UP || k == SDLK_DOWN || k == SDLK_HOME || k == SDLK_END || k == SDLK_RETURN || k == SDLK_KP_ENTER; };
     if (!ui.wantsKeyboard()) {
         for (SDL_Keycode k : in.keys) {
+            if (popups && k != SDLK_ESCAPE && k != SDLK_F1) continue;
+            if (dockListFocused && dockList.w > 0 && listKey(k)) continue;
             if (dim.active && lmb) {
                 if (dimKey(k)) continue;
                 const bool digit = (k >= SDLK_0 && k <= SDLK_9) || (k >= SDLK_KP_1 && k <= SDLK_KP_9) || k == SDLK_KP_0 || k == SDLK_PERIOD || k == SDLK_KP_PERIOD ||
@@ -773,7 +779,10 @@ void Game::drawSceneTab() {
     }
     const int nJoints = (int)std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); });
     ui.label(std::to_string(phys.bodyCount()) + " bodies, " + std::to_string(nJoints) + " joints", ui::TextStyle::Dim);
+    fieldRectBegin("scenelist");
     int hit = ui.listView("scenelist", names, selected, std::max(6, (ui.panelRect().h - 5 * ui::theme().rowH) / ui::theme().rowH), &details);
+    fieldRectEnd("scenelist");
+    dockList = fieldRects["scenelist"];
     if (hit >= 0) {
         if (rows[hit].joint) selectJoint(rows[hit].id); else selectBody(rows[hit].id, in.shift, in.ctrl);
         if (ui.listActivated() && !rows[hit].joint) zoomToBody(rows[hit].id);
@@ -788,7 +797,10 @@ void Game::drawHistory() {
     std::vector<std::string> rows = undoLabels;
     rows.push_back("Now");
     for (int i = (int)redoLabels.size() - 1; i >= 0; --i) rows.push_back(redoLabels[i]);
+    fieldRectBegin("history");
     int hit = ui.listView("history", rows, (int)undoLabels.size(), std::max(6, (ui.panelRect().h - 3 * ui::theme().rowH) / ui::theme().rowH));
+    fieldRectEnd("history");
+    dockList = fieldRects["history"];
     if (hit >= 0 && !playing) jumpHistory(hit);
     ui.label(playing ? "Stop the simulation to undo" : std::to_string(undoLabels.size()) + " to undo, " + std::to_string(redoLabels.size()) + " to redo", ui::TextStyle::Dim);
 }
@@ -825,7 +837,7 @@ void Game::drawStatusBar() {
     int leftW = std::min(ui.textWidth(left), leftMax);
     ui.text(fit(left, leftMax), r.x + pad, ty, ui::TextStyle::Dim);
     int cx = r.x + pad + leftW + 2 * pad;
-    int centreMax = r.x + r.w - rightW - 2 * pad - cx;
+    int centreMax = r.x + r.w - rightW - 3 * pad - cx;
     if (centreMax > 40) ui.text(fit(centre, centreMax), cx, ty, ui::TextStyle::Normal);
     ui.text(right, r.x + r.w - pad - rightW, ty, ui::TextStyle::Dim);
     ui.endPanel();

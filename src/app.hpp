@@ -211,6 +211,10 @@ struct Game {
     struct DimField { bool active = false; int cur = 0, n = 0; std::string text[3]; bool typed[3] = {false, false, false}; const char* names[3] = {"", "", ""}; float shown[3] = {0, 0, 0}; } dim;
     // where the inspector's fields were drawn this frame, by name, so the headless editor test can click them
     std::map<std::string, SDL_Rect> fieldRects;
+    // the dock's list (Scene or History tab) as drawn last frame, and whether the last click landed in it: the list then owns
+    // the arrow, Home, End and Enter keys, which must not also nudge the selection or pan the camera
+    SDL_Rect dockList{};
+    bool dockListFocused = false;
 
     // ---------------------------------------------------------------- setup (editor.cpp)
     bool init(bool headless, int w, int h);

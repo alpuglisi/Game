@@ -352,6 +352,54 @@ void editorTest(Game& g) {
     d.key(SDLK_SPACE, KMOD_SHIFT);
     std::printf("transport keys: Space plays (%s), Space pauses (%s), Shift+Space stops (%s): %s\n", yn(running), yn(pausedNow), yn(!g.playing), yn(running && pausedNow && !g.playing));
     g.setCam(0, 0);
+    // ---- cancelling a second paint stroke (merged into the first stroke's undo entry) keeps the first stroke
+    g.pickTool(T_MAT); g.mat = M_SAND; g.brush = 2;
+    auto cellsOf = [&](uint8_t m) { int n = 0; for (auto& c : g.world.cells) n += c.t == m; return n; };
+    undoN = g.undoStack.size();
+    d.drag(20, 20, 60, 20);
+    const int sand1 = cellsOf(M_SAND);
+    d.down(20, 60); d.mouseTo(60, 60); g.update();
+    const bool painting2 = cellsOf(M_SAND) > sand1 && g.undoStack.size() == undoN + 1;
+    d.key(SDLK_ESCAPE); d.up(60, 60);
+    std::printf("esc on a second paint stroke within the merge window (%s) keeps the first stroke's %d cells (%d now) and its undo entry (%zu): %s\n", yn(painting2), sand1, cellsOf(M_SAND),
+                g.undoStack.size(), yn(painting2 && cellsOf(M_SAND) == sand1 && g.undoStack.size() == undoN + 1));
+    // ---- ctrl+z mid-drag cancels the drag instead of changing the world under it
+    g.setTool(T_SELECT); g.snapOn = false; g.smartSnap = false;
+    g.selectBody(hb, false, false);
+    Vec2 m0 = body().pos; undoN = g.undoStack.size();
+    d.down(m0.x, m0.y); d.mouseTo(m0.x + 20, m0.y); g.update();
+    const bool midMove = near(body().pos.x, m0.x + 20);
+    d.key(SDLK_z, KMOD_CTRL);
+    d.up(m0.x + 20, m0.y);
+    std::printf("ctrl+z during a move drag (%s mid-way) puts the body back at x=%.0f and leaves the undo stack at %zu: %s\n", midMove ? "was" : "was NOT", body().pos.x, g.undoStack.size(),
+                yn(midMove && nearV(body().pos, m0) && g.undoStack.size() == undoN));
+    // ---- loading a scene while paused keeps the drawing: one undo brings it back
+    const int drawn = d.alive();
+    g.play(); g.togglePause();
+    g.runCommand("scene.0");
+    const bool replaced = !g.playing && d.alive() != drawn;
+    d.key(SDLK_z, KMOD_CTRL);
+    std::printf("a scene loaded while paused replaces the drawing (%s) and ctrl+z brings the %d bodies back (%d): %s\n", yn(replaced), drawn, d.alive(), yn(replaced && d.alive() == drawn));
+    // ---- a typed width is clamped to what the inspector accepts
+    g.setTool(T_BOX); g.clearSelection();
+    d.down(100, 40); d.mouseTo(130, 60); g.update();
+    d.type("99999"); d.key(SDLK_TAB); d.type("30"); d.key(SDLK_RETURN); d.up(130, 60);
+    float wTyped = g.primary >= 0 ? g.phys.bodies[g.primary].half.x * 2 : 0.f;
+    std::printf("dimension field: a typed width of 99999 makes a box %.0f wide (clamped to 600): %s\n", wTyped, yn(near(wTyped, 600)));
+    d.key(SDLK_z, KMOD_CTRL);
+    // ---- space released while a shape is being dragged does not start the simulation
+    d.down(200, 40); d.mouseTo(240, 60); g.update();
+    d.key(SDLK_SPACE);
+    const bool stillEditing = !g.playing && g.lmb;
+    d.key(SDLK_ESCAPE); d.up(240, 60);
+    std::printf("space released mid-drag leaves the simulation stopped and the drag alive: %s\n", yn(stillEditing && !g.playing));
+    // ---- a gravity flip is an undo step like any other edit
+    undoN = g.undoStack.size();
+    g.runCommand("sim.gravity");
+    const bool up = g.phys.gravity.y < 0 && g.undoStack.size() == undoN + 1;
+    d.key(SDLK_z, KMOD_CTRL);
+    std::printf("flipping gravity pushes one undo entry (%s) and ctrl+z flips it back: %s\n", yn(up), yn(up && g.phys.gravity.y > 0));
+    g.setTool(T_SELECT);
     d.click(body().pos.x, body().pos.y);
 }
 
@@ -455,7 +503,8 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     static const char* names[] = {"../x", "a/b.c", "", "my-engine", "0123456789012345678901234567890123", "  ", "x.sbot", "UPPER"};
     auto motion = [&](int x, int y) { mx = x; my = y; SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = x; e.motion.y = y; push(e); };
     auto button = [&](int i, bool down, int clicks = 1) {
-        SDL_Event e{}; e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP; e.button.button = buttons[i]; e.button.clicks = (Uint8)clicks; e.button.x = mx; e.button.y = my;
+        SDL_Event e{}; e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        e.button.button = buttons[i]; e.button.clicks = (Uint8)clicks; e.button.x = mx; e.button.y = my;
         push(e); held[i] = down;
     };
     auto key = [&](SDL_Keycode k, bool up = true) {
@@ -465,14 +514,19 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     auto type = [&](const std::string& s) { for (char c : s) { SDL_Event e{}; e.type = SDL_TEXTINPUT; e.text.text[0] = c; e.text.text[1] = 0; push(e); } };
     auto inRect = [&](const SDL_Rect& r) { motion(r.x + rng.below(std::max(1, r.w)), r.y + rng.below(std::max(1, r.h))); };
     auto step = [&] {
-        Uint64 t0 = SDL_GetPerformanceCounter();
-        g.pollEvents(); g.update(); g.frame();
-        int ms = (int)((SDL_GetPerformanceCounter() - t0) * 1000 / SDL_GetPerformanceFrequency());
+        const Uint64 f = SDL_GetPerformanceFrequency(), t0 = SDL_GetPerformanceCounter();
+        g.pollEvents(); g.update();
+        const Uint64 t1 = SDL_GetPerformanceCounter();
+        g.frame();
+        const Uint64 t2 = SDL_GetPerformanceCounter();
+        int ms = (int)((t2 - t0) * 1000 / f);
         worstMs = std::max(worstMs, ms);
-        if (ms > 2000) {   // what the slow frame was doing
-            int cells = 0; for (auto& c : g.world.cells) cells += c.t != M_EMPTY;
-            std::printf("fuzz frame %d took %d ms: %s speed %.1f, %d bodies, %d cells, tool %s, %zu selected, zoom %.1f\n", frame, ms,
-                        g.playing ? (g.paused ? "paused," : "running,") : "editing,", g.speed, g.phys.bodyCount(), cells, toolInfo(g.tool).name, g.sel.size(), g.zoom);
+        if (ms > 1000) {   // what the slow frame was doing, and whether the simulation step or the drawing took the time
+            int cells = 0, gas = 0; for (auto& c : g.world.cells) { cells += c.t != M_EMPTY; gas += MATS[c.t].kind == K_GAS; }
+            int joints = 0; for (auto& j : g.phys.joints) joints += j.alive;
+            std::printf("fuzz frame %d took %d ms (update %d, frame %d): %s speed %.1f, %d bodies, %d joints, %d cells (%d gas), tool %s, %zu selected, zoom %.1f, %dx%d\n",
+                        frame, ms, (int)((t1 - t0) * 1000 / f), (int)((t2 - t1) * 1000 / f), g.playing ? (g.paused ? "paused," : "running,") : "editing,", g.speed,
+                        g.phys.bodyCount(), joints, cells, gas, toolInfo(g.tool).name, g.sel.size(), g.zoom, g.L.winW, g.L.winH);
         }
         if (ms > 8000) bad("a frame took " + std::to_string(ms) + " ms");
     };
@@ -482,8 +536,10 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         SDL_Rect zones[] = {L.top, L.strip, L.ctx, L.canvas, L.dock, L.status};
         for (int i = 0; i < 6; ++i) {
             const SDL_Rect& z = zones[i];
-            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH) bad("layout zone " + std::to_string(i) + " outside the window or empty");
-            for (int j = i + 1; j < 6; ++j) if (overlaps(zones[i], zones[j])) bad("layout zones " + std::to_string(i) + " and " + std::to_string(j) + " overlap");
+            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH)
+                bad("layout zone " + std::to_string(i) + " outside the window or empty");
+            for (int j = i + 1; j < 6; ++j)
+                if (overlaps(zones[i], zones[j])) bad("layout zones " + std::to_string(i) + " and " + std::to_string(j) + " overlap");
         }
         const int nb = (int)g.phys.bodies.size();
         for (auto& b : g.phys.bodies) {
@@ -500,7 +556,8 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         for (int id : g.sel) if (id < 0 || id >= nb) bad("selection holds the out-of-range id " + std::to_string(id));
         if (g.primary >= nb) bad("primary out of range");
         if (g.selJoint >= (int)g.phys.joints.size()) bad("selected joint out of range");
-        if (g.handle >= 0 && (g.handleId < 0 || g.handleId >= nb || !g.phys.bodies[g.handleId].alive || !g.lmb)) bad("a handle is being dragged on a dead body or with no button down");
+        if (g.handle >= 0 && (g.handleId < 0 || g.handleId >= nb || !g.phys.bodies[g.handleId].alive || !g.lmb))
+            bad("a handle is being dragged on a dead body or with no button down");
         if (g.dim.active && !g.lmb) bad("the dimension field is active with no drag in progress");
         if (g.speed < 0.1f || g.speed > 2.f || g.brush < 1 || g.brush > 24 || g.selFilter < 0 || g.selFilter > 2 || g.emitFace > 4 || g.dockTab < 0 || g.dockTab > 3 ||
             g.bondType < 0 || g.bondType > 3 || g.sparkIdx < 0 || g.sparkIdx > 6 || g.mat >= M_COUNT || g.bodyMat >= M_COUNT || g.payload >= M_COUNT)
@@ -517,11 +574,17 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         parts.assign(4, {});
         { Writer w{parts[0]}; g.world.save(w); }
         { Writer w{parts[1]}; w.pod(g.phys.gravity);
-          for (auto& b : g.phys.bodies) if (b.alive) { w.pod(b.id); w.pod(b.pos); w.pod(b.angle); w.pod(b.half); w.pod(b.radius); w.pod(b.mat); w.pod(b.isStatic); w.pod(b.isWheel);
-                                                        w.pod(b.isRocket); w.pod(b.group); w.pod(b.fan.strength); w.pod(b.fan.vacuum); w.pod(b.src.on); w.pod(b.src.mat); w.pod(b.src.rate); w.pod(b.src.face); w.pod(b.temp); } }
+          for (auto& b : g.phys.bodies) {
+              if (!b.alive) continue;
+              w.pod(b.id); w.pod(b.pos); w.pod(b.angle); w.pod(b.half); w.pod(b.radius); w.pod(b.mat); w.pod(b.isStatic); w.pod(b.isWheel); w.pod(b.isRocket);
+              w.pod(b.group); w.pod(b.fan.strength); w.pod(b.fan.vacuum); w.pod(b.src.on); w.pod(b.src.mat); w.pod(b.src.rate); w.pod(b.src.face); w.pod(b.temp);
+          } }
         { Writer w{parts[2]};
-          for (auto& j : g.phys.joints) if (j.alive && j.type != J_MOUSE) { w.pod(j.id); w.pod(j.type); w.pod(j.a); w.pod(j.b); w.pod(j.la); w.pod(j.lb); w.pod(j.length); w.pod(j.freq); w.pod(j.damping);
-                                                                             w.pod(j.speed); w.pod(j.power); w.pod(j.keyed); w.pod(j.group); w.pod(j.bondId); w.pod(j.breakT); w.pod(j.loadG); } }
+          for (auto& j : g.phys.joints) {
+              if (!j.alive || j.type == J_MOUSE) continue;
+              w.pod(j.id); w.pod(j.type); w.pod(j.a); w.pod(j.b); w.pod(j.la); w.pod(j.lb); w.pod(j.length); w.pod(j.freq); w.pod(j.damping);
+              w.pod(j.speed); w.pod(j.power); w.pod(j.keyed); w.pod(j.group); w.pod(j.bondId); w.pod(j.breakT); w.pod(j.loadG);
+          } }
         { Writer w{parts[3]}; w.pod((uint32_t)g.labels.size()); for (auto& l : g.labels) { w.pod(l.p); w.str(l.s); } }
     };
     auto differs = [](const Parts& a, const Parts& b) {
@@ -582,8 +645,10 @@ int fuzz(Game& g, uint32_t seed, int frames) {
                 else if (z < 85) inRect(g.L.ctx);
                 else if (z < 88) inRect(g.L.status);
                 else if (z < 93) motion(rng.range(-60, g.L.winW + 60), rng.range(-60, g.L.winH + 60));
-                else if (!g.fieldRects.empty()) { auto it = g.fieldRects.begin(); std::advance(it, rng.below((int)g.fieldRects.size())); inRect(SDL_Rect{it->second.x + it->second.w / 2, it->second.y, it->second.w / 2, it->second.h}); }
-                else inRect(g.L.canvas);
+                else if (!g.fieldRects.empty()) {   // the number half of some inspector field
+                    auto it = g.fieldRects.begin(); std::advance(it, rng.below((int)g.fieldRects.size()));
+                    inRect(SDL_Rect{it->second.x + it->second.w / 2, it->second.y, it->second.w / 2, it->second.h});
+                } else inRect(g.L.canvas);
             } else if (r < 560) {   // a button goes down or up (left most often), sometimes as a double click
                 int i = rng.below(100) < 60 ? 0 : rng.below(100) < 60 ? 1 : 2;
                 button(i, !held[i], !held[i] && rng.chance(10) ? 2 : 1);
@@ -602,7 +667,11 @@ int fuzz(Game& g, uint32_t seed, int frames) {
                 SDL_SetWindowSize(g.win, w, h);
             } else if (r < 892) g.runCommand(rng.chance(40) ? "sim.play" : rng.chance(50) ? "sim.step" : "sim.stop");
             else if (r < 897) g.runCommand(("scene." + std::to_string(rng.below((int)Game::sceneList().size()))).c_str());
-            else if (r < 912) { int n = rng.range(5, 40); for (int i = 0; i < n; ++i) { SDL_SetModState(KMOD_CTRL); key(rng.chance(60) ? SDLK_z : SDLK_y); } SDL_SetModState(KMOD_NONE); }
+            else if (r < 912) {   // an undo / redo storm
+                int n = rng.range(5, 40);
+                for (int i = 0; i < n; ++i) { SDL_SetModState(KMOD_CTRL); key(rng.chance(60) ? SDLK_z : SDLK_y); }
+                SDL_SetModState(KMOD_NONE);
+            }
             else if (r < 916 && g.phys.bodyCount() < 2500) {   // mass drawing, then select everything
                 if (held[0]) button(0, false);
                 step();
@@ -644,12 +713,13 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         SDL_Rect zones[] = {L.top, L.strip, L.ctx, L.canvas, L.dock, L.status};
         for (int i = 0; i < 6; ++i) {
             const SDL_Rect& z = zones[i];
-            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH) bad("degenerate layout " + std::to_string(w) + "x" + std::to_string(h) + ": zone " + std::to_string(i) + " bad");
+            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH)
+                bad("degenerate layout " + std::to_string(w) + "x" + std::to_string(h) + ": zone " + std::to_string(i) + " bad");
             for (int j = i + 1; j < 6; ++j) if (overlaps(zones[i], zones[j])) bad("degenerate layout: zones overlap");
         }
     }
-    std::printf("fuzz: seed %u, %d frames, %d events, %d bodies at the end, worst frame %d ms, %d violations: %s\n", seed, frames, events, g.phys.bodyCount(), worstMs, violations,
-                violations ? "FAIL" : "clean");
+    std::printf("fuzz: seed %u, %d frames, %d events, %d bodies at the end, worst frame %d ms, %d violations: %s\n", seed, frames, events, g.phys.bodyCount(),
+                worstMs, violations, violations ? "FAIL" : "clean");
     return violations ? 1 : 0;
 }
 
