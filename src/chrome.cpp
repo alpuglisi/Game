@@ -1094,7 +1094,6 @@ void Game::drawCheatSheet() {
             if (l.rfind("## ", 0) == 0) { ui.space(ui::theme().gap); ui.label(l.substr(3), ui::TextStyle::Section); continue; }
             size_t bar = l.find('|');
             std::string key = l.substr(0, bar), what = bar == std::string::npos ? "" : l.substr(bar + 1);
-            if (key.empty()) key = "-";
             SDL_Rect row = ui.next(fontH() + 4);   // the name takes what the shortcut leaves, cut with an ellipsis
             int kw = ui.textWidth(key);
             ui.text(key, row.x + row.w - kw, row.y + 2, ui::TextStyle::Dim);

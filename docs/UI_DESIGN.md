@@ -253,9 +253,10 @@ States: rest, hover, pressed, active (accent fill), focused (2 px ring), disable
 | Middle drag, `Space`+drag, `Home` `End` `PgUp` `PgDn` | Pan |
 | `T` | Toggle FIXED on the selection |
 | Backtick | Select other (everything under the pointer) |
-| Arrows / `A` `D` / `Up` `W` while running | Drive keyed motors / fire rockets |
+| Arrows / `A` `D` / `Up` `W` while running | Drive keyed motors / fire rockets (while the simulation runs, `W` only fires; it picks the Wheel tool when paused or editing) |
 | Arrows in edit mode | Nudge the selection 1 cell (Shift 10, Ctrl 0.25) |
 | `[` `]` | Brush size |
+| `Z` (hold) | Fire the spark plugs now (`E` is the electric view) |
 
 Letters that drove the old single-key toggles (fan mode `M`, gravity `G`, fixed `T`, heat `H`, pressure `P`, grid
 `K`) move to the context bar, the inspector and the view toggles, except `T` and `H`, which keep their meaning.
@@ -267,3 +268,22 @@ Letters that drove the old single-key toggles (fan mode `M`, gravity `G`, fixed 
 - The command table is the single source of truth for names, shortcuts, enabled state and help text.
 - Every state the user can reach is rendered headless by the gallery flag and inspected; the event-driven editor
   test drives the new chrome through real SDL events.
+
+## 11. Implementation notes
+
+The interface as built follows sections 6 to 10 with these deliberate differences:
+
+- The selection filter offers All / Bodies / Joints; the application has no cell selection, so the "cells" option does
+  not exist.
+- The context menu's Material entry opens a swatch popup rather than a submenu (the toolkit has no submenus).
+- History labels name the step ("Paint SAND", "Add motor", "Resize box") without a cell count.
+- The Delete *tool* (click a body or joint to remove it) lives in the command palette; the strip's MODIFY group has the
+  Delete *action* for the selection.
+- Pipes and hoses take their length and diameter from the dimension field and their start from the press; exact end
+  coordinates are set afterwards through the Inspector's X and Y.
+- The status bar separates bindings with `|` (the bitmap font has no middle dot).
+- The save dialog asks before overwriting an existing file: the same name has to be accepted twice.
+- `Esc` closes one popup or dialog per press, the most recently opened first.
+- Verification lives in `--shot --scene 25` (47 behaviours), `--ui-gallery` (26 states) and `--ui-fuzz SEED FRAMES`
+  (random events through the real event path with undo / world consistency checks), all documented in the README.
+

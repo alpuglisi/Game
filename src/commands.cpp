@@ -171,8 +171,8 @@ bool Game::handleKey(SDL_Keycode k, bool ctrl, bool shift) {
     if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (lmb) { commitDrag(); return true; } return false; }
     if (k == SDLK_ESCAPE) {   // the drag in progress, then the topmost popup or dialog, then the selection
         if (cancelDrag()) return true;
-        if (selOtherOpen || ctxOpen || matMenuOpen || paletteOpen || scaleOpen) { selOtherOpen = ctxOpen = matMenuOpen = paletteOpen = scaleOpen = false; return true; }
-        if (cheatOpen || scenesOpen || fileOpen || newConfirm) { cheatOpen = scenesOpen = fileOpen = newConfirm = false; return true; }
+        bool* layers[] = {&selOtherOpen, &ctxOpen, &matMenuOpen, &scaleOpen, &paletteOpen, &cheatOpen, &newConfirm, &fileOpen, &scenesOpen};   // one per Esc, topmost first
+        for (bool* open : layers) if (*open) { *open = false; return true; }
         if (!sel.empty() || jointValid(selJoint)) { clearSelection(); return true; }
         if (dockFlyout) { dockFlyout = false; return true; }
         return true;

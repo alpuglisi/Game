@@ -540,6 +540,7 @@ bool Game::restoreState(const std::vector<uint8_t>& buf) {
     labels = ls;
     if (std::count(BODY_MATS.begin(), BODY_MATS.end(), bm)) bodyMat = bm;   // a damaged file must not name a material the table lacks
     dragBody = -1; grabJoint = -1;
+    if (focusBody >= 0 && (focusBody >= (int)phys.bodies.size() || !phys.bodies[focusBody].alive)) focusBody = -1;
     pruneSelection();
     return true;
 }
@@ -628,7 +629,7 @@ void Game::saveQuick() {
 void Game::openFileDialog(bool save) {
     refreshFiles();
     fileOpen = true; fileSave = save;
-    fileSel = -1;
+    fileSel = -1; overwriteName.clear();
     fileName = save ? currentFile : (fileList.empty() ? std::string() : fileList[0]);
     if (!save && !fileList.empty()) fileSel = 0;
 }
@@ -636,6 +637,10 @@ bool Game::fileDialogAccept() {
     std::string name = cleanName(fileName);
     if (name.empty()) { notify(fileSave ? "Type a name" : "Type or pick a name"); return false; }
     if (fileSave) {
+        // an existing file other than the one being edited is overwritten only when the same name is accepted twice
+        if (name != currentFile && std::count(fileList.begin(), fileList.end(), name) && overwriteName != name) {
+            overwriteName = name; notify(name + ".sbot exists: Enter or Save again to overwrite it"); return false;
+        }
         if (!writeFile(name)) { notify("Save failed"); return false; }
         currentFile = name;
         notify("Saved saves/" + name + ".sbot" + (playing ? " (as drawn)" : ""));

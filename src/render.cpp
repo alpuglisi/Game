@@ -83,13 +83,15 @@ SDL_FPoint Game::sp(Vec2 p) const { return SDL_FPoint{(p.x - camXf) * sc(), (p.y
 void Game::fillPoly(const std::vector<Vec2>& pts, uint32_t color) { fillPolyC(pts, rgb(color)); }
 
 void Game::fillPolyC(const std::vector<Vec2>& pts, SDL_Color c) {
-    std::vector<SDL_Vertex> v;
+    if (pts.empty()) return;
+    std::vector<SDL_Vertex>& v = scratchV;
+    std::vector<int>& idx = scratchIdx;
+    v.clear(); idx.clear();
     Vec2 cen;
     for (auto& p : pts) cen += p;
     cen = cen / (float)pts.size();
     v.push_back({sp(cen), c, {0, 0}});
     for (auto& p : pts) v.push_back({sp(p), c, {0, 0}});
-    std::vector<int> idx;
     int n = (int)pts.size();
     for (int i = 0; i < n; ++i) { idx.push_back(0); idx.push_back(1 + i); idx.push_back(1 + (i + 1) % n); }
     SDL_RenderGeometry(ren, nullptr, v.data(), (int)v.size(), idx.data(), (int)idx.size());
@@ -165,7 +167,8 @@ void Game::renderBodies() {
         if (b.src.on) fill = mix(fill, 0xFF000000u | MATS[b.src.mat].color, 0.5f);
         SDL_Color edge = rgb(shade(fill, 0.55f) & 0xFFFFFF);
         if (b.shape == SHAPE_BOX) {
-            std::vector<Vec2> pts;
+            std::vector<Vec2>& pts = scratchPts;
+            pts.clear();
             Vec2 c[4] = {{-b.half.x, -b.half.y}, {b.half.x, -b.half.y}, {b.half.x, b.half.y}, {-b.half.x, b.half.y}};
             for (auto& p : c) pts.push_back(b.toWorld(p));
             fillPoly(pts, fill);

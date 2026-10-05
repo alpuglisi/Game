@@ -145,6 +145,7 @@ struct Game {
     float speed = 1.f, stepAcc = 0.f;   // simulation speed 0.1x .. 2x
     std::string currentFile;
     std::vector<std::string> fileList;
+    std::string overwriteName;   // the existing file the save dialog asked about; a second Enter on the same name overwrites it
     int bondType = 0;
     float bondT = 55.f, bondG = 10.f;
     // ---- camera: the canvas shows part of the wider world
@@ -465,6 +466,7 @@ struct Game {
     SDL_FPoint sp(Vec2 p) const;
     void fillPoly(const std::vector<Vec2>& pts, uint32_t color);
     void fillPolyC(const std::vector<Vec2>& pts, SDL_Color c);
+    std::vector<SDL_Vertex> scratchV; std::vector<int> scratchIdx; std::vector<Vec2> scratchPts;   // reused every frame instead of allocated per body
     void lineWorld(Vec2 a, Vec2 b, SDL_Color c, int thick = 1);
     void outlinePoly(const std::vector<Vec2>& pts, SDL_Color c);
     std::vector<Vec2> circlePts(Vec2 c, float r, int n = 28);
