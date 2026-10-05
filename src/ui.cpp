@@ -184,7 +184,7 @@ struct WState {   // per-id memory: whichever fields the widget kind uses
 };
 
 struct Overlay { uint64_t id; SDL_Rect r; bool modal; };
-struct OpenOverlay { uint64_t id; bool modal, above; int layer; SDL_Rect r; int maxH, fillCmd, strokeCmd; size_t panelDepth; };
+struct OpenOverlay { uint64_t id; bool modal, above; int layer; SDL_Rect r; int maxH, fillCmd, strokeCmd; size_t panelDepth, ovIdx; };
 
 struct Hit { bool over = false, hover = false, pressed = false, down = false, released = false, clicked = false, dbl = false; };
 
@@ -205,7 +205,7 @@ struct Context::Impl {
     std::vector<uint64_t> fieldsCur, fieldsPrev;
     struct { uint64_t id = 0; int startX = 0; double startV = 0; bool moved = false, dbl = false; uint32_t repeatAt = 0; } num;
     struct { uint64_t id = 0; std::string buf; int caret = 0; bool selAll = false; int scrollX = 0; } edit;   // the focused field's typing state
-    bool editedFlag = false, listActivatedFlag = false, wheelConsumed = false, escConsumed = false, mouseOverUi = false, frameDone = false;
+    bool editedFlag = false, listActivatedFlag = false, wheelConsumed = false, escConsumed = false, mouseOverUi = false;
 
     uint64_t lastId = 0; SDL_Rect lastRect{}; bool lastOver = false;
     uint64_t tipId = 0; SDL_Rect tipRect{}; std::string tipText, tipShortcut, hintText;
@@ -229,6 +229,8 @@ struct Context::Impl {
     const SDL_Rect& clip() const { return clips.back(); }
     uint64_t layerOwner() const { return ovStack.empty() ? 0 : ovStack.back().id; }
     bool pointerAvail() const { return pointerOwner == layerOwner(); }
+    // the keyboard goes to the topmost overlay of the previous frame, or to the base layer when none was open
+    bool keysAvail() const { return layerOwner() == (ovPrev.empty() ? 0 : ovPrev.back().id); }
     int fontH() const { return font::height(th.face, th.fontScale); }
     int textW(const std::string& s, int scale = -1) const { return font::width(s, th.face, scale < 0 ? th.fontScale : scale); }
     int lineH() const { return fontH() + th.gap; }
@@ -502,6 +504,7 @@ void Context::Impl::moveFocus(uint64_t from, int dir) {
 Context::Impl::KeyResult Context::Impl::editKeys(std::string& s, int maxLen, bool numeric) {
     KeyResult kr;
     edit.caret = clampi(edit.caret, 0, (int)s.size());
+    if (!keysAvail()) return kr;   // an overlay above this field has the keyboard
     auto eraseAll = [&] { s.clear(); edit.caret = 0; edit.selAll = false; kr.changed = true; };
     for (SDL_Keycode k : in.keys) {
         switch (k) {
@@ -738,12 +741,13 @@ bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool clos
     WState& s = st[pid];
     if (!open) { s.open = false; return false; }
     int idx = ovIndex(pid);
-    bool wasOpen = idx >= 0;
+    bool wasOpen = idx >= 0, underModal = false;   // a modal above this overlay takes Esc and clicks
+    for (size_t i = (size_t)std::max(idx + 1, 0); i < ovPrev.size(); ++i) underModal = underModal || ovPrev[i].modal;
     if (wasOpen && idx == (int)ovPrev.size() - 1 && !escConsumed && hasKey(in, SDLK_ESCAPE)) {   // Esc closes the topmost
         escConsumed = true; open = false; s.open = false;
         return false;
     }
-    if (wasOpen && closeOutside && (in.lPressed || in.rPressed)) {
+    if (wasOpen && closeOutside && !underModal && (in.lPressed || in.rPressed)) {
         int ownerIdx = pointerOwner == 0 || pointerOwner == kOutside ? -1 : ovIndex(pointerOwner);
         if (ownerIdx < idx) { open = false; s.open = false; return false; }
     }
@@ -753,9 +757,11 @@ bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool clos
     curLayer = layerCount;
     pushClipAbsolute({0, 0, winW, winH});
     if (modal) fill({0, 0, winW, winH}, th.overlayShade, 140);
-    OpenOverlay o{pid, modal, above, curLayer, r, maxH, (int)layers[curLayer].cmds.size(), 0, panels.size()};
+    OpenOverlay o{pid, modal, above, curLayer, r, maxH, (int)layers[curLayer].cmds.size(), 0, panels.size(), ovCur.size()};
+    ovCur.push_back({pid, r, modal});   // in opening order, which is the z-order: a popup inside a modal sits above it
     SDL_Rect frame = r;
-    if (frame.h <= 0) frame.h = 1;   // the height is fitted at endOverlay; the commands must exist to be patched
+    if (frame.w <= 0) frame.w = 1;   // the size is fitted at endOverlay; the commands must exist to be patched
+    if (frame.h <= 0) frame.h = 1;
     fill(frame, th.surface2, 255, th.radius);
     o.strokeCmd = (int)layers[curLayer].cmds.size();
     stroke(frame, th.borderLight, 255, th.radius);
@@ -782,7 +788,7 @@ void Context::Impl::endOverlay(bool fitHeight) {
         L.cmds[(size_t)o.fillCmd].r = o.r;
         L.cmds[(size_t)o.strokeCmd].r = o.r;
     }
-    ovCur.push_back({o.id, o.r, o.modal});
+    if (o.ovIdx < ovCur.size() && ovCur[o.ovIdx].id == o.id) ovCur[o.ovIdx].r = o.r;
     popClip();
     curLayer = ovStack.empty() ? 0 : ovStack.back().layer;
 }
@@ -843,8 +849,8 @@ void Context::begin(SDL_Renderer* ren, const Input& input) {
     m.in = input;
     m.winW = input.winW; m.winH = input.winH;
     if ((m.winW <= 0 || m.winH <= 0) && ren) SDL_GetRendererOutputSize(ren, &m.winW, &m.winH);
+    m.winW = std::max(0, m.winW); m.winH = std::max(0, m.winH);   // a negative clip rect would switch clipping off
     m.frameCalls = 0;
-    m.frameDone = false;
     if (ren) SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     m.ids.clear(); m.panels.clear(); m.clips.clear(); m.ovStack.clear();
     m.layerCount = 0; m.curLayer = 0;
@@ -855,9 +861,13 @@ void Context::begin(SDL_Renderer* ren, const Input& input) {
     m.lastId = 0; m.lastOver = false;
     std::swap(m.ovPrev, m.ovCur); m.ovCur.clear();
     std::swap(m.fieldsPrev, m.fieldsCur); m.fieldsCur.clear();
-    // who owns the pointer: the topmost overlay under it, nobody when overlays are open but none is under it
+    // who owns the pointer: the topmost overlay under it; nobody when overlays are open but none is under it, and
+    // nothing below a modal
     m.pointerOwner = 0;
-    for (size_t i = m.ovPrev.size(); i-- > 0;) if (contains(m.ovPrev[i].r, m.in.mx, m.in.my)) { m.pointerOwner = m.ovPrev[i].id; break; }
+    for (size_t i = m.ovPrev.size(); i-- > 0;) {
+        if (contains(m.ovPrev[i].r, m.in.mx, m.in.my)) { m.pointerOwner = m.ovPrev[i].id; break; }
+        if (m.ovPrev[i].modal) break;
+    }
     if (m.pointerOwner == 0 && !m.ovPrev.empty()) m.pointerOwner = kOutside;
     m.mouseOverUi = !m.ovPrev.empty();
     if (!m.in.lDown && !m.in.lReleased) { m.active = 0; m.num.id = 0; }   // a release we never saw
@@ -877,7 +887,6 @@ void Context::end() {
     if (m.active && !m.activeSeen) m.active = 0;
     if (m.listFocus && !m.listFocusSeen) m.listFocus = 0;
     if (m.in.lReleased) { m.active = 0; m.num.id = 0; }
-    m.frameDone = true;
     if (!m.ren) return;
     for (int i = 1; i <= m.layerCount; ++i) {   // replay the deferred layers in the order they were opened
         m.curLayer = i;
@@ -891,8 +900,9 @@ void Context::end() {
     g_lastFrameCalls = m.frameCalls;
 }
 
-// After end() these answer for the frame just drawn; during a frame they also count what was open last frame.
-bool Context::anyPopupOpen() const { const Impl& m = *impl_; return !m.ovCur.empty() || (!m.frameDone && !m.ovPrev.empty()); }
+// anyPopupOpen() counts what is open now and what was open when the frame began: the Esc or the click that closed a
+// popup belonged to the toolkit, so the viewport must not act on it too (wantsMouse() already works this way).
+bool Context::anyPopupOpen() const { const Impl& m = *impl_; return !m.ovCur.empty() || !m.ovPrev.empty(); }
 bool Context::wantsMouse() const { return impl_->mouseOverUi || anyPopupOpen() || impl_->active != 0; }
 bool Context::wantsKeyboard() const { return impl_->focus != 0; }
 const Input& Context::input() const { return impl_->in; }
@@ -1190,9 +1200,9 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
         bool above = false, keep = true;
         SDL_Rect pr = m.placePopup(pid, ctl, ctl.w, maxH, above);
         if (m.beginOverlay(pid, pr, false, true, keep, 4, true, maxH, above)) {
-            for (SDL_Keycode k : m.in.keys) {
+            if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {
                 if (k == SDLK_DOWN) s.hl = n ? (s.hl + 1) % n : -1;
-                else if (k == SDLK_UP) s.hl = n ? (s.hl - 1 + n) % n : -1;
+                else if (k == SDLK_UP) s.hl = n ? (clampi(s.hl, 0, n) - 1 + n) % n : -1;
                 else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) {
                     if (s.hl != current) { current = s.hl; changed = true; }
                     keep = false;
@@ -1313,8 +1323,8 @@ int Context::listView(const char* id, const std::vector<std::string>& items, int
     if (box.over && m.in.lPressed) { m.listFocus = wid; m.listFocusSeen = true; }
     else if (m.in.lPressed && !box.over && m.listFocus == wid && m.pointerAvail()) m.listFocus = 0;
     int result = -1;
-    if (m.listFocus == wid && n > 0) {   // keyboard: arrows move the selection, Enter activates
-        int sel = selected;
+    if (m.listFocus == wid && n > 0 && m.keysAvail()) {   // keyboard: arrows move the selection, Enter activates
+        int sel = clampi(selected, -1, n - 1);   // a stale selection from the caller must not step out of the list
         for (SDL_Keycode k : m.in.keys) {
             if (k == SDLK_DOWN) sel = std::min(n - 1, sel + 1);
             else if (k == SDLK_UP) sel = std::max(0, sel - 1);
@@ -1411,10 +1421,11 @@ int Context::contextMenu(const char* id, bool& open, int atX, int atY, const std
     int chosen = -1, n = (int)items.size();
     if (!m.beginOverlay(pid, r, false, true, open, 4, true, maxH, above)) return -1;
     bool keep = true;
-    for (SDL_Keycode k : m.in.keys) {   // arrows skip disabled items
+    if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {   // arrows skip disabled items; from no highlight they start at either end
         int dir = k == SDLK_DOWN ? 1 : k == SDLK_UP ? -1 : 0;
         if (dir) {
-            for (int t = 0, i = s.hl; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
+            int i = s.hl >= 0 && s.hl < n ? s.hl : (dir > 0 ? -1 : 0);
+            for (int t = 0; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
         } else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n && items[(size_t)s.hl].enabled) {
             chosen = s.hl; keep = false;
         }
@@ -1463,7 +1474,7 @@ bool Context::beginModal(const char* id, const std::string& title, int w, int h,
         if (ch.hover) m.fill(cb, ch.down ? m.th.accentDim : m.th.hover, 255, m.th.radius);
         m.ico(icons::Close, cb.x + 4, cb.y + 4, ch.hover ? m.th.text : m.th.textDim);
         m.tipFor(ch, pid ^ 0xC, cb, "Close", "Esc");
-        if (ch.clicked) { open = false; m.endOverlay(false); m.st[pid].open = false; return false; }
+        if (ch.clicked) { open = false; m.endOverlay(false); m.st[pid].open = false; m.dropOverlay(pid); return false; }
     }
     m.cur().y = r.y + titleH;   // the overlay panel itself only hosts the content panel
     m.beginPanelImpl(pid ^ 0xD, {r.x + 1, r.y + titleH, r.w - 2, std::max(0, r.h - titleH - 1)}, true, false, m.th.pad);
@@ -1498,7 +1509,6 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
     }
     std::sort(m.palRes.begin(), m.palRes.end());
     int n = std::min((int)m.palRes.size(), 10);
-    s.hl = clampi(s.hl, 0, std::max(0, n - 1));
     int w = std::min(560, m.winW - 2 * m.th.pad);
     int h = m.th.pad * 2 + m.th.fieldH + m.th.gap + std::max(1, n) * m.th.rowH;
     SDL_Rect r{(m.winW - w) / 2, std::min(64, std::max(0, (m.winH - h) / 3)), w, h};
@@ -1507,10 +1517,11 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
         if (!open && m.focus == fieldId) m.blur();
         return;
     }
-    for (SDL_Keycode k : m.in.keys) {
+    s.hl = clampi(s.hl, 0, std::max(0, n - 1));   // after beginOverlay, which starts a new overlay with no highlight
+    if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {
         if (k == SDLK_DOWN && n) s.hl = (s.hl + 1) % n;
         else if (k == SDLK_UP && n) s.hl = (s.hl - 1 + n) % n;
-        else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl < n) run = m.palRes[(size_t)s.hl].second;
+        else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) run = m.palRes[(size_t)s.hl].second;
     }
     SDL_Rect fr = m.alloc(m.th.fieldH);
     m.ico(icons::Search, fr.x + m.th.gap + 2, fr.y + (fr.h - 16) / 2, m.th.textDim);
@@ -1546,7 +1557,8 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
         if (!c.enabled || c.enabled()) {
             m.mruPush(c.name);
             open = false; s.open = false; m.blur(); m.dropOverlay(pid);
-            if (c.run) c.run();
+            std::function<void()> fn = c.run;   // a copy: the command may rebuild the table it lives in
+            if (fn) fn();
         }
     }
     if (!open && m.focus == fieldId) m.blur();
