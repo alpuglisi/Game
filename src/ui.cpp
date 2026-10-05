@@ -41,7 +41,7 @@ SDL_Rect intersect(const SDL_Rect& a, const SDL_Rect& b) {
 SDL_Rect inset(SDL_Rect r, int d) { return {r.x + d, r.y + d, std::max(0, r.w - 2 * d), std::max(0, r.h - 2 * d)}; }
 SDL_Color col(uint32_t rgb, uint8_t a = 255) { return SDL_Color{uint8_t(rgb >> 16), uint8_t(rgb >> 8), uint8_t(rgb), a}; }
 int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+double clampd(double v, double lo, double hi) { return !(v >= lo) ? lo : (v > hi ? hi : v); }   // NaN lands on lo
 
 // How far each of the top `r` rows of a rounded corner is inset: pixel-art circles for small radii, geometry above.
 void cornerInsets(int r, int* ins) {
@@ -94,7 +94,8 @@ int roundedOutline(SDL_Rect r, int radius, SDL_Rect* out) {
     return n;
 }
 
-// Left-to-right evaluation of "a op b op c" with + - * /; numbers may carry a sign and a decimal point.
+// Evaluates "a op b op c" with + - * / (* and / bind tighter); numbers may carry a sign and a decimal point.
+// False for anything else: empty input, a trailing operator, division by zero, a result that is not finite.
 bool evalExpr(const std::string& s, double& out) {
     size_t i = 0;
     auto skip = [&] { while (i < s.size() && s[i] == ' ') ++i; };
@@ -106,23 +107,32 @@ bool evalExpr(const std::string& s, double& out) {
         while (i < s.size() && std::isdigit((unsigned char)s[i])) { ++i; digits = true; }
         if (i < s.size() && s[i] == '.') { ++i; while (i < s.size() && std::isdigit((unsigned char)s[i])) { ++i; digits = true; } }
         if (!digits) return false;
-        v = std::strtod(s.c_str() + start, nullptr);
+        v = std::strtod(s.substr(start, i - start).c_str(), nullptr);   // only the scanned text: strtod must not read "1e5" as 100000
         return true;
     };
+    auto term = [&](double& acc) {   // number (* or / number)*
+        if (!number(acc)) return false;
+        for (;;) {
+            skip();
+            if (i >= s.size() || (s[i] != '*' && s[i] != '/')) return true;
+            char op = s[i++];
+            double rhs = 0;
+            if (!number(rhs)) return false;
+            if (op == '*') acc *= rhs;
+            else { if (rhs == 0) return false; acc /= rhs; }
+        }
+    };
     double acc = 0;
-    if (!number(acc)) return false;
+    if (!term(acc)) return false;
     for (;;) {
         skip();
         if (i >= s.size()) break;
         char op = s[i++];
         double rhs = 0;
-        if (!number(rhs)) return false;
-        if (op == '+') acc += rhs;
-        else if (op == '-') acc -= rhs;
-        else if (op == '*') acc *= rhs;
-        else if (op == '/') { if (rhs == 0) return false; acc /= rhs; }
-        else return false;
+        if ((op != '+' && op != '-') || !term(rhs)) return false;
+        acc += op == '+' ? rhs : -rhs;
     }
+    if (!std::isfinite(acc)) return false;
     out = acc;
     return true;
 }
@@ -184,7 +194,7 @@ struct WState {   // per-id memory: whichever fields the widget kind uses
 };
 
 struct Overlay { uint64_t id; SDL_Rect r; bool modal; };
-struct OpenOverlay { uint64_t id; bool modal, above; int layer; SDL_Rect r; int maxH, fillCmd, strokeCmd; size_t panelDepth; };
+struct OpenOverlay { uint64_t id; bool modal, above; int layer; SDL_Rect r; int maxH, fillCmd, strokeCmd; size_t panelDepth, ovIdx; };
 
 struct Hit { bool over = false, hover = false, pressed = false, down = false, released = false, clicked = false, dbl = false; };
 
@@ -201,11 +211,11 @@ struct Context::Impl {
     std::unordered_map<uint64_t, WState> st;
 
     uint64_t active = 0, focus = 0, listFocus = 0;
-    bool focusSeen = false, activeSeen = false, listFocusSeen = false;
+    bool focusSeen = false, activeSeen = false, listFocusSeen = false, tabConsumed = false;
     std::vector<uint64_t> fieldsCur, fieldsPrev;
     struct { uint64_t id = 0; int startX = 0; double startV = 0; bool moved = false, dbl = false; uint32_t repeatAt = 0; } num;
     struct { uint64_t id = 0; std::string buf; int caret = 0; bool selAll = false; int scrollX = 0; } edit;   // the focused field's typing state
-    bool editedFlag = false, listActivatedFlag = false, wheelConsumed = false, escConsumed = false, mouseOverUi = false, frameDone = false;
+    bool editedFlag = false, listActivatedFlag = false, wheelConsumed = false, escConsumed = false, mouseOverUi = false;
 
     uint64_t lastId = 0; SDL_Rect lastRect{}; bool lastOver = false;
     uint64_t tipId = 0; SDL_Rect tipRect{}; std::string tipText, tipShortcut, hintText;
@@ -229,6 +239,8 @@ struct Context::Impl {
     const SDL_Rect& clip() const { return clips.back(); }
     uint64_t layerOwner() const { return ovStack.empty() ? 0 : ovStack.back().id; }
     bool pointerAvail() const { return pointerOwner == layerOwner(); }
+    // the keyboard goes to the topmost overlay of the previous frame, or to the base layer when none was open
+    bool keysAvail() const { return layerOwner() == (ovPrev.empty() ? 0 : ovPrev.back().id); }
     int fontH() const { return font::height(th.face, th.fontScale); }
     int textW(const std::string& s, int scale = -1) const { return font::width(s, th.face, scale < 0 ? th.fontScale : scale); }
     int lineH() const { return fontH() + th.gap; }
@@ -333,6 +345,7 @@ void Context::Impl::exec(const Cmd& c, const std::string* s) {
     switch (c.op) {
         case Op::Clip: SDL_RenderSetClipRect(ren, &c.r); break;
         case Op::Fill: {
+            if (c.r.w <= 0 || c.r.h <= 0) break;   // a popup frame fitted to no content; SDL draws a pixel for a zero-size rect
             SDL_Rect rs[2 * kMaxRadius + 1];
             int n = roundedFill(c.r, c.radius, rs);
             SDL_SetRenderDrawColor(ren, uint8_t(c.rgb >> 16), uint8_t(c.rgb >> 8), uint8_t(c.rgb), c.a);
@@ -340,6 +353,7 @@ void Context::Impl::exec(const Cmd& c, const std::string* s) {
             break;
         }
         case Op::Stroke: {
+            if (c.r.w <= 0 || c.r.h <= 0) break;
             SDL_Rect rs[4 * kMaxRadius + 4];
             int n = roundedOutline(c.r, c.radius, rs);
             SDL_SetRenderDrawColor(ren, uint8_t(c.rgb >> 16), uint8_t(c.rgb >> 8), uint8_t(c.rgb), c.a);
@@ -450,8 +464,10 @@ void Context::Impl::endPanelImpl() {
 bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int contentH, int& scrollY) {
     int maxScroll = contentH - viewH;
     if (maxScroll <= 0 || lane.h <= 0 || lane.w <= 0) return false;
-    int thumbH = clampi(lane.h * viewH / contentH, std::min(24, lane.h), lane.h), track = lane.h - thumbH;
-    int thumbY = lane.y + (track > 0 ? track * scrollY / maxScroll : 0);
+    // 64-bit products: a long list times a tall lane overflows int
+    int thumbH = clampi((int)((int64_t)lane.h * viewH / contentH), std::min(24, lane.h), lane.h), track = lane.h - thumbH;
+    auto thumbAt = [&](int sy) { return lane.y + (track > 0 ? (int)((int64_t)track * sy / maxScroll) : 0); };
+    int thumbY = thumbAt(scrollY);
     Hit h = hit(id, lane, true);
     WState& s = st[id];
     bool changed = false;
@@ -460,8 +476,8 @@ bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int content
         s.dragOff = contains({lane.x, thumbY, lane.w, thumbH}, in.mx, in.my) ? in.my - thumbY : thumbH / 2;
     }
     if (s.drag && active == id && in.lDown && track > 0) {
-        int ns = clampi((in.my - s.dragOff - lane.y) * maxScroll / track, 0, maxScroll);
-        if (ns != scrollY) { scrollY = ns; changed = true; thumbY = lane.y + track * scrollY / maxScroll; }
+        int ns = (int)clampd((double)(in.my - s.dragOff - lane.y) * maxScroll / track, 0, maxScroll);
+        if (ns != scrollY) { scrollY = ns; changed = true; thumbY = thumbAt(scrollY); }
     }
     if (active != id) s.drag = false;
     int tw = (h.hover || s.drag) ? lane.w - 2 : std::max(4, lane.w / 2);
@@ -502,6 +518,7 @@ void Context::Impl::moveFocus(uint64_t from, int dir) {
 Context::Impl::KeyResult Context::Impl::editKeys(std::string& s, int maxLen, bool numeric) {
     KeyResult kr;
     edit.caret = clampi(edit.caret, 0, (int)s.size());
+    if (!keysAvail()) return kr;   // an overlay above this field has the keyboard
     auto eraseAll = [&] { s.clear(); edit.caret = 0; edit.selAll = false; kr.changed = true; };
     for (SDL_Keycode k : in.keys) {
         switch (k) {
@@ -524,21 +541,23 @@ Context::Impl::KeyResult Context::Impl::editKeys(std::string& s, int maxLen, boo
             case SDLK_END: edit.caret = (int)s.size(); edit.selAll = false; break;
             case SDLK_RETURN: case SDLK_KP_ENTER: kr.enter = true; break;
             case SDLK_ESCAPE: if (!escConsumed) { kr.esc = true; escConsumed = true; } break;
-            case SDLK_TAB: kr.tab = in.shift ? -1 : 1; break;
+            case SDLK_TAB: if (!tabConsumed) { kr.tab = in.shift ? -1 : 1; tabConsumed = true; } break;   // the field Tab lands on must not Tab again
             case SDLK_a: if (in.ctrl) edit.selAll = true; break;
             default: break;
         }
     }
     if (!in.typed.empty() && !in.ctrl && !in.alt) {
-        for (size_t i = 0; i < in.typed.size(); ++i) {
+        for (size_t i = 0; i < in.typed.size();) {
             unsigned char c = (unsigned char)in.typed[i];
-            if (c < 32 || c == 127) continue;
-            if (numeric && !std::strchr("0123456789.+-*/ ", (char)c)) continue;
+            size_t n = 1;   // one UTF-8 sequence, inserted whole so the length limit never splits it
+            while (i + n < in.typed.size() && n < 4 && c >= 0xC0 && ((unsigned char)in.typed[i + n] & 0xC0) == 0x80) ++n;
+            if (c < 32 || c == 127 || (numeric && !std::strchr("0123456789.+-*/ ", (char)c))) { i += n; continue; }
             if (edit.selAll) eraseAll();
-            if ((int)s.size() >= maxLen) break;
-            s.insert((size_t)edit.caret, 1, (char)c);
-            ++edit.caret;
+            if (s.size() + n > (size_t)std::max(0, maxLen)) break;
+            s.insert((size_t)edit.caret, in.typed, i, n);
+            edit.caret += (int)n;
             kr.changed = true;
+            i += n;
         }
     }
     return kr;
@@ -613,7 +632,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
                   + (unit && *unit ? textW(unit) + th.gap : 0);
     SDL_Rect r = alloc(th.fieldH, natural, true), lab, ctl;
     splitLabel(r, label, lab, ctl);
-    registerField(wid);
+    if (enabled) registerField(wid);   // Tab skips disabled fields, and one that is disabled while focused lets go of the focus
     double before = v;
     bool changed = false;
     auto snap = [&](double x) { x = clampd(x, lo, hi); return isInt ? std::round(x) : x; };
@@ -636,7 +655,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
         const Hit& hb = side ? hp : hm;
         double dir = side ? 1 : -1;
         if (hb.pressed) { bump(dir); num.repeatAt = in.ticks + 350; }
-        else if (hb.down && !hb.released && in.ticks >= num.repeatAt) { bump(dir); num.repeatAt = in.ticks + 60; }
+        else if (hb.down && !hb.released && (int32_t)(in.ticks - num.repeatAt) >= 0) { bump(dir); num.repeatAt = in.ticks + 60; }   // wrap-safe
         if (hb.released) editedFlag = true;
     }
 
@@ -677,7 +696,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
 
     // ---- draw
     if (visible(r)) {
-        if (lab.w > 0) txt(label, lab.x, textY(lab), enabled ? th.textDim : th.textDisabled, lab.w - th.gap);
+        if (lab.w > 0) txt(label, lab.x, textY(lab), enabled ? th.textDim : th.textDisabled, std::max(0, lab.w - th.gap));
         bool scrubbing = active == wid && num.moved;
         uint32_t bg = !enabled ? th.surface : scrubbing ? th.accentDim : hv.hover || typing ? th.hover : th.surface2;
         fill(ctl, bg, 255, th.radius);
@@ -725,7 +744,7 @@ SDL_Rect Context::Impl::placePopup(uint64_t pid, SDL_Rect anchor, int w, int& ma
     SDL_Rect r{anchor.x, anchor.y + anchor.h + 2, w, h};
     int roomBelow = winH - th.gap - r.y, roomAbove = anchor.y - 2 - th.gap;
     above = h > roomBelow && roomAbove > roomBelow;
-    if (above) { maxH = roomAbove; r.h = std::min(h, maxH); r.y = anchor.y - 2 - r.h; }
+    if (above) { maxH = std::max(roomAbove, th.rowH); r.h = std::min(h, maxH); r.y = anchor.y - 2 - r.h; }
     else { maxH = std::max(roomBelow, 3 * th.rowH); r.h = std::min(h, maxH); }
     r.x = clampi(r.x, th.gap, std::max(th.gap, winW - w - th.gap));
     r.y = clampi(r.y, th.gap, std::max(th.gap, winH - r.h - th.gap));
@@ -738,12 +757,13 @@ bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool clos
     WState& s = st[pid];
     if (!open) { s.open = false; return false; }
     int idx = ovIndex(pid);
-    bool wasOpen = idx >= 0;
+    bool wasOpen = idx >= 0, underModal = false;   // a modal above this overlay takes Esc and clicks
+    for (size_t i = (size_t)std::max(idx + 1, 0); i < ovPrev.size(); ++i) underModal = underModal || ovPrev[i].modal;
     if (wasOpen && idx == (int)ovPrev.size() - 1 && !escConsumed && hasKey(in, SDLK_ESCAPE)) {   // Esc closes the topmost
         escConsumed = true; open = false; s.open = false;
         return false;
     }
-    if (wasOpen && closeOutside && (in.lPressed || in.rPressed)) {
+    if (wasOpen && closeOutside && !underModal && (in.lPressed || in.rPressed)) {
         int ownerIdx = pointerOwner == 0 || pointerOwner == kOutside ? -1 : ovIndex(pointerOwner);
         if (ownerIdx < idx) { open = false; s.open = false; return false; }
     }
@@ -753,9 +773,11 @@ bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool clos
     curLayer = layerCount;
     pushClipAbsolute({0, 0, winW, winH});
     if (modal) fill({0, 0, winW, winH}, th.overlayShade, 140);
-    OpenOverlay o{pid, modal, above, curLayer, r, maxH, (int)layers[curLayer].cmds.size(), 0, panels.size()};
+    OpenOverlay o{pid, modal, above, curLayer, r, maxH, (int)layers[curLayer].cmds.size(), 0, panels.size(), ovCur.size()};
+    ovCur.push_back({pid, r, modal});   // in opening order, which is the z-order: a popup inside a modal sits above it
     SDL_Rect frame = r;
-    if (frame.h <= 0) frame.h = 1;   // the height is fitted at endOverlay; the commands must exist to be patched
+    if (frame.w <= 0) frame.w = 1;   // the size is fitted at endOverlay; the commands must exist to be patched
+    if (frame.h <= 0) frame.h = 1;
     fill(frame, th.surface2, 255, th.radius);
     o.strokeCmd = (int)layers[curLayer].cmds.size();
     stroke(frame, th.borderLight, 255, th.radius);
@@ -782,7 +804,7 @@ void Context::Impl::endOverlay(bool fitHeight) {
         L.cmds[(size_t)o.fillCmd].r = o.r;
         L.cmds[(size_t)o.strokeCmd].r = o.r;
     }
-    ovCur.push_back({o.id, o.r, o.modal});
+    if (o.ovIdx < ovCur.size() && ovCur[o.ovIdx].id == o.id) ovCur[o.ovIdx].r = o.r;
     popClip();
     curLayer = ovStack.empty() ? 0 : ovStack.back().layer;
 }
@@ -843,21 +865,25 @@ void Context::begin(SDL_Renderer* ren, const Input& input) {
     m.in = input;
     m.winW = input.winW; m.winH = input.winH;
     if ((m.winW <= 0 || m.winH <= 0) && ren) SDL_GetRendererOutputSize(ren, &m.winW, &m.winH);
+    m.winW = std::max(0, m.winW); m.winH = std::max(0, m.winH);   // a negative clip rect would switch clipping off
     m.frameCalls = 0;
-    m.frameDone = false;
     if (ren) SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
     m.ids.clear(); m.panels.clear(); m.clips.clear(); m.ovStack.clear();
     m.layerCount = 0; m.curLayer = 0;
     if (m.layers.empty()) m.layers.emplace_back();
-    m.editedFlag = m.listActivatedFlag = m.wheelConsumed = m.escConsumed = false;
+    m.editedFlag = m.listActivatedFlag = m.wheelConsumed = m.escConsumed = m.tabConsumed = false;
     m.focusSeen = m.activeSeen = m.listFocusSeen = false;
     m.tipId = 0; m.tipText.clear(); m.tipShortcut.clear(); m.hintText.clear();
     m.lastId = 0; m.lastOver = false;
     std::swap(m.ovPrev, m.ovCur); m.ovCur.clear();
     std::swap(m.fieldsPrev, m.fieldsCur); m.fieldsCur.clear();
-    // who owns the pointer: the topmost overlay under it, nobody when overlays are open but none is under it
+    // who owns the pointer: the topmost overlay under it; nobody when overlays are open but none is under it, and
+    // nothing below a modal
     m.pointerOwner = 0;
-    for (size_t i = m.ovPrev.size(); i-- > 0;) if (contains(m.ovPrev[i].r, m.in.mx, m.in.my)) { m.pointerOwner = m.ovPrev[i].id; break; }
+    for (size_t i = m.ovPrev.size(); i-- > 0;) {
+        if (contains(m.ovPrev[i].r, m.in.mx, m.in.my)) { m.pointerOwner = m.ovPrev[i].id; break; }
+        if (m.ovPrev[i].modal) break;
+    }
     if (m.pointerOwner == 0 && !m.ovPrev.empty()) m.pointerOwner = kOutside;
     m.mouseOverUi = !m.ovPrev.empty();
     if (!m.in.lDown && !m.in.lReleased) { m.active = 0; m.num.id = 0; }   // a release we never saw
@@ -877,7 +903,6 @@ void Context::end() {
     if (m.active && !m.activeSeen) m.active = 0;
     if (m.listFocus && !m.listFocusSeen) m.listFocus = 0;
     if (m.in.lReleased) { m.active = 0; m.num.id = 0; }
-    m.frameDone = true;
     if (!m.ren) return;
     for (int i = 1; i <= m.layerCount; ++i) {   // replay the deferred layers in the order they were opened
         m.curLayer = i;
@@ -891,8 +916,9 @@ void Context::end() {
     g_lastFrameCalls = m.frameCalls;
 }
 
-// After end() these answer for the frame just drawn; during a frame they also count what was open last frame.
-bool Context::anyPopupOpen() const { const Impl& m = *impl_; return !m.ovCur.empty() || (!m.frameDone && !m.ovPrev.empty()); }
+// anyPopupOpen() counts what is open now and what was open when the frame began: the Esc or the click that closed a
+// popup belonged to the toolkit, so the viewport must not act on it too (wantsMouse() already works this way).
+bool Context::anyPopupOpen() const { const Impl& m = *impl_; return !m.ovCur.empty() || !m.ovPrev.empty(); }
 bool Context::wantsMouse() const { return impl_->mouseOverUi || anyPopupOpen() || impl_->active != 0; }
 bool Context::wantsKeyboard() const { return impl_->focus != 0; }
 const Input& Context::input() const { return impl_->in; }
@@ -907,19 +933,33 @@ void Context::popId() { if (!impl_->ids.empty()) impl_->ids.pop_back(); }
 void Context::beginPanel(const char* id, SDL_Rect r, bool scroll, bool background, int pad) {
     impl_->beginPanelImpl(impl_->id(id), r, scroll, background, pad);
 }
-void Context::endPanel() { if (impl_->panels.size() > 1) impl_->endPanelImpl(); }
+void Context::endPanel() {   // never pops the root or an overlay's own panel: a stray endPanel must not unbalance the stack
+    Impl& m = *impl_;
+    if (m.panels.size() > (m.ovStack.empty() ? 1 : m.ovStack.back().panelDepth + 1)) m.endPanelImpl();
+}
 SDL_Rect Context::panelRect() const { return impl_->panels.back().inner; }
 int Context::contentHeight() const { return impl_->contentH(); }
 
+// A row begun while the previous one still has empty columns closes that one first, so rows never overlap.
+static void startRow(Panel& p, int columns, int height, const Theme& th) {
+    if (p.rowCols > 0 && p.rowIdx > 0) p.y = p.rowY + p.rowH + th.gap;
+    p.sameLine = false;
+    p.rowCols = clampi(columns, 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? th.rowH : height;
+}
 void Context::row(int columns, int height) {
     Panel& p = impl_->cur();
-    p.rowCols = clampi(columns, 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? impl_->th.rowH : height; p.weightSum = (float)p.rowCols;
+    startRow(p, columns, height, impl_->th);
+    p.weightSum = (float)p.rowCols;
     for (int i = 0; i < 8; ++i) p.weights[i] = 1;
 }
 void Context::row(const std::vector<float>& weights, int height) {
     Panel& p = impl_->cur();
-    p.rowCols = clampi((int)weights.size(), 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? impl_->th.rowH : height; p.weightSum = 0;
-    for (int i = 0; i < p.rowCols; ++i) { p.weights[i] = std::max(0.f, weights[(size_t)i]); p.weightSum += p.weights[i]; }
+    startRow(p, (int)weights.size(), height, impl_->th);   // an empty list gives one column
+    p.weightSum = 0;
+    for (int i = 0; i < p.rowCols; ++i) {
+        p.weights[i] = i < (int)weights.size() ? std::max(0.f, weights[(size_t)i]) : 1;
+        p.weightSum += p.weights[i];
+    }
 }
 void Context::space(int px) { impl_->cur().y += px; }
 void Context::separator() {
@@ -1009,7 +1049,7 @@ bool Context::toolButton(const char* id, icons::Id icon, const std::string& labe
         int lh = font::height(m.th.face, small), top = r.y + std::max(2, (r.h - 16 - 2 - lh) / 2);
         m.ico(icon, r.x + (r.w - 16) / 2, top, c);
         int tw = m.textW(label, small);   // 1 px margins: a seven-letter label (41 px at 1x) fits the 44 px button
-        m.txt(label, r.x + std::max(1, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 2 ? r.w - 2 : -1, 255, false, small);
+        m.txt(label, r.x + std::max(1, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 2 ? std::max(0, r.w - 2) : -1, 255, false, small);
         if (shortcut && std::strlen(shortcut) <= 2) {
             int sw = font::width(shortcut, font::Face::Small, 1);
             m.txt(shortcut, r.x + r.w - sw - 3, r.y + 2, c, -1, active ? 200 : 140, false, 1, font::Face::Small);
@@ -1134,7 +1174,7 @@ bool Context::slider(const char* id, const std::string& label, float& v, float l
     v = (float)clampd(v, std::min(lo, hi), std::max(lo, hi));
     bool changed = v != before;
     if (m.visible(r)) {
-        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, lab.w - m.th.gap);
+        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, std::max(0, lab.w - m.th.gap));
         int cy = track.y + track.h / 2, th_ = 4;
         float t = hi != lo ? (v - lo) / (hi - lo) : 0;
         int kx = track.x + (int)std::lround(t * std::max(0, track.w - 1));
@@ -1173,7 +1213,7 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
     if (h.clicked) { s.open = !s.open; s.hl = current; }
     bool open = s.open && enabled;
     if (m.visible(r)) {
-        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, lab.w - m.th.gap);
+        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, std::max(0, lab.w - m.th.gap));
         m.fill(ctl, !enabled ? m.th.surface : (h.hover || open) ? m.th.hover : m.th.surface2, 255, m.th.radius);
         if (open) m.ring(ctl, m.th.focus); else m.stroke(ctl, h.hover ? m.th.borderLight : m.th.border, 255, m.th.radius);
         uint32_t c = enabled ? m.th.text : m.th.textDisabled;
@@ -1190,9 +1230,9 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
         bool above = false, keep = true;
         SDL_Rect pr = m.placePopup(pid, ctl, ctl.w, maxH, above);
         if (m.beginOverlay(pid, pr, false, true, keep, 4, true, maxH, above)) {
-            for (SDL_Keycode k : m.in.keys) {
+            if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {
                 if (k == SDLK_DOWN) s.hl = n ? (s.hl + 1) % n : -1;
-                else if (k == SDLK_UP) s.hl = n ? (s.hl - 1 + n) % n : -1;
+                else if (k == SDLK_UP) s.hl = n ? (clampi(s.hl, 0, n) - 1 + n) % n : -1;
                 else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) {
                     if (s.hl != current) { current = s.hl; changed = true; }
                     keep = false;
@@ -1261,8 +1301,9 @@ int Context::tabs(const char* id, const std::vector<std::string>& names, int cur
         if (sel) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.selection, 255, m.th.radius);
         else if (h.hover) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.hover, 255, m.th.radius);
         if (sel) m.fill({t.x + 2, t.y + t.h - 2, t.w - 4, 2}, m.th.accent);
-        int tw = std::min(m.textW(names[(size_t)i], scale), t.w - 2 * m.th.gap);
-        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, t.y + (t.h - th) / 2, sel ? m.th.text : h.hover ? m.th.text : m.th.textDim, tw, 255, false, scale);
+        int tw = std::min(m.textW(names[(size_t)i], scale), std::max(0, t.w - 2 * m.th.gap));
+        uint32_t tc = sel || h.hover ? m.th.text : m.th.textDim;
+        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, t.y + (t.h - th) / 2, tc, tw, 255, false, scale);
     }
     return result;
 }
@@ -1272,6 +1313,7 @@ int Context::swatchGrid(const char* id, const std::vector<SwatchItem>& items, in
     uint64_t wid = m.id(id);
     int n = (int)items.size();
     Panel& p = m.cur();
+    cell = std::max(1, cell);
     int availW = p.rowCols > 0 ? p.inner.w / p.rowCols : p.inner.w;
     int cols = std::max(1, (availW + m.th.gap) / (cell + m.th.gap)), rows = (n + cols - 1) / cols;
     int cellH = cell + (showNames ? m.lineH() : 0);
@@ -1313,8 +1355,8 @@ int Context::listView(const char* id, const std::vector<std::string>& items, int
     if (box.over && m.in.lPressed) { m.listFocus = wid; m.listFocusSeen = true; }
     else if (m.in.lPressed && !box.over && m.listFocus == wid && m.pointerAvail()) m.listFocus = 0;
     int result = -1;
-    if (m.listFocus == wid && n > 0) {   // keyboard: arrows move the selection, Enter activates
-        int sel = selected;
+    if (m.listFocus == wid && n > 0 && m.keysAvail()) {   // keyboard: arrows move the selection, Enter activates
+        int sel = clampi(selected, -1, n - 1);   // a stale selection from the caller must not step out of the list
         for (SDL_Keycode k : m.in.keys) {
             if (k == SDLK_DOWN) sel = std::min(n - 1, sel + 1);
             else if (k == SDLK_UP) sel = std::max(0, sel - 1);
@@ -1411,10 +1453,11 @@ int Context::contextMenu(const char* id, bool& open, int atX, int atY, const std
     int chosen = -1, n = (int)items.size();
     if (!m.beginOverlay(pid, r, false, true, open, 4, true, maxH, above)) return -1;
     bool keep = true;
-    for (SDL_Keycode k : m.in.keys) {   // arrows skip disabled items
+    if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {   // arrows skip disabled items; from no highlight they start at either end
         int dir = k == SDLK_DOWN ? 1 : k == SDLK_UP ? -1 : 0;
         if (dir) {
-            for (int t = 0, i = s.hl; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
+            int i = s.hl >= 0 && s.hl < n ? s.hl : (dir > 0 ? -1 : 0);
+            for (int t = 0; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
         } else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n && items[(size_t)s.hl].enabled) {
             chosen = s.hl; keep = false;
         }
@@ -1463,7 +1506,7 @@ bool Context::beginModal(const char* id, const std::string& title, int w, int h,
         if (ch.hover) m.fill(cb, ch.down ? m.th.accentDim : m.th.hover, 255, m.th.radius);
         m.ico(icons::Close, cb.x + 4, cb.y + 4, ch.hover ? m.th.text : m.th.textDim);
         m.tipFor(ch, pid ^ 0xC, cb, "Close", "Esc");
-        if (ch.clicked) { open = false; m.endOverlay(false); m.st[pid].open = false; return false; }
+        if (ch.clicked) { open = false; m.endOverlay(false); m.st[pid].open = false; m.dropOverlay(pid); return false; }
     }
     m.cur().y = r.y + titleH;   // the overlay panel itself only hosts the content panel
     m.beginPanelImpl(pid ^ 0xD, {r.x + 1, r.y + titleH, r.w - 2, std::max(0, r.h - titleH - 1)}, true, false, m.th.pad);
@@ -1498,7 +1541,6 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
     }
     std::sort(m.palRes.begin(), m.palRes.end());
     int n = std::min((int)m.palRes.size(), 10);
-    s.hl = clampi(s.hl, 0, std::max(0, n - 1));
     int w = std::min(560, m.winW - 2 * m.th.pad);
     int h = m.th.pad * 2 + m.th.fieldH + m.th.gap + std::max(1, n) * m.th.rowH;
     SDL_Rect r{(m.winW - w) / 2, std::min(64, std::max(0, (m.winH - h) / 3)), w, h};
@@ -1507,10 +1549,11 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
         if (!open && m.focus == fieldId) m.blur();
         return;
     }
-    for (SDL_Keycode k : m.in.keys) {
+    s.hl = clampi(s.hl, 0, std::max(0, n - 1));   // after beginOverlay, which starts a new overlay with no highlight
+    if (m.keysAvail()) for (SDL_Keycode k : m.in.keys) {
         if (k == SDLK_DOWN && n) s.hl = (s.hl + 1) % n;
         else if (k == SDLK_UP && n) s.hl = (s.hl - 1 + n) % n;
-        else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl < n) run = m.palRes[(size_t)s.hl].second;
+        else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) run = m.palRes[(size_t)s.hl].second;
     }
     SDL_Rect fr = m.alloc(m.th.fieldH);
     m.ico(icons::Search, fr.x + m.th.gap + 2, fr.y + (fr.h - 16) / 2, m.th.textDim);
@@ -1546,7 +1589,8 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
         if (!c.enabled || c.enabled()) {
             m.mruPush(c.name);
             open = false; s.open = false; m.blur(); m.dropOverlay(pid);
-            if (c.run) c.run();
+            std::function<void()> fn = c.run;   // a copy: the command may rebuild the table it lives in
+            if (fn) fn();
         }
     }
     if (!open && m.focus == fieldId) m.blur();
