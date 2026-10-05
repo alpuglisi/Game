@@ -219,7 +219,7 @@ struct Context::Impl {
 
     std::vector<std::pair<int, int>> palRes;   // (sort key, command index)
     std::vector<std::string> mru;
-    struct Toast { std::string text; uint32_t until; int ms; TextStyle style; };
+    struct Toast { std::string text; uint32_t until; TextStyle style; };
     std::vector<Toast> toasts;
 
     // ---- helpers
@@ -248,9 +248,11 @@ struct Context::Impl {
         if (curLayer) record(c); else exec(c, nullptr);
     }
     void ring(SDL_Rect r, uint32_t rgb) { stroke(r, rgb, 255, th.radius); stroke(inset(r, 1), rgb, 255, std::max(0, th.radius - 1)); }
-    void txt(const std::string& s, int x, int y, uint32_t rgb, int maxW = -1, uint8_t a = 255, bool bold = false, int scale = -1, font::Face face = font::Face::Ui) {
+    void txt(const std::string& s, int x, int y, uint32_t rgb, int maxW = -1, uint8_t a = 255, bool bold = false, int scale = -1,
+             font::Face face = font::Face::Ui) {
         if (s.empty()) return;
-        Cmd c{Op::Text}; c.r = {x, y, maxW, 0}; c.rgb = rgb; c.a = a; c.bold = bold; c.face = face; c.radius = (int16_t)(scale < 0 ? th.fontScale : scale);
+        Cmd c{Op::Text}; c.r = {x, y, maxW, 0}; c.rgb = rgb; c.a = a; c.bold = bold; c.face = face;
+        c.radius = (int16_t)(scale < 0 ? th.fontScale : scale);
         if (curLayer) { c.str = layers[curLayer].addStr(s); record(c); } else exec(c, &s);
     }
     void ico(icons::Id id, int x, int y, uint32_t rgb, uint8_t a = 255, int scale = 1) {
@@ -265,7 +267,9 @@ struct Context::Impl {
     bool visible(const SDL_Rect& r) const { SDL_Rect i = intersect(clip(), r); return i.w > 0 && i.h > 0; }
     uint32_t styleColor(TextStyle s) const;
     bool styleBold(TextStyle s) const { return s == TextStyle::Heading || s == TextStyle::Section; }
-    void styledText(const std::string& s, int x, int y, TextStyle style, int maxW = -1) { txt(s, x, y, styleColor(style), maxW, 255, styleBold(style)); }
+    void styledText(const std::string& s, int x, int y, TextStyle style, int maxW = -1) {
+        txt(s, x, y, styleColor(style), maxW, 255, styleBold(style));
+    }
     int textY(const SDL_Rect& r) const { return r.y + (r.h - fontH()) / 2; }
     uint32_t stateText(bool enabled, bool active) const { return !enabled ? th.textDisabled : active ? th.textOnAccent : th.text; }
     void buttonFrame(const SDL_Rect& r, const Hit& h, bool enabled, bool active);
@@ -284,7 +288,13 @@ struct Context::Impl {
     void registerField(uint64_t id) { fieldsCur.push_back(id); if (focus == id) focusSeen = true; }
     void moveFocus(uint64_t from, int dir);
     void blur() { focus = 0; edit.id = 0; edit.buf.clear(); edit.selAll = false; }
-    void takeFocus(uint64_t id) { focus = id; focusSeen = true; edit.id = 0; edit.buf.clear(); edit.caret = 0; edit.selAll = false; edit.scrollX = 0; }
+    void takeFocus(uint64_t id) {
+        focus = id; focusSeen = true;
+        edit.id = 0; edit.buf.clear(); edit.caret = 0; edit.selAll = false; edit.scrollX = 0;
+    }
+    void startTyping(uint64_t id, double v, int decimals) {
+        edit.id = id; edit.buf = fmtNumber(v, decimals); edit.caret = (int)edit.buf.size(); edit.selAll = true;
+    }
     struct KeyResult { bool changed = false, enter = false, esc = false; int tab = 0; };
     KeyResult editKeys(std::string& s, int maxLen, bool numeric);
     void drawEditText(const SDL_Rect& box, const std::string& s, const char* placeholder, bool focused, uint32_t color);
@@ -302,7 +312,9 @@ struct Context::Impl {
     void drawToasts();
     void mruPush(const std::string& name);
     // an overlay that closed itself this frame must not block the base layer next frame
-    void dropOverlay(uint64_t pid) { ovCur.erase(std::remove_if(ovCur.begin(), ovCur.end(), [pid](const Overlay& o) { return o.id == pid; }), ovCur.end()); }
+    void dropOverlay(uint64_t pid) {
+        ovCur.erase(std::remove_if(ovCur.begin(), ovCur.end(), [pid](const Overlay& o) { return o.id == pid; }), ovCur.end());
+    }
 };
 
 uint32_t Context::Impl::styleColor(TextStyle s) const {
@@ -365,7 +377,8 @@ SDL_Rect Context::Impl::alloc(int h, int naturalW, bool fullWidth) {
     if (p.sameLine) {
         p.sameLine = false;
         int x = p.last.x + p.last.w + th.gap, right = p.inner.x + p.inner.w;
-        r = {x, p.last.y, naturalW > 0 ? std::min(naturalW, std::max(0, right - x)) : std::max(0, right - x), p.last.h};
+        int room = std::max(0, right - x);
+        r = {x, p.last.y, naturalW > 0 ? std::min(naturalW, room) : room, p.last.h};
     } else if (p.rowCols > 0) {
         if (p.rowIdx == 0) p.rowY = p.y;
         float before = 0;
@@ -421,14 +434,17 @@ void Context::Impl::endPanelImpl() {
     if (p.scroll && ch > p.outer.h) {
         // the wheel scrolls the panel under the pointer unless a child already took it; the scrollbar sits in its lane
         bool over = contains(p.outer, in.mx, in.my) && pointerAvail() && contains(clip(), in.mx, in.my);
-        if (over && in.wheel != 0 && !wheelConsumed) { s.scrollY = clampi(s.scrollY - in.wheel * 48, 0, ch - p.outer.h); wheelConsumed = true; }
+        if (over && in.wheel != 0 && !wheelConsumed) {
+            s.scrollY = clampi(s.scrollY - in.wheel * 48, 0, ch - p.outer.h);
+            wheelConsumed = true;
+        }
         SDL_Rect lane{p.outer.x + p.outer.w - 1 - th.scrollbarW, p.outer.y + 1, th.scrollbarW, std::max(0, p.outer.h - 2)};
         scrollbar(p.id ^ 0x5, lane, p.outer.h, ch, s.scrollY);
     }
     popClip();
     panels.pop_back();
     ids.pop_back();
-    if (!panels.empty()) { Panel& parent = panels.back(); parent.maxBottom = std::max(parent.maxBottom, p.outer.y + p.outer.h); }
+    if (!panels.empty()) panels.back().maxBottom = std::max(panels.back().maxBottom, p.outer.y + p.outer.h);
 }
 
 bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int contentH, int& scrollY) {
@@ -439,7 +455,10 @@ bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int content
     Hit h = hit(id, lane, true);
     WState& s = st[id];
     bool changed = false;
-    if (h.pressed) { s.drag = true; s.dragOff = contains({lane.x, thumbY, lane.w, thumbH}, in.mx, in.my) ? in.my - thumbY : thumbH / 2; }
+    if (h.pressed) {   // on the thumb: drag it; on the track: jump there and keep dragging
+        s.drag = true;
+        s.dragOff = contains({lane.x, thumbY, lane.w, thumbH}, in.mx, in.my) ? in.my - thumbY : thumbH / 2;
+    }
     if (s.drag && active == id && in.lDown && track > 0) {
         int ns = clampi((in.my - s.dragOff - lane.y) * maxScroll / track, 0, maxScroll);
         if (ns != scrollY) { scrollY = ns; changed = true; thumbY = lane.y + track * scrollY / maxScroll; }
@@ -488,11 +507,16 @@ Context::Impl::KeyResult Context::Impl::editKeys(std::string& s, int maxLen, boo
         switch (k) {
             case SDLK_BACKSPACE:
                 if (edit.selAll) eraseAll();
-                else if (edit.caret > 0) { int p = prevChar(s, edit.caret); s.erase((size_t)p, (size_t)(edit.caret - p)); edit.caret = p; kr.changed = true; }
+                else if (edit.caret > 0) {
+                    int p = prevChar(s, edit.caret);
+                    s.erase((size_t)p, (size_t)(edit.caret - p)); edit.caret = p; kr.changed = true;
+                }
                 break;
             case SDLK_DELETE:
                 if (edit.selAll) eraseAll();
-                else if (edit.caret < (int)s.size()) { s.erase((size_t)edit.caret, (size_t)(nextChar(s, edit.caret) - edit.caret)); kr.changed = true; }
+                else if (edit.caret < (int)s.size()) {
+                    s.erase((size_t)edit.caret, (size_t)(nextChar(s, edit.caret) - edit.caret)); kr.changed = true;
+                }
                 break;
             case SDLK_LEFT: edit.caret = edit.selAll ? 0 : prevChar(s, edit.caret); edit.selAll = false; break;
             case SDLK_RIGHT: edit.caret = edit.selAll ? (int)s.size() : nextChar(s, edit.caret); edit.selAll = false; break;
@@ -556,7 +580,10 @@ bool Context::Impl::textEdit(uint64_t wid, SDL_Rect r, std::string& text, const 
         else if (h.dbl) edit.selAll = true;
         else {   // put the caret where the click landed
             int x = in.mx - (r.x + 2 + th.gap) + edit.scrollX, best = (int)text.size();
-            for (int i = 0; i <= (int)text.size(); i = nextChar(text, i)) { if (textW(text.substr(0, (size_t)i)) >= x) { best = i; break; } if (i == (int)text.size()) break; }
+            for (int i = 0; i <= (int)text.size(); i = nextChar(text, i)) {
+                if (textW(text.substr(0, (size_t)i)) >= x) { best = i; break; }
+                if (i == (int)text.size()) break;
+            }
             edit.caret = best; edit.selAll = false;
         }
     } else if (focused && in.lPressed && !h.over && pointerAvail()) {
@@ -582,7 +609,8 @@ bool Context::Impl::textEdit(uint64_t wid, SDL_Rect r, std::string& text, const 
 bool Context::Impl::valueField(const char* idStr, const std::string& label, double& v, double step, double lo, double hi, const char* unit,
                                int decimals, const char* tip, bool enabled, bool isInt) {
     uint64_t wid = id(idStr);
-    int natural = (label.empty() ? 0 : textW(label) + 2 * th.gap) + 2 * th.fieldH + textW("0000.0") + (unit && *unit ? textW(unit) + th.gap : 0) + 2 * th.gap;
+    int natural = (label.empty() ? 0 : textW(label) + 2 * th.gap) + 2 * th.fieldH + textW("0000.0") + 2 * th.gap
+                  + (unit && *unit ? textW(unit) + th.gap : 0);
     SDL_Rect r = alloc(th.fieldH, natural, true), lab, ctl;
     splitLabel(r, label, lab, ctl);
     registerField(wid);
@@ -597,7 +625,8 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
         edit.id = 0; edit.buf.clear(); typing = false; editedFlag = true;
     }
     int bw = ctl.h;
-    SDL_Rect minus{ctl.x, ctl.y, bw, ctl.h}, plus{ctl.x + ctl.w - bw, ctl.y, bw, ctl.h}, mid{ctl.x + bw, ctl.y, std::max(0, ctl.w - 2 * bw), ctl.h};
+    SDL_Rect minus{ctl.x, ctl.y, bw, ctl.h}, plus{ctl.x + ctl.w - bw, ctl.y, bw, ctl.h};
+    SDL_Rect mid{ctl.x + bw, ctl.y, std::max(0, ctl.w - 2 * bw), ctl.h};
     if (ctl.w < 3 * bw || typing) { mid = ctl; minus.w = plus.w = 0; }   // too narrow for end buttons, or the text needs the room
 
     // end buttons: once on press, then repeating while held
@@ -617,17 +646,20 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
     if (active == wid && num.id == wid && in.lDown && !typing) {
         int dx = in.mx - num.startX;
         if (std::abs(dx) >= 3) num.moved = true;
-        if (num.moved) { double nv = snap(num.startV + std::floor(dx / 4.0) * step * mod); if (nv != v) { v = nv; changed = true; } }
+        if (num.moved) {   // one step per 4 px
+            double nv = snap(num.startV + std::floor(dx / 4.0) * step * mod);
+            if (nv != v) { v = nv; changed = true; }
+        }
     }
     if (hv.released && num.id == wid) {
         if (num.moved) editedFlag = true;
-        else if (!typing) { takeFocus(wid); edit.id = wid; edit.buf = fmtNumber(v, isInt ? 0 : decimals); edit.caret = (int)edit.buf.size(); edit.selAll = true; typing = true; }
+        else if (!typing) { takeFocus(wid); startTyping(wid, v, isInt ? 0 : decimals); typing = true; }
         else if (num.dbl) edit.selAll = true;
         num.id = 0;
     }
     if (hv.hover && in.wheel != 0 && !typing) { bump(in.wheel); editedFlag = true; wheelConsumed = true; }
     if (typing && in.lPressed && !hv.over && pointerAvail()) {   // click elsewhere: commit
-        double out; if (evalExpr(edit.buf, out)) { v = snap(out); }
+        double out; if (evalExpr(edit.buf, out)) v = snap(out);
         blur(); typing = false; editedFlag = true;
     }
     if (typing) {
@@ -639,7 +671,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
             typing = false;
         } else if (kr.esc) { blur(); typing = false; }
     } else if (focus == wid && enabled) {   // focus arrived through Tab: type with the number selected
-        edit.id = wid; edit.buf = fmtNumber(v, isInt ? 0 : decimals); edit.caret = (int)edit.buf.size(); edit.selAll = true; typing = true;
+        startTyping(wid, v, isInt ? 0 : decimals); typing = true;
     }
     if (v != before) changed = true;
 
@@ -701,12 +733,16 @@ SDL_Rect Context::Impl::placePopup(uint64_t pid, SDL_Rect anchor, int w, int& ma
 }
 
 // Starts an overlay layer: handles Esc and click-outside, records the backdrop and frame, opens the content panel.
-bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool closeOutside, bool& open, int pad, bool scroll, int maxH, bool above) {
+bool Context::Impl::beginOverlay(uint64_t pid, SDL_Rect r, bool modal, bool closeOutside, bool& open, int pad, bool scroll, int maxH,
+                                 bool above) {
     WState& s = st[pid];
     if (!open) { s.open = false; return false; }
     int idx = ovIndex(pid);
     bool wasOpen = idx >= 0;
-    if (wasOpen && idx == (int)ovPrev.size() - 1 && !escConsumed && hasKey(in, SDLK_ESCAPE)) { escConsumed = true; open = false; s.open = false; return false; }
+    if (wasOpen && idx == (int)ovPrev.size() - 1 && !escConsumed && hasKey(in, SDLK_ESCAPE)) {   // Esc closes the topmost
+        escConsumed = true; open = false; s.open = false;
+        return false;
+    }
     if (wasOpen && closeOutside && (in.lPressed || in.rPressed)) {
         int ownerIdx = pointerOwner == 0 || pointerOwner == kOutside ? -1 : ovIndex(pointerOwner);
         if (ownerIdx < idx) { open = false; s.open = false; return false; }
@@ -760,8 +796,9 @@ void Context::Impl::mruPush(const std::string& name) {
 
 void Context::Impl::drawTooltip() {
     // the pointer must rest on one widget for the delay; moving restarts it, pressing hides it until the hover changes
-    if (tipId != hoverPrev) { hoverPrev = tipId; hoverSince = in.ticks; hoverX = in.mx; hoverY = in.my; tipShown = false; tipSuppressed = false; }
-    else if (!tipShown && (std::abs(in.mx - hoverX) > 2 || std::abs(in.my - hoverY) > 2)) { hoverSince = in.ticks; hoverX = in.mx; hoverY = in.my; }
+    bool moved = std::abs(in.mx - hoverX) > 2 || std::abs(in.my - hoverY) > 2;
+    if (tipId != hoverPrev) { hoverPrev = tipId; tipShown = false; tipSuppressed = false; moved = true; }
+    if (moved && !tipShown) { hoverSince = in.ticks; hoverX = in.mx; hoverY = in.my; }
     if (in.lPressed || in.rPressed || in.mPressed) { tipSuppressed = true; tipShown = false; }
     if (tipId == 0 || tipSuppressed || tipText.empty()) return;
     if (!tipShown && in.ticks - hoverSince < (uint32_t)th.tooltipDelayMs) return;
@@ -779,7 +816,8 @@ void Context::Impl::drawTooltip() {
 }
 
 void Context::Impl::drawToasts() {
-    toasts.erase(std::remove_if(toasts.begin(), toasts.end(), [&](const Toast& t) { return (int32_t)(t.until - in.ticks) <= 0; }), toasts.end());
+    auto expired = [&](const Toast& t) { return (int32_t)(t.until - in.ticks) <= 0; };
+    toasts.erase(std::remove_if(toasts.begin(), toasts.end(), expired), toasts.end());
     int y = winH - 40;
     for (auto it = toasts.rbegin(); it != toasts.rend(); ++it) {
         int left = (int32_t)(it->until - in.ticks);
@@ -789,7 +827,7 @@ void Context::Impl::drawToasts() {
         fill(r, th.tooltipBg, (uint8_t)(a * 240 / 255), th.radius);
         stroke(r, th.border, a, th.radius);
         fill({r.x + 1, r.y + 3, 3, h - 6}, it->style == TextStyle::Normal ? th.accent : styleColor(it->style), a, 1);
-        txt(it->text, r.x + th.pad + 4, textY(r), styleColor(it->style == TextStyle::Normal ? TextStyle::Normal : it->style), -1, a);
+        txt(it->text, r.x + th.pad + 4, textY(r), styleColor(it->style), -1, a);
         y -= h + th.gap;
     }
 }
@@ -839,6 +877,7 @@ void Context::end() {
     if (m.active && !m.activeSeen) m.active = 0;
     if (m.listFocus && !m.listFocusSeen) m.listFocus = 0;
     if (m.in.lReleased) { m.active = 0; m.num.id = 0; }
+    m.frameDone = true;
     if (!m.ren) return;
     for (int i = 1; i <= m.layerCount; ++i) {   // replay the deferred layers in the order they were opened
         m.curLayer = i;
@@ -850,7 +889,6 @@ void Context::end() {
     m.drawTooltip();
     m.drawToasts();
     g_lastFrameCalls = m.frameCalls;
-    m.frameDone = true;
 }
 
 // After end() these answer for the frame just drawn; during a frame they also count what was open last frame.
@@ -866,7 +904,9 @@ void Context::popId() { if (!impl_->ids.empty()) impl_->ids.pop_back(); }
 
 // ---- panels and layout
 
-void Context::beginPanel(const char* id, SDL_Rect r, bool scroll, bool background, int pad) { impl_->beginPanelImpl(impl_->id(id), r, scroll, background, pad); }
+void Context::beginPanel(const char* id, SDL_Rect r, bool scroll, bool background, int pad) {
+    impl_->beginPanelImpl(impl_->id(id), r, scroll, background, pad);
+}
 void Context::endPanel() { if (impl_->panels.size() > 1) impl_->endPanelImpl(); }
 SDL_Rect Context::panelRect() const { return impl_->panels.back().inner; }
 int Context::contentHeight() const { return impl_->contentH(); }
@@ -928,8 +968,7 @@ bool Context::button(const char* id, const std::string& label, icons::Id icon, c
     Impl& m = *impl_;
     uint64_t wid = m.id(id);
     int iconW = icon != icons::None ? 16 + (label.empty() ? 0 : m.th.gap) : 0;
-    int natural = iconW + m.textW(label) + 2 * m.th.pad;
-    SDL_Rect r = m.alloc(m.th.buttonH, natural, true);
+    SDL_Rect r = m.alloc(m.th.buttonH, iconW + m.textW(label) + 2 * m.th.pad, true);
     Hit h = m.hit(wid, r, enabled);
     if (m.visible(r)) {
         m.buttonFrame(r, h, enabled, active);
@@ -991,7 +1030,8 @@ bool Context::toggle(const char* id, const std::string& label, bool& value, cons
     if (h.clicked) { value = !value; changed = true; m.editedFlag = true; }
     if (m.visible(r)) {
         SDL_Rect sw_r{r.x + r.w - sw, r.y + (r.h - sh) / 2, sw, sh};
-        uint32_t track = !enabled ? m.th.surface2 : value ? (h.hover ? m.th.focus : m.th.accent) : (h.hover ? m.th.borderLight : m.th.border);
+        uint32_t track = !enabled ? m.th.surface2 : value ? (h.hover ? m.th.focus : m.th.accent)
+                                                           : (h.hover ? m.th.borderLight : m.th.border);
         m.fill(sw_r, track, 255, sh / 2);
         if (!enabled) m.stroke(sw_r, m.th.border, 255, sh / 2);
         int kx = value ? sw_r.x + sw - sh + 2 : sw_r.x + 2;
@@ -1046,7 +1086,8 @@ int Context::segmented(const char* id, const std::vector<std::string>& options, 
         if (i > 0 && !sel && i - 1 != current) m.fill({c.x, c.y + 6, 1, c.h - 12}, m.th.border);
         int tw = m.textW(options[(size_t)i]);   // short labels: clip rather than ellipsize
         m.pushClip(inset(c, 1));
-        m.txt(options[(size_t)i], c.x + (c.w - tw) / 2, m.textY(c), !enabled ? m.th.textDisabled : sel ? m.th.textOnAccent : h.hover ? m.th.text : m.th.textDim);
+        uint32_t tc = !enabled ? m.th.textDisabled : sel ? m.th.textOnAccent : h.hover ? m.th.text : m.th.textDim;
+        m.txt(options[(size_t)i], c.x + (c.w - tw) / 2, m.textY(c), tc);
         m.popClip();
     }
     if (m.visible(r)) m.stroke(r, m.th.border, 255, m.th.radius);
@@ -1057,7 +1098,8 @@ int Context::segmented(const char* id, const std::vector<std::string>& options, 
 
 // ---- values
 
-bool Context::dragFloat(const char* id, const std::string& label, float& v, float step, float lo, float hi, const char* unit, int decimals, const char* tip, bool enabled) {
+bool Context::dragFloat(const char* id, const std::string& label, float& v, float step, float lo, float hi, const char* unit, int decimals,
+                        const char* tip, bool enabled) {
     double d = v;
     bool changed = impl_->valueField(id, label, d, step, lo, hi, unit, decimals, tip, enabled, false);
     v = (float)d;
@@ -1088,7 +1130,7 @@ bool Context::slider(const char* id, const std::string& label, float& v, float l
         v = lo + (hi - lo) * t;
     }
     if (h.released) m.editedFlag = true;
-    if (h.hover && m.in.wheel != 0) { v = (float)clampd(v + m.in.wheel * (hi - lo) / 100, std::min(lo, hi), std::max(lo, hi)); m.editedFlag = true; m.wheelConsumed = true; }
+    if (h.hover && m.in.wheel != 0) { v += m.in.wheel * (hi - lo) / 100; m.editedFlag = true; m.wheelConsumed = true; }   // 1% per notch
     v = (float)clampd(v, std::min(lo, hi), std::max(lo, hi));
     bool changed = v != before;
     if (m.visible(r)) {
@@ -1100,7 +1142,8 @@ bool Context::slider(const char* id, const std::string& label, float& v, float l
         m.fill({track.x, cy - th_ / 2, kx - track.x, th_}, enabled ? m.th.accent : m.th.border, 255, 2);
         bool held = m.active == wid;
         int ks = held ? 16 : 14;
-        m.fill({kx - ks / 2, cy - ks / 2, ks, ks}, !enabled ? m.th.textDisabled : held ? m.th.focus : h.hover ? m.th.text : m.th.textDim, 255, ks / 2);
+        uint32_t kc = !enabled ? m.th.textDisabled : held ? m.th.focus : h.hover ? m.th.text : m.th.textDim;
+        m.fill({kx - ks / 2, cy - ks / 2, ks, ks}, kc, 255, ks / 2);
         if (fmt) {
             std::snprintf(buf, sizeof buf, fmt, (double)v);
             vs = buf;
@@ -1119,7 +1162,8 @@ bool Context::textField(const char* id, std::string& text, const char* placehold
     return m.textEdit(m.id(id), r, text, placeholder, submitted, cancelled, maxLen);
 }
 
-bool Context::dropdown(const char* id, const std::string& label, const std::vector<std::string>& options, int& current, const char* tip, bool enabled) {
+bool Context::dropdown(const char* id, const std::string& label, const std::vector<std::string>& options, int& current, const char* tip,
+                       bool enabled) {
     Impl& m = *impl_;
     uint64_t wid = m.id(id);
     SDL_Rect r = m.alloc(m.th.fieldH), lab, ctl;
@@ -1133,8 +1177,10 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
         m.fill(ctl, !enabled ? m.th.surface : (h.hover || open) ? m.th.hover : m.th.surface2, 255, m.th.radius);
         if (open) m.ring(ctl, m.th.focus); else m.stroke(ctl, h.hover ? m.th.borderLight : m.th.border, 255, m.th.radius);
         uint32_t c = enabled ? m.th.text : m.th.textDisabled;
-        if (current >= 0 && current < (int)options.size()) m.txt(options[(size_t)current], ctl.x + m.th.pad, m.textY(ctl), c, std::max(0, ctl.w - 2 * m.th.pad - 20));
-        m.ico(open ? icons::ChevronUp : icons::ChevronDown, ctl.x + ctl.w - 16 - m.th.gap, ctl.y + (ctl.h - 16) / 2, enabled ? m.th.textDim : m.th.textDisabled);
+        if (current >= 0 && current < (int)options.size())
+            m.txt(options[(size_t)current], ctl.x + m.th.pad, m.textY(ctl), c, std::max(0, ctl.w - 2 * m.th.pad - 20));
+        m.ico(open ? icons::ChevronUp : icons::ChevronDown, ctl.x + ctl.w - 16 - m.th.gap, ctl.y + (ctl.h - 16) / 2,
+              enabled ? m.th.textDim : m.th.textDisabled);
     }
     m.tipFor(h, wid, r, tip, nullptr);
     bool changed = false;
@@ -1147,7 +1193,10 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
             for (SDL_Keycode k : m.in.keys) {
                 if (k == SDLK_DOWN) s.hl = n ? (s.hl + 1) % n : -1;
                 else if (k == SDLK_UP) s.hl = n ? (s.hl - 1 + n) % n : -1;
-                else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) { if (s.hl != current) { current = s.hl; changed = true; } keep = false; }
+                else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n) {
+                    if (s.hl != current) { current = s.hl; changed = true; }
+                    keep = false;
+                }
             }
             for (int i = 0; i < n; ++i) {
                 SDL_Rect ir = m.menuRow();
@@ -1157,7 +1206,8 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
                 if (!m.visible(ir)) continue;
                 if (i == s.hl) m.fill(ir, m.th.hover, 255, m.th.radius);
                 if (i == current) m.ico(icons::Check, ir.x + 2, ir.y + (ir.h - 16) / 2, m.th.accent);
-                m.txt(options[(size_t)i], ir.x + 16 + m.th.gap * 2, m.textY(ir), i == current ? m.th.accent : m.th.text, std::max(0, ir.w - 16 - 3 * m.th.gap));
+                m.txt(options[(size_t)i], ir.x + 16 + m.th.gap * 2, m.textY(ir), i == current ? m.th.accent : m.th.text,
+                      std::max(0, ir.w - 16 - 3 * m.th.gap));
             }
             m.endOverlay(true);
         }
@@ -1228,7 +1278,10 @@ int Context::swatchGrid(const char* id, const std::vector<SwatchItem>& items, in
         SDL_Rect hitR{c.x, c.y, cell, cellH};
         Hit h = m.hit(hashInt(wid, i), hitR, true);
         if (h.clicked) clicked = i;
-        if (h.over) { any = h; m.tipFor(h, hashInt(wid, i), hitR, items[(size_t)i].tip.empty() ? items[(size_t)i].name.c_str() : items[(size_t)i].tip.c_str(), nullptr); }
+        if (h.over) {
+            const SwatchItem& it = items[(size_t)i];
+            any = h; m.tipFor(h, hashInt(wid, i), hitR, it.tip.empty() ? it.name.c_str() : it.tip.c_str(), nullptr);
+        }
         if (!m.visible(hitR)) continue;
         m.fill(c, items[(size_t)i].color, 255, m.th.radius);
         if (i == current) { m.ring(c, m.th.accent); }
@@ -1239,7 +1292,8 @@ int Context::swatchGrid(const char* id, const std::vector<SwatchItem>& items, in
     return clicked;
 }
 
-int Context::listView(const char* id, const std::vector<std::string>& items, int selected, int visibleRows, const std::vector<std::string>* details) {
+int Context::listView(const char* id, const std::vector<std::string>& items, int selected, int visibleRows,
+                      const std::vector<std::string>* details) {
     Impl& m = *impl_;
     uint64_t wid = m.id(id);
     WState& s = m.st[wid];
@@ -1263,7 +1317,10 @@ int Context::listView(const char* id, const std::vector<std::string>& items, int
             else if (k == SDLK_END) sel = n - 1;
             else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && selected >= 0) m.listActivatedFlag = true;
         }
-        if (sel != selected && sel >= 0) { result = sel; selected = sel; s.scrollY = clampi(s.scrollY, sel * rowH + rowH - inner.h, sel * rowH); }
+        if (sel != selected && sel >= 0) {   // keep the new selection in view
+            result = sel; selected = sel;
+            s.scrollY = clampi(s.scrollY, sel * rowH + rowH - inner.h, sel * rowH);
+        }
     }
     if (box.over && m.in.wheel != 0 && canScroll && !m.wheelConsumed) { s.scrollY -= m.in.wheel * rowH * 2; m.wheelConsumed = true; }
     s.scrollY = clampi(s.scrollY, 0, maxScroll);
@@ -1285,9 +1342,12 @@ int Context::listView(const char* id, const std::vector<std::string>& items, int
             dw = std::min(m.textW((*details)[(size_t)i]), ir.w * 2 / 5);
             m.txt((*details)[(size_t)i], ir.x + ir.w - dw - m.th.pad, m.textY(ir), m.th.textDim, dw);
         }
-        m.txt(items[(size_t)i], ir.x + m.th.pad, m.textY(ir), sel ? m.th.text : m.th.text, std::max(0, ir.w - 2 * m.th.pad - (dw ? dw + m.th.gap : 0)));
+        m.txt(items[(size_t)i], ir.x + m.th.pad, m.textY(ir), m.th.text, std::max(0, ir.w - 2 * m.th.pad - (dw ? dw + m.th.gap : 0)));
     }
-    if (canScroll) m.scrollbar(wid ^ 0x5, {inner.x + inner.w - m.th.scrollbarW, inner.y, m.th.scrollbarW, inner.h}, inner.h, contentH, s.scrollY);
+    if (canScroll) {
+        SDL_Rect lane{inner.x + inner.w - m.th.scrollbarW, inner.y, m.th.scrollbarW, inner.h};
+        m.scrollbar(wid ^ 0x5, lane, inner.h, contentH, s.scrollY);
+    }
     m.popClip();
     if (m.visible(r)) m.stroke(r, m.listFocus == wid ? m.th.borderLight : m.th.border, 255, m.th.radius);
     m.lastId = wid; m.lastRect = r; m.lastOver = box.over;
@@ -1307,11 +1367,14 @@ void Context::tooltip(const std::string& text) {
 void Context::toast(const std::string& text, int ms, TextStyle style) {
     Impl& m = *impl_;
     if (m.toasts.size() >= 5) m.toasts.erase(m.toasts.begin());
-    m.toasts.push_back({text, m.in.ticks + (uint32_t)std::max(1, ms), ms, style});
+    m.toasts.push_back({text, m.in.ticks + (uint32_t)std::max(1, ms), style});
 }
 
 void Context::statusHint(const std::string& text) { if (impl_->lastOver) impl_->hintText = text; }
-std::string Context::hoveredTip() const { return !impl_->hintText.empty() ? impl_->hintText : (impl_->tipId ? impl_->tipText : std::string()); }
+std::string Context::hoveredTip() const {
+    const Impl& m = *impl_;
+    return !m.hintText.empty() ? m.hintText : (m.tipId ? m.tipText : std::string());
+}
 
 bool Context::beginPopup(const char* id, SDL_Rect anchor, int w, bool& open) {
     Impl& m = *impl_;
@@ -1345,8 +1408,11 @@ int Context::contextMenu(const char* id, bool& open, int atX, int atY, const std
     bool keep = true;
     for (SDL_Keycode k : m.in.keys) {   // arrows skip disabled items
         int dir = k == SDLK_DOWN ? 1 : k == SDLK_UP ? -1 : 0;
-        if (dir) for (int t = 0, i = s.hl; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
-        else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n && items[(size_t)s.hl].enabled) { chosen = s.hl; keep = false; }
+        if (dir) {
+            for (int t = 0, i = s.hl; t < n; ++t) { i = ((i + dir) % n + n) % n; if (items[(size_t)i].enabled) { s.hl = i; break; } }
+        } else if ((k == SDLK_RETURN || k == SDLK_KP_ENTER) && s.hl >= 0 && s.hl < n && items[(size_t)s.hl].enabled) {
+            chosen = s.hl; keep = false;
+        }
     }
     for (int i = 0; i < n; ++i) {
         const MenuItem& it = items[(size_t)i];
@@ -1357,8 +1423,9 @@ int Context::contextMenu(const char* id, bool& open, int atX, int atY, const std
         if (m.visible(ir)) {
             if (i == s.hl && it.enabled) m.fill(ir, m.th.hover, 255, m.th.radius);
             uint32_t c = it.enabled ? m.th.text : m.th.textDisabled;
-            if (it.checked) m.ico(icons::Check, ir.x + m.th.gap, ir.y + (ir.h - 16) / 2, it.enabled ? m.th.accent : m.th.textDisabled);
-            else if (it.icon != icons::None) m.ico(it.icon, ir.x + m.th.gap, ir.y + (ir.h - 16) / 2, it.enabled ? m.th.textDim : m.th.textDisabled);
+            int iy = ir.y + (ir.h - 16) / 2;
+            if (it.checked) m.ico(icons::Check, ir.x + m.th.gap, iy, it.enabled ? m.th.accent : m.th.textDisabled);
+            else if (it.icon != icons::None) m.ico(it.icon, ir.x + m.th.gap, iy, it.enabled ? m.th.textDim : m.th.textDisabled);
             int sw = it.shortcut.empty() ? 0 : m.textW(it.shortcut);
             m.txt(it.label, ir.x + left - m.th.pad + m.th.gap, m.textY(ir), c, std::max(0, ir.w - left - sw - 2 * m.th.pad));
             if (sw) m.txt(it.shortcut, ir.x + ir.w - sw - m.th.pad, m.textY(ir), it.enabled ? m.th.textDim : m.th.textDisabled);
@@ -1417,7 +1484,8 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
     for (int i = 0; i < (int)commands.size(); ++i) {
         const Command& c = commands[(size_t)i];
         int sc = query.empty() ? 1 : fuzzyScore(query, c.name);
-        if (sc == 0 && query.find(' ') != std::string::npos) sc = fuzzyScore(query, c.category + " " + c.name) / 2;   // "view heat"
+        if (sc == 0 && query.find(' ') != std::string::npos)   // "view heat" may name the category
+            sc = fuzzyScore(query, c.category + " " + c.name) / 2;
         if (sc <= 0) continue;
         int rank = 0;
         for (size_t k = 0; k < m.mru.size(); ++k) if (m.mru[k] == c.name) { rank = (int)(m.mru.size() - k); break; }
@@ -1430,7 +1498,10 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
     int h = m.th.pad * 2 + m.th.fieldH + m.th.gap + std::max(1, n) * m.th.rowH;
     SDL_Rect r{(m.winW - w) / 2, std::min(64, std::max(0, (m.winH - h) / 3)), w, h};
     int run = -1;
-    if (!m.beginOverlay(pid, r, true, true, open, m.th.pad, false, std::max(h, m.winH - r.y - m.th.pad), false)) { if (!open && m.focus == fieldId) m.blur(); return; }
+    if (!m.beginOverlay(pid, r, true, true, open, m.th.pad, false, std::max(h, m.winH - r.y - m.th.pad), false)) {
+        if (!open && m.focus == fieldId) m.blur();
+        return;
+    }
     for (SDL_Keycode k : m.in.keys) {
         if (k == SDLK_DOWN && n) s.hl = (s.hl + 1) % n;
         else if (k == SDLK_UP && n) s.hl = (s.hl - 1 + n) % n;
@@ -1460,7 +1531,8 @@ void Context::palette(const char* id, bool& open, std::vector<Command>& commands
         int sw = c.shortcut.empty() ? 0 : m.textW(c.shortcut), nw = m.textW(c.name);
         int avail = ir.w - (x - ir.x) - sw - 2 * m.th.pad;
         m.txt(c.name, x, m.textY(ir), tc, std::min(nw, avail));
-        if (!c.category.empty() && nw + m.th.pad < avail) m.txt(c.category, x + nw + m.th.pad, m.textY(ir), dc, avail - nw - m.th.pad);
+        if (!c.category.empty() && nw + m.th.pad < avail)
+            m.txt(c.category, x + nw + m.th.pad, m.textY(ir), dc, avail - nw - m.th.pad);
         if (sw) m.txt(c.shortcut, ir.x + ir.w - sw - m.th.pad, m.textY(ir), dc);
     }
     m.endOverlay(true);
