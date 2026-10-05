@@ -615,7 +615,33 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     // than 60 entries) or the history branched (undo, then a new edit), undoing to that depth lands elsewhere and the check is skipped
     auto hashEntry = [](const std::vector<uint8_t>& v) { uint64_t h = 1469598103934665603ull; for (uint8_t b : v) { h ^= b; h *= 1099511628211ull; } return h ^ (v.size() * 31); };
     auto stackHashes = [&](size_t n) { std::vector<uint64_t> hs; for (size_t i = 0; i < n && i < g.undoStack.size(); ++i) hs.push_back(hashEntry(g.undoStack[i])); return hs; };
-    struct { Parts state; size_t depth = 0; std::vector<uint64_t> hashes; bool valid = false; } cp;
+    // ... and the entry just above the checkpoint must hold the checkpoint state itself: an undo and a new edit right after the
+    // checkpoint branch the history on an entry that is byte-identical to the one they replaced, which the hashes below cannot see
+    struct { Parts state; size_t depth = 0; std::vector<uint64_t> hashes; uint64_t self = 0; bool valid = false; std::vector<std::string> lines; } cp;
+    // a readable line per live body and joint, so a mismatch can say what came back that was not there, and the reverse
+    auto summary = [&] {
+        std::vector<std::string> out;
+        char b[160];
+        for (auto& bd : g.phys.bodies) {
+            if (!bd.alive) continue;
+            std::snprintf(b, sizeof b, "body %d %s %.2fx%.2f r%.2f at (%.2f, %.2f) a%.3f %s%s g%d", bd.id, bd.shape == SHAPE_BOX ? "box" : "circle", bd.half.x * 2, bd.half.y * 2,
+                          bd.radius, bd.pos.x, bd.pos.y, bd.angle, MATS[bd.mat].name, bd.isStatic ? " fixed" : "", bd.group);
+            out.push_back(b);
+        }
+        for (auto& j : g.phys.joints) {
+            if (!j.alive || j.type == J_MOUSE) continue;
+            std::snprintf(b, sizeof b, "joint %d type %d %d-%d la (%.2f, %.2f) lb (%.2f, %.2f) len %.2f g%d bond %d", j.id, (int)j.type, j.a, j.b, j.la.x, j.la.y, j.lb.x, j.lb.y, j.length, j.group, j.bondId);
+            out.push_back(b);
+        }
+        return out;
+    };
+    auto printDiff = [&](const std::vector<std::string>& was, const std::vector<std::string>& now) {
+        int shown = 0;
+        for (auto& l : now) if (std::find(was.begin(), was.end(), l) == was.end() && shown++ < 12) std::printf("    came back but was not at the checkpoint: %s\n", l.c_str());
+        for (auto& l : was) if (std::find(now.begin(), now.end(), l) == now.end() && shown++ < 24) std::printf("    was at the checkpoint but did not come back: %s\n", l.c_str());
+    };
+    struct FrameLog { int frame; size_t depth; bool playing, lmb; std::string acts; };
+    std::vector<FrameLog> flog;
     auto settle = [&] {   // release everything and stop, so the state can be compared and undone
         for (int i = 0; i < 3; ++i) if (held[i]) button(i, false);
         SDL_SetModState(KMOD_NONE);
@@ -626,12 +652,19 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         if (g.lmb) bad("a drag survived the button release");
         g.lastUndoKey.clear();   // a pause in the editing: the next nudge or scrub starts its own undo entry rather than merging across the checkpoint
     };
+    // between frames in edit mode with no button down, the drawing may only change together with the undo stack: a change with the
+    // same depth, redo depth and merge tick is an edit that nobody can undo, and the frame's actions are named
+    struct { Parts parts; size_t depth = 0, redo = 0; Uint32 tick = 0; bool valid = false; } prev;
+    std::string acts;
     g.frame();
     const Uint64 start = SDL_GetPerformanceCounter();
     for (frame = 0; frame < frames; ++frame) {
+        acts.clear();
         if (frame % 300 == 0) {
             settle();
-            if (cp.valid && g.undoStack.size() >= cp.depth && stackHashes(cp.depth) == cp.hashes) {
+            const bool anchored = cp.valid && g.undoStack.size() >= cp.depth && stackHashes(cp.depth) == cp.hashes &&
+                                  (g.undoStack.size() == cp.depth || hashEntry(g.undoStack[cp.depth]) == cp.self);
+            if (anchored) {
                 const size_t n = g.undoStack.size() - cp.depth;
                 Parts now, back, again;
                 digest(now);
@@ -644,19 +677,31 @@ int fuzz(Game& g, uint32_t seed, int frames) {
                 if (g.undoStack.size() != cp.depth) bad("undo did not step back to the checkpoint depth");
                 digest(back);
                 std::string d = differs(back, cp.state);
-                if (!d.empty()) bad("undoing " + std::to_string(n) + " steps (" + labels + ") to the checkpoint did not restore the drawing: " + d + " differ");
+                if (!d.empty()) {
+                    bad("undoing " + std::to_string(n) + " steps (" + labels + ") to the checkpoint did not restore the drawing: " + d + " differ");
+                    printDiff(cp.lines, summary());
+                    for (size_t i = 1; i < flog.size(); ++i)   // the frames since the checkpoint where the stack or the mode changed
+                        if (flog[i].depth != flog[i - 1].depth || flog[i].playing != flog[i - 1].playing)
+                            std::printf("    frame %d: depth %zu%s%s: %s\n", flog[i].frame, flog[i].depth, flog[i].playing ? " playing" : "", flog[i].lmb ? " button down" : "", flog[i].acts.c_str());
+                }
                 for (size_t i = 0; i < n; ++i) { g.redo(); if (g.note.find("failed") != std::string::npos) bad("redo reported: " + g.note); }
                 digest(again);
                 d = differs(again, now);
                 if (!d.empty()) bad("redoing " + std::to_string(n) + " steps did not restore the drawing: " + d + " differ");
             }
-            digest(cp.state); cp.depth = g.undoStack.size(); cp.hashes = stackHashes(cp.depth); cp.valid = true;
+            digest(cp.state); cp.depth = g.undoStack.size(); cp.hashes = stackHashes(cp.depth); cp.valid = true; cp.lines = summary();
+            { std::vector<uint8_t> raw; g.captureState(raw); cp.self = hashEntry(Game::packState(raw)); }
+            flog.clear(); flog.push_back({frame, cp.depth, g.playing, g.lmb, "checkpoint"});
         }
         const int mods[] = {KMOD_NONE, KMOD_NONE, KMOD_NONE, KMOD_CTRL, KMOD_SHIFT, KMOD_CTRL | KMOD_SHIFT};
         if (rng.chance(30)) SDL_SetModState((SDL_Keymod)mods[rng.below(6)]);
-        const int acts = rng.range(1, 3);
-        for (int a = 0; a < acts; ++a) {
+        const int nActs = rng.range(1, 3);
+        for (int a = 0; a < nActs; ++a) {
             int r = rng.below(1000);
+            static const char* tags[] = {"move", "button", "wheel", "key", "type", "resize", "transport", "scene", "undo storm", "mass draw", "palette", "file dialog",
+                                         "field", "select all", "select other", "move"};
+            acts += std::string(acts.empty() ? "" : ", ") + tags[r < 330 ? 0 : r < 560 ? 1 : r < 610 ? 2 : r < 780 ? 3 : r < 860 ? 4 : r < 872 ? 5 : r < 892 ? 6 : r < 897 ? 7
+                                                                 : r < 912 ? 8 : r < 916 ? 9 : r < 930 ? 10 : r < 940 ? 11 : r < 960 ? 12 : r < 975 ? 13 : r < 985 ? 14 : 15];
             if (r < 330) {   // the pointer: mostly over the canvas, sometimes every other zone, the window edge, or off the window
                 int z = rng.below(100);
                 if (z < 50) inRect(g.L.canvas);
@@ -722,6 +767,16 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         if (spaceUp >= 0 && frame >= spaceUp) { SDL_Event e{}; e.type = SDL_KEYUP; e.key.keysym.sym = SDLK_SPACE; push(e); spaceUp = -1; }
         step();
         check();
+        flog.push_back({frame, g.undoStack.size(), g.playing, g.lmb, acts});
+        if (!g.playing && !g.lmb) {
+            Parts now;
+            digest(now);
+            if (prev.valid && g.undoStack.size() == prev.depth && g.redoStack.size() == prev.redo && g.lastUndoTick == prev.tick) {
+                std::string d = differs(now, prev.parts);
+                if (!d.empty()) bad(d + " changed with no undo entry during: " + acts);
+            }
+            prev.parts = std::move(now); prev.depth = g.undoStack.size(); prev.redo = g.redoStack.size(); prev.tick = g.lastUndoTick; prev.valid = true;
+        } else prev.valid = false;
         if (frame % 2000 == 0 && frame)
             std::printf("fuzz frame %d: %d bodies, %zu undo, %d events, %d violations, %.0f s\n", frame, g.phys.bodyCount(), g.undoStack.size(), events, violations,
                         (double)(SDL_GetPerformanceCounter() - start) / (double)SDL_GetPerformanceFrequency());
