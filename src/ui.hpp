@@ -27,16 +27,17 @@ namespace ui {
 
 struct Theme {
     // colours (0xRRGGBB); alpha is applied by the widgets where needed
-    uint32_t bg = 0x15181e, surface = 0x1e222a, surface2 = 0x262b35, border = 0x343a47, borderLight = 0x465062;
-    uint32_t accent = 0x4c8dff, accentDim = 0x2b4f8f, accentText = 0xffffff, selection = 0xf2c14e;
-    uint32_t text = 0xe6eaf2, textDim = 0x9aa4b8, textDisabled = 0x5c6474, textOnAccent = 0xffffff;
-    uint32_t success = 0x4ccf6a, warning = 0xf2b84e, danger = 0xe5534b, info = 0x5bc0eb;
+    // the palette from docs/UI_DESIGN.md section 8: every text colour clears WCAG AA on the surface it sits on
+    uint32_t bg = 0x121417, surface = 0x1b1e23, surface2 = 0x252930, hover = 0x2e333b, border = 0x3a4049, borderLight = 0x4a515c;
+    uint32_t accent = 0x5aa9ff, accentDim = 0x2a3b52, focus = 0x8cc4ff, selection = 0x2a3b52, textOnAccent = 0x0e1116;
+    uint32_t text = 0xe8eaed, textDim = 0xa6adb7, textDisabled = 0x6b737e;
+    uint32_t success = 0x4cc38a, warning = 0xe6b450, danger = 0xff6b6b, info = 0x5aa9ff;
     uint32_t tooltipBg = 0x0c0e12, overlayShade = 0x000000;   // the shade behind a modal gets ~55% alpha
-    // metrics in pixels
-    int pad = 8, gap = 4, rowH = 24, buttonH = 26, iconButton = 32, fieldH = 24, sectionH = 22, scrollbarW = 6, radius = 3;
-    int tooltipDelayMs = 350;
+    // metrics in pixels, on a 4 px unit; interface text is the Ui face at 2x (a 12 x 16 cell)
+    int pad = 8, gap = 4, rowH = 28, buttonH = 28, iconButton = 28, fieldH = 28, sectionH = 24, scrollbarW = 12, radius = 3;
+    int tooltipDelayMs = 400;
     font::Face face = font::Face::Ui;
-    int fontScale = 1;
+    int fontScale = 2;
 };
 Theme& theme();   // the one theme; the application may edit it at start-up
 

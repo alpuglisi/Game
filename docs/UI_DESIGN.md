@@ -84,4 +84,186 @@ position in cells; frame rate; notifications for what just happened; a help card
   body, a joint, a fan and an emitter, the command palette, a context menu, the scene browser, the file dialog, the
   help card, a narrow window and a wide window.
 
-(Sections 5 onward, the research-driven layout, interaction model, visual language and keyboard map, follow.)
+## 5. Where things come from
+
+The design follows what the reference tools agree on, found by surveying them (sources in the research notes):
+
+- *CAD* (Fusion 360, Onshape, SolidWorks, SketchUp, FreeCAD, Blender, Shapr3D, Figma): one modal-tool contract
+  (left button or Enter commits, right button or Esc cancels, Esc with nothing active clears the selection); numbers
+  typed during the drag instead of a form; a fixed right-hand inspector whose fields scrub and accept expressions; a
+  command search; a status bar that lists the active tool's mouse and key bindings; "select other" for stacked
+  objects; snapping as a toggle plus a transient modifier, with drawn targets; canvas-first chrome in fixed islands.
+- *Physics sandboxes* (Algodoo, Incredibots, The Powder Toy, Sandboxels, Besiege, Garry's Mod, Poly Bridge 2,
+  Universe Sandbox, LittleBigPlanet, Spore): one docked palette with sections rather than a global mode switch;
+  right-click settings for the selection; slider plus number everywhere; a hover readout for whatever is under the
+  cursor; categories with search and favourites; a separate simulation bar that keeps tools live while paused and
+  dims destructive ones while running; never bind panning to the select button.
+- *Game editors and custom toolkits* (Godot, Unity, Tiled, LDtk, Aseprite, Dear ImGui, microui, Nuklear): the
+  five-zone frame (top bar, tool strip, context bar over the canvas, tabbed right dock, status bar); transport
+  controls dead centre; collapsible inspector sections with remembered fold state; drag-float fields (scrub, click
+  to type, Enter commits, Esc reverts); click-outside closes popups, Esc closes the topmost, modals dim and block;
+  tooltips after 0.4 s with the shortcut in secondary text, shown even for disabled items; monochrome 16 px icons
+  always paired with a label; UI text at an integer 2x scale.
+
+## 6. Layout: the five zones
+
+The window is resizable (minimum 1024 x 640); every rectangle below is computed from the window size each frame.
+
+```
++------------------------------------------------------------------------------------------+
+| TOP BAR 40: New Open Save | Undo Redo | [tool strip toggle]   ▶ ❚❚ ⏭ ■  1.0x  EDITING   | Heat Pressure Electric Grid | - 1x + | Focus | Scenes | Search | ? |
++-----------+------------------------------------------------------------------------------+-------------------+
+| TOOLS 96  | CONTEXT BAR 32: options of the active tool, snapping on the right              | DOCK 320          |
+|  Select   +------------------------------------------------------------------------------+ Inspector |       |
+|  Grab     |                                                                              | Materials |       |
+|  Measure  |                                                                              | Scene     |       |
+| CELLS     |                               CANVAS                                         | History   |       |
+|  Paint    |                                                                              +-----------+       |
+|  Erase    |                                                                              | collapsible       |
+| PARTS     |                                                                              | sections, fields  |
+|  Box ...  |                                                                              | that scrub        |
+| JOINTS    |                                                                              |                   |
+|  Pin ...  |                        [scroll strip / minimap]                              |                   |
+| MODIFY    |                                                                              |                   |
+|  Cut ...  |                                                                              |                   |
++-----------+------------------------------------------------------------------------------+-------------------+
+| STATUS 28: LMB paint · RMB erase · [ ] size  |  X 412 Y 180  WATER 20C  |  BOX 30x8 10deg STEEL  |  2x  60 FPS |
++------------------------------------------------------------------------------------------+
+```
+
+**Top bar.** Files and undo on the left; the transport (Play, Pause, Step, Stop, a speed field 0.1x to 2x) in the
+exact centre with a mode badge whose colour tints the canvas frame (green running, amber paused, none editing); view
+toggles, zoom, focus, scenes, search and help on the right. Destructive file buttons dim while running.
+
+**Tool strip.** One docked palette, two columns of 44 x 40 buttons (16 px icon over a one-line label), grouped under
+small headers: TOOLS (Select, Grab, Measure), CELLS (Paint, Erase), PARTS (Box, Circle, Wheel, Rocket, Pipe, Hose, Fan,
+Emitter), JOINTS (Pin, Motor, Spinner, Rod, Spring, Slider, Bond), MODIFY (Cut, Scale, Group, Ungroup, Flip H, Flip V,
+Duplicate, Delete). The active tool is filled with the accent colour. Each button's tooltip is its name, its shortcut
+and one line of what it does. The strip can be collapsed to icons only.
+
+**Context bar.** Fixed height, changes with the tool, never moves the canvas: Paint shows the material chip and name,
+brush size, and a replace-mode toggle; Erase the brush size; shape tools the material chip, FIXED toggle and the
+typed-dimension hint; Fan strength, blow/vacuum, flip; Emitter material, rate, outlet side; Spring stiffness and
+damping for new springs; Bond preset, melt temperature, rating; Cut box/circle and keep-cutter; Select the align
+buttons (left, centre, right, top, middle, bottom) and the selection filter (bodies, joints, cells); Measure nothing
+but the last reading. The right end always holds the snap controls: grid snap on/off, the step (1/2/5/10), and the
+Ctrl-inverts hint.
+
+**Dock.** Four tabs. *Inspector*: collapsible sections that remember whether they are open. For a body: Transform
+(X, Y, width, height or radius, angle), Body (material chip with a search field over the body materials, FIXED,
+density, melting point), Fan or Emitter when present, Info (mass, temperature, group). For a joint: its type, then
+Spring (stiffness, damping, rest length, set rest to now, spring/rod switch), Motor (speed, power, keyed/always),
+Bond (melts at, holds), Slider and Pin notes; Delete. For several bodies: the count and groups, material and FIXED
+applied to all, align and distribute. With nothing selected: the tool's defaults (new springs, new bonds, pipe
+diameter and wall) and the world settings (gravity, spark period, battery volts and amps, source density). Every
+numeric field scrubs, types, takes +/- and expressions, clamps on commit and pushes one undo entry per edit.
+*Materials*: the whole palette in categories with a search field and favourites, one grid for painting and one for
+body materials, each chip with its properties on hover; clicking assigns to the current tool or to the selection.
+*Scene*: a list of the world's bodies, groups and joints with kind, size and material; click selects, double-click
+zooms to it; a filter field. *History*: the undo stack with one line per step ("Paint 312 cells", "Add motor",
+"Resize box"); click to jump.
+
+**Status bar.** Left: the active tool's bindings in the form `LMB draw · Shift square · Ctrl snap · Esc cancel`,
+or the hovered widget's tip. Centre: cursor position in cells and what is under it (cell material and temperature, or
+body material, kind, size, FIXED, GROUP OF n). Right: the selection summary, zoom and frame rate. Notifications
+appear as toasts above the status bar and fade.
+
+**Canvas.** Everything else. Rulers and grid are a toggle. Middle-drag or Space+drag pans; the wheel zooms about the
+pointer (Ctrl+wheel keeps the old meaning as well); the scroll strip stays along the bottom edge. A dimension field
+appears beside the pointer while drawing or dragging a handle: digits typed go into it, Tab moves to the next value
+(width, height, angle), Enter commits at those values, Backspace returns to the mouse.
+
+## 7. Interaction model
+
+- **Tool contract.** Every tool runs begin, preview, commit or cancel. Left release or Enter commits; right click or
+  Esc cancels and leaves the world and the undo stack untouched; Esc with nothing in progress clears the selection,
+  then closes panels. Right click never erases any more (the Erase tool and Shift+paint do), so it is free for cancel
+  and the context menu.
+- **Selection.** Click selects the topmost body or joint; click again at the same spot cycles downwards; Shift adds
+  or removes; Ctrl picks one part of a group; drag on empty space box-selects (left to right: enclosed, right to
+  left: crossing); click and hold for 400 ms, or press the backtick key, opens a "select other" list of everything
+  under the pointer, front to back, with hover pre-highlighting. The selection filter in the context bar limits what
+  box-select and click pick.
+- **Direct manipulation.** The handles stay as they are (edges, corners, rotation stalk; Ctrl about the centre, Shift
+  proportions or 15 degree steps), with the dimension field for typed values and the snapping rules below.
+- **Snapping.** Grid snap is a toggle with a step; holding Ctrl inverts it for the duration of a drag. Smart snap, on
+  by default, snaps a dragged body's edges and centre to other bodies' edges and centres within 6 px and draws the
+  guide line it used; the status bar names the snap ("CENTRE OF BOX 12"). Rotation snaps to 15 degrees with Shift.
+- **Context menu.** Right click on a body or joint: Properties (focuses the inspector), Duplicate, Flip H, Flip V,
+  Group / Ungroup, Fixed, Material (submenu of recent materials), Delete. On empty canvas: Paste here, Select all,
+  Add box / circle here (opens with the shape placed at the pointer), Zoom to fit. The first item is always the one
+  most likely wanted, and the slots never move between invocations.
+- **Command palette.** Ctrl+K or Ctrl+Shift+P opens a search over every command (tools, actions, view toggles,
+  scenes, materials); results show the category and the shortcut, recently used first; Enter runs. The same command
+  table feeds the menus, the tooltips and the F1 cheat sheet, so a shortcut is never documented in two places.
+- **Simulation.** Space plays and pauses, N steps, Shift+Space stops and restores the snapshot. While running the
+  editing tools stay usable on the paused world and dim when they cannot apply; the arrow keys drive motors and
+  Up/W fires rockets; grab works live. A speed field slows the run for inspection.
+- **Precision.** All numbers are typed in cells and degrees. Fields accept `+ - * /` expressions. The dimension
+  field during a drag and the inspector afterwards edit the same values, so there is nothing that can only be done
+  one way.
+
+## 8. Visual language
+
+Palette (contrast ratios against the surface it sits on, all AA or better for text):
+
+| Role | Colour | Use |
+|---|---|---|
+| Window background | `#121417` | behind everything |
+| Surface | `#1B1E23` | panels, bars |
+| Elevated | `#252930` | fields, menus, popups, buttons at rest |
+| Hover | `#2E333B` | hovered buttons and rows |
+| Border | `#3A4049` | dividers, field outlines |
+| Selected row | `#2A3B52` | list rows, active tabs |
+| Text | `#E8EAED` / `#A6ADB7` / `#6B737E` | primary / secondary / disabled |
+| Accent | `#5AA9FF` | the active tool, links, focused field outline `#8CC4FF` |
+| Running / paused / error | `#4CC38A` / `#E6B450` / `#FF6B6B` | the mode badge and canvas frame tint, warnings, destructive actions |
+
+Type: the new mixed-case bitmap font at 2x (12 x 16 px cell) for all interface text, 1x only for rulers and dense
+read-outs; never a non-integer scale; text always on a flat fill. Icons: 16 px, one colour, filled strokes snapped to
+the pixel grid, recoloured for state, always next to a label in the strip, menus and context bar. Spacing on a 4 px
+unit: rows 28, bars 40 / 32 / 28, section headers 24, panel padding 8, gaps 4, hit targets never under 24 px.
+States: rest, hover, pressed, active (accent fill), focused (2 px ring), disabled (38 % text, never hidden).
+
+## 9. Keyboard map
+
+| Keys | Action |
+|---|---|
+| `Q` `G` `M` | Select, Grab, Measure |
+| `P` `X` | Paint, Erase |
+| `B` `C` `W` `R` | Box, Circle, Wheel, Rocket |
+| `J` `O` `L` `S` | Pin, Motor, Rod, Spring |
+| `K` | Cut |
+| `1`..`9` `0` | Select, Grab, Box, Circle, Wheel, Pin, Motor, Rod, Spring, Paint (the digits shown on the strip) |
+| `Space` / `N` / `Shift+Space` | Play or pause / step / stop and restore |
+| `Esc` / `Enter` / right click | Cancel the tool in progress, clear the selection, close panels / commit / cancel |
+| `Tab` | Next value in the dimension field or the inspector |
+| `Shift` `Ctrl` while dragging | Keep proportions or 15 degree steps / resize about the centre, invert snapping |
+| `Ctrl+Z` `Ctrl+Y` | Undo, redo |
+| `Ctrl+C` `Ctrl+V` `Ctrl+D` | Copy, paste at the pointer, duplicate |
+| `Ctrl+G` `Ctrl+U` | Group, ungroup |
+| `Ctrl+H` `Ctrl+Shift+H` | Flip left-right, top-bottom |
+| `Ctrl+A` `Del` | Select all, delete |
+| `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` | New, open, save, save as |
+| `Ctrl+K` / `Ctrl+Shift+P` | Command palette |
+| `F1` | Cheat sheet of every command and shortcut |
+| `F` / `Shift+F` | Follow the selected body / zoom to the selection |
+| `H` `V` `E` `I` | Heat view, pressure view, electric view, grid and rulers |
+| `-` `=` `Ctrl+0` wheel | Zoom out, in, reset, zoom about the pointer |
+| Middle drag, `Space`+drag, `Home` `End` `PgUp` `PgDn` | Pan |
+| `T` | Toggle FIXED on the selection |
+| Backtick | Select other (everything under the pointer) |
+| Arrows / `A` `D` / `Up` `W` while running | Drive keyed motors / fire rockets |
+| Arrows in edit mode | Nudge the selection 1 cell (Shift 10, Ctrl 0.25) |
+| `[` `]` | Brush size |
+
+Letters that drove the old single-key toggles (fan mode `M`, gravity `G`, fixed `T`, heat `H`, pressure `P`, grid
+`K`) move to the context bar, the inspector and the view toggles, except `T` and `H`, which keep their meaning.
+
+## 10. Robustness rules
+
+- Layout is a function of the window size and the dock widths; nothing is positioned from a constant. Panels scroll
+  rather than overflow; every text truncates with an ellipsis; the dock collapses to its tab row below 1200 px.
+- The command table is the single source of truth for names, shortcuts, enabled state and help text.
+- Every state the user can reach is rendered headless by the gallery flag and inspected; the event-driven editor
+  test drives the new chrome through real SDL events.
