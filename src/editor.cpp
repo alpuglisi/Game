@@ -918,17 +918,13 @@ void Game::duplicateSelection() {
 void Game::applyCutShape(Vec2 a, Vec2 b) {
     std::vector<int> targets;
     for (auto& bd : phys.bodies) if (bd.alive) targets.push_back(bd.id);
-    int cutter;
-    if (cutCircle) {
-        float r = length(b - a);
-        if (r < 1.5f) { notify("Drag to size the circle you want to cut out"); return; }
-        cutter = phys.addCircle(a, r, M_STEEL, true, false);
-    } else {
-        Vec2 half = Vec2(std::fabs(b.x - a.x), std::fabs(b.y - a.y)) * 0.5f;
-        if (half.x < 0.75f || half.y < 0.75f) { notify("Drag to size the box you want to cut out"); return; }
-        cutter = phys.addBox((a + b) * 0.5f, half, 0, M_STEEL, true);
-    }
+    const float r = length(b - a);
+    const Vec2 half = Vec2(std::fabs(b.x - a.x), std::fabs(b.y - a.y)) * 0.5f;
+    if (cutCircle && r < 1.5f) { notify("Drag to size the circle you want to cut out"); return; }
+    if (!cutCircle && (half.x < 0.75f || half.y < 0.75f)) { notify("Drag to size the box you want to cut out"); return; }
+    // the undo entry is taken before the temporary cutter body exists, or undoing the cut would bring the cutter back as a body
     pushUndo(nullptr, "Cut");
+    const int cutter = cutCircle ? phys.addCircle(a, r, M_STEEL, true, false) : phys.addBox((a + b) * 0.5f, half, 0, M_STEEL, true);
     int bodiesCut = 0, pieces = 0;
     for (int t : targets) {
         if (t == cutter) continue;

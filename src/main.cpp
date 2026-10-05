@@ -104,6 +104,7 @@ void editorTest(Game& g) {
     g.clearSelection();
     g.setTool(T_BOX);
     d.drag(200, 60, 260, 90);                         // a fresh box to cut: x 200..260, y 60..90
+    const int beforeCut = d.alive();
     g.cutCircle = true;
     g.setTool(T_CUT);
     d.drag(230, 75, 230, 67);                         // cut a radius-8 circle out of its middle
@@ -112,7 +113,9 @@ void editorTest(Game& g) {
     std::printf("cut tool: the box became %d welded pieces, the circle's centre is empty and just outside it is solid: %s\n", cutPieces,
                 yn(cutPieces > 1 && !covered(230, 75) && covered(230, 63) && covered(242, 75)));
     d.key(SDLK_z, KMOD_CTRL);
-    std::printf("ctrl+z restores the box: %s\n", yn(covered(230, 75)));
+    bool solidAgain = false;   // the body back at the centre must be the box itself, not the cutter left behind as a body
+    for (auto& b : g.phys.bodies) if (b.alive && b.contains(Vec2(230, 75)) && b.shape == SHAPE_BOX && !b.isStatic) solidAgain = true;
+    std::printf("ctrl+z restores the box and nothing else (%d bodies, as before the cut): %s\n", d.alive(), yn(solidAgain && d.alive() == beforeCut));
     d.key(SDLK_y, KMOD_CTRL);
     std::printf("ctrl+y cuts it again: %s\n", yn(!covered(230, 75)));
     // ---- subtract with two selected bodies (the circle laid on a box), cutter removed by default
