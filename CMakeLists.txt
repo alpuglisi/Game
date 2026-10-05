@@ -11,6 +11,11 @@ find_package(SDL2 REQUIRED)
 
 add_executable(sandbots
   src/main.cpp
+  src/editor.cpp
+  src/scenes.cpp
+  src/render.cpp
+  src/commands.cpp
+  src/chrome.cpp
   src/sand.cpp
   src/physics.cpp
   src/elec.cpp
