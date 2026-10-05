@@ -682,3 +682,5 @@ void Game::loadScene(int i) {
     notify(std::string("Loaded the ") + s[i].name + " scene. Press Play (Space) to run it");
 }
 
+
+Game::JetCfg& Game::jet() { static JetCfg c; return c; }
