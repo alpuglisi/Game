@@ -584,7 +584,7 @@ void Game::drawInspector() {
             std::vector<std::string> names; int cur = 0;
             for (size_t i = 0; i < EMIT_MATS.size(); ++i) { names.push_back(MATS[EMIT_MATS[i]].name); if (EMIT_MATS[i] == payload) cur = (int)i; }
             if (ui.dropdown("supplyMat", "Supply emits", names, cur, "What painted fuel supply cells produce")) payload = EMIT_MATS[cur];
-            if (ui.dragFloat("supplyAmt", "Supply amount", world.sourceAmt, 0.1f, 0.1f, 4.f, "", 1, "The gas amount a fuel supply cell emits, stamped as it is painted")) {}
+            if (ui.dragFloat("supplyAmt", "Amount/cell", world.sourceAmt, 0.1f, 0.1f, 4.f, "", 1, "The gas amount a fuel supply cell emits, stamped as it is painted")) {}
             ui.keyValue("Bodies", std::to_string(phys.bodyCount()));
         }
         return;
@@ -734,7 +734,7 @@ void Game::drawMaterials() {
     }
     if (ui.section("bodymats", "Bodies", true, MATS[bodyMat].name)) {
         grid("bodygrid", BODY_MATS, bodyMat, false);
-        ui.keyValue("For new bodies", MATS[bodyMat].name);
+        ui.keyValue("New bodies", MATS[bodyMat].name);
         if (!sel.empty()) ui.label("Clicking recolours the selection", ui::TextStyle::Dim);
     }
 }
@@ -765,15 +765,16 @@ void Game::drawSceneTab() {
         if (!rows[i].joint && rows[i].id == primary) selected = (int)i;
         if (rows[i].joint && rows[i].id == selJoint) selected = (int)i;
     }
-    ui.keyValue("Bodies, joints", std::to_string(phys.bodyCount()) + " / " + std::to_string(std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); })));
+    const int nJoints = (int)std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); });
+    ui.label(std::to_string(phys.bodyCount()) + " bodies, " + std::to_string(nJoints) + " joints", ui::TextStyle::Dim);
     int hit = ui.listView("scenelist", names, selected, std::max(6, (ui.panelRect().h - 5 * ui::theme().rowH) / ui::theme().rowH), &details);
     if (hit >= 0) {
         if (rows[hit].joint) selectJoint(rows[hit].id); else selectBody(rows[hit].id, in.shift, in.ctrl);
         if (ui.listActivated() && !rows[hit].joint) zoomToBody(rows[hit].id);
     }
     ui.row(2);
-    if (ui.button("wipecells", "Wipe cells", icons::Eraser, tipOf("edit.wipecells").c_str(), !playing)) runCommand("edit.wipecells");
-    if (ui.button("wipebodies", "Wipe bodies", icons::Delete, tipOf("edit.wipebodies").c_str(), !playing)) runCommand("edit.wipebodies");
+    if (ui.button("wipecells", "Wipe cells", icons::None, tipOf("edit.wipecells").c_str(), !playing)) runCommand("edit.wipecells");
+    if (ui.button("wipebodies", "Wipe bodies", icons::None, tipOf("edit.wipebodies").c_str(), !playing)) runCommand("edit.wipebodies");
 }
 
 // The History tab: the undo stack, one line per step, then Now, then what can be redone; click to jump.
@@ -783,7 +784,7 @@ void Game::drawHistory() {
     for (int i = (int)redoLabels.size() - 1; i >= 0; --i) rows.push_back(redoLabels[i]);
     int hit = ui.listView("history", rows, (int)undoLabels.size(), std::max(6, (ui.panelRect().h - 3 * ui::theme().rowH) / ui::theme().rowH));
     if (hit >= 0 && !playing) jumpHistory(hit);
-    ui.label(playing ? "Stop the simulation to undo" : std::to_string(undoLabels.size()) + " steps to undo, " + std::to_string(redoLabels.size()) + " to redo", ui::TextStyle::Dim);
+    ui.label(playing ? "Stop the simulation to undo" : std::to_string(undoLabels.size()) + " to undo, " + std::to_string(redoLabels.size()) + " to redo", ui::TextStyle::Dim);
 }
 
 // The status bar: the tool's bindings or the hovered tip, the cursor and what is under it, the selection, zoom and FPS.
@@ -1029,7 +1030,7 @@ std::vector<std::string> Game::cheatLines() const {
     static const char* fixedRows[] = {
         "## Mouse", "LMB|draw, select, drag", "RMB|cancel, or the menu", "Middle drag|pan", "Wheel|zoom at the pointer", "Shift+wheel|brush or pipe size",
         "Click again|cycle stacked bodies", "Hold 0.4 s|select other", "Shift+click|add to the selection", "Ctrl+click|pick a group part", "Drag empty|box select",
-        "## Keys with a fixed meaning", "Esc|cancel, deselect, close", "Enter|commit the drag", "Tab|next value", "Arrows|nudge (Shift 10, Ctrl 0.25)",
+        "## Keys with a fixed meaning", "Esc|cancel, deselect, close", "Enter|commit the drag", "Tab|next value", "Arrows|nudge (Shift 10, Ctrl 1/4)",
         "A D / Up W|motors / rockets", "Z (hold)|spark plugs", "[ ]|brush size", "Home End PgUp PgDn|pan", "Shift (drag)|proportions, 15 deg", "Ctrl (drag)|centre, invert snap",
     };
     for (const char* r : fixedRows) out.push_back(r);
@@ -1043,11 +1044,11 @@ std::vector<std::string> Game::cheatLines() const {
 }
 void Game::drawCheatSheet() {
     if (!cheatOpen) return;
-    if (!ui.beginModal("cheat", "Cheat sheet", std::min(L.winW - 60, 1180), std::min(L.winH - 60, 760), cheatOpen)) return;
+    if (!ui.beginModal("cheat", "Cheat sheet", std::min(L.winW - 60, 1280), std::min(L.winH - 60, 760), cheatOpen)) return;
     std::vector<std::string> lines = cheatLines();
-    // three columns of roughly equal length, each a scrolling panel, sections kept whole
+    // three columns of roughly equal length (two in a narrow window), each a scrolling panel, sections kept whole
     SDL_Rect area = ui.next(ui.panelRect().h - ui::theme().rowH - 2 * ui::theme().gap);
-    const int cols = 3, colW = (area.w - (cols - 1) * ui::theme().gap) / cols;
+    const int cols = area.w >= 1100 ? 3 : 2, colW = (area.w - (cols - 1) * ui::theme().gap) / cols;
     std::vector<std::vector<std::string>> colLines(cols);
     size_t per = (lines.size() + cols - 1) / cols, i = 0;
     for (int c = 0; c < cols && i < lines.size(); ++c) {
