@@ -1,7 +1,9 @@
 #pragma once
 #include <SDL.h>
+#include <algorithm>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Tiny built-in 5x7 bitmap font (upper case, digits and a little punctuation).
 namespace font {
@@ -59,6 +61,51 @@ inline void draw(SDL_Renderer* r, const std::string& s, int x, int y, int scale,
         }
         x += 6 * scale;
     }
+}
+
+// STAND-IN: replaced by the font/icons branch
+// The interface API of the full font, implemented on the 5x7 glyphs above so the toolkit can be built and tested.
+// Face::Ui reports the metrics the real face will have (a 6x8 cell at 1x, 12x16 at 2x); Face::Small is the old face.
+enum class Face { Small, Ui };
+
+inline int height(Face f, int scale = 1) { return (f == Face::Ui ? 8 : 7) * scale; }
+inline int width(const std::string& s, Face, int scale = 1) { return s.empty() ? 0 : ((int)s.size() * 6 - 1) * scale; }
+
+inline void text(SDL_Renderer* r, const std::string& s, int x, int y, Face, int scale, SDL_Color c) { draw(r, s, x, y, scale, c); }
+
+// Splits on spaces into lines no wider than maxWidth; a word wider than the line is cut.
+inline std::vector<std::string> wrap(const std::string& s, Face f, int scale, int maxWidth) {
+    std::vector<std::string> out;
+    std::string cur;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t e = s.find(' ', pos);
+        if (e == std::string::npos) e = s.size();
+        std::string wd = s.substr(pos, e - pos);
+        pos = e + 1;
+        if (wd.empty()) continue;
+        if (!cur.empty() && width(cur + " " + wd, f, scale) > maxWidth) { out.push_back(cur); cur.clear(); }
+        while (width(wd, f, scale) > maxWidth && wd.size() > 1) {   // a word that does not fit on a line of its own
+            size_t n = (size_t)std::max(1, maxWidth / (6 * scale));
+            out.push_back(wd.substr(0, n));
+            wd = wd.substr(n);
+        }
+        cur += (cur.empty() ? "" : " ") + wd;
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+// Draws s cut to maxWidth with a trailing ellipsis when it does not fit; returns the width drawn.
+inline int textFit(SDL_Renderer* r, const std::string& s, int x, int y, Face f, int scale, SDL_Color c, int maxWidth) {
+    if (width(s, f, scale) <= maxWidth) { text(r, s, x, y, f, scale, c); return width(s, f, scale); }
+    const std::string dots = "...";
+    int n = (int)s.size();
+    while (n > 0 && width(s.substr(0, (size_t)n) + dots, f, scale) > maxWidth) --n;
+    if (n <= 0) return 0;
+    std::string cut = s.substr(0, (size_t)n) + dots;
+    text(r, cut, x, y, f, scale, c);
+    return width(cut, f, scale);
 }
 
 }  // namespace font
