@@ -41,7 +41,7 @@ SDL_Rect intersect(const SDL_Rect& a, const SDL_Rect& b) {
 SDL_Rect inset(SDL_Rect r, int d) { return {r.x + d, r.y + d, std::max(0, r.w - 2 * d), std::max(0, r.h - 2 * d)}; }
 SDL_Color col(uint32_t rgb, uint8_t a = 255) { return SDL_Color{uint8_t(rgb >> 16), uint8_t(rgb >> 8), uint8_t(rgb), a}; }
 int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+double clampd(double v, double lo, double hi) { return !(v >= lo) ? lo : (v > hi ? hi : v); }   // NaN lands on lo
 
 // How far each of the top `r` rows of a rounded corner is inset: pixel-art circles for small radii, geometry above.
 void cornerInsets(int r, int* ins) {
@@ -94,7 +94,8 @@ int roundedOutline(SDL_Rect r, int radius, SDL_Rect* out) {
     return n;
 }
 
-// Left-to-right evaluation of "a op b op c" with + - * /; numbers may carry a sign and a decimal point.
+// Evaluates "a op b op c" with + - * / (* and / bind tighter); numbers may carry a sign and a decimal point.
+// False for anything else: empty input, a trailing operator, division by zero, a result that is not finite.
 bool evalExpr(const std::string& s, double& out) {
     size_t i = 0;
     auto skip = [&] { while (i < s.size() && s[i] == ' ') ++i; };
@@ -106,23 +107,32 @@ bool evalExpr(const std::string& s, double& out) {
         while (i < s.size() && std::isdigit((unsigned char)s[i])) { ++i; digits = true; }
         if (i < s.size() && s[i] == '.') { ++i; while (i < s.size() && std::isdigit((unsigned char)s[i])) { ++i; digits = true; } }
         if (!digits) return false;
-        v = std::strtod(s.c_str() + start, nullptr);
+        v = std::strtod(s.substr(start, i - start).c_str(), nullptr);   // only the scanned text: strtod must not read "1e5" as 100000
         return true;
     };
+    auto term = [&](double& acc) {   // number (* or / number)*
+        if (!number(acc)) return false;
+        for (;;) {
+            skip();
+            if (i >= s.size() || (s[i] != '*' && s[i] != '/')) return true;
+            char op = s[i++];
+            double rhs = 0;
+            if (!number(rhs)) return false;
+            if (op == '*') acc *= rhs;
+            else { if (rhs == 0) return false; acc /= rhs; }
+        }
+    };
     double acc = 0;
-    if (!number(acc)) return false;
+    if (!term(acc)) return false;
     for (;;) {
         skip();
         if (i >= s.size()) break;
         char op = s[i++];
         double rhs = 0;
-        if (!number(rhs)) return false;
-        if (op == '+') acc += rhs;
-        else if (op == '-') acc -= rhs;
-        else if (op == '*') acc *= rhs;
-        else if (op == '/') { if (rhs == 0) return false; acc /= rhs; }
-        else return false;
+        if ((op != '+' && op != '-') || !term(rhs)) return false;
+        acc += op == '+' ? rhs : -rhs;
     }
+    if (!std::isfinite(acc)) return false;
     out = acc;
     return true;
 }
@@ -201,7 +211,7 @@ struct Context::Impl {
     std::unordered_map<uint64_t, WState> st;
 
     uint64_t active = 0, focus = 0, listFocus = 0;
-    bool focusSeen = false, activeSeen = false, listFocusSeen = false;
+    bool focusSeen = false, activeSeen = false, listFocusSeen = false, tabConsumed = false;
     std::vector<uint64_t> fieldsCur, fieldsPrev;
     struct { uint64_t id = 0; int startX = 0; double startV = 0; bool moved = false, dbl = false; uint32_t repeatAt = 0; } num;
     struct { uint64_t id = 0; std::string buf; int caret = 0; bool selAll = false; int scrollX = 0; } edit;   // the focused field's typing state
@@ -527,21 +537,23 @@ Context::Impl::KeyResult Context::Impl::editKeys(std::string& s, int maxLen, boo
             case SDLK_END: edit.caret = (int)s.size(); edit.selAll = false; break;
             case SDLK_RETURN: case SDLK_KP_ENTER: kr.enter = true; break;
             case SDLK_ESCAPE: if (!escConsumed) { kr.esc = true; escConsumed = true; } break;
-            case SDLK_TAB: kr.tab = in.shift ? -1 : 1; break;
+            case SDLK_TAB: if (!tabConsumed) { kr.tab = in.shift ? -1 : 1; tabConsumed = true; } break;   // the field Tab lands on must not Tab again
             case SDLK_a: if (in.ctrl) edit.selAll = true; break;
             default: break;
         }
     }
     if (!in.typed.empty() && !in.ctrl && !in.alt) {
-        for (size_t i = 0; i < in.typed.size(); ++i) {
+        for (size_t i = 0; i < in.typed.size();) {
             unsigned char c = (unsigned char)in.typed[i];
-            if (c < 32 || c == 127) continue;
-            if (numeric && !std::strchr("0123456789.+-*/ ", (char)c)) continue;
+            size_t n = 1;   // one UTF-8 sequence, inserted whole so the length limit never splits it
+            while (i + n < in.typed.size() && n < 4 && c >= 0xC0 && ((unsigned char)in.typed[i + n] & 0xC0) == 0x80) ++n;
+            if (c < 32 || c == 127 || (numeric && !std::strchr("0123456789.+-*/ ", (char)c))) { i += n; continue; }
             if (edit.selAll) eraseAll();
-            if ((int)s.size() >= maxLen) break;
-            s.insert((size_t)edit.caret, 1, (char)c);
-            ++edit.caret;
+            if (s.size() + n > (size_t)std::max(0, maxLen)) break;
+            s.insert((size_t)edit.caret, in.typed, i, n);
+            edit.caret += (int)n;
             kr.changed = true;
+            i += n;
         }
     }
     return kr;
@@ -616,7 +628,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
                   + (unit && *unit ? textW(unit) + th.gap : 0);
     SDL_Rect r = alloc(th.fieldH, natural, true), lab, ctl;
     splitLabel(r, label, lab, ctl);
-    registerField(wid);
+    if (enabled) registerField(wid);   // Tab skips disabled fields, and one that is disabled while focused lets go of the focus
     double before = v;
     bool changed = false;
     auto snap = [&](double x) { x = clampd(x, lo, hi); return isInt ? std::round(x) : x; };
@@ -639,7 +651,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
         const Hit& hb = side ? hp : hm;
         double dir = side ? 1 : -1;
         if (hb.pressed) { bump(dir); num.repeatAt = in.ticks + 350; }
-        else if (hb.down && !hb.released && in.ticks >= num.repeatAt) { bump(dir); num.repeatAt = in.ticks + 60; }
+        else if (hb.down && !hb.released && (int32_t)(in.ticks - num.repeatAt) >= 0) { bump(dir); num.repeatAt = in.ticks + 60; }   // wrap-safe
         if (hb.released) editedFlag = true;
     }
 
@@ -855,7 +867,7 @@ void Context::begin(SDL_Renderer* ren, const Input& input) {
     m.ids.clear(); m.panels.clear(); m.clips.clear(); m.ovStack.clear();
     m.layerCount = 0; m.curLayer = 0;
     if (m.layers.empty()) m.layers.emplace_back();
-    m.editedFlag = m.listActivatedFlag = m.wheelConsumed = m.escConsumed = false;
+    m.editedFlag = m.listActivatedFlag = m.wheelConsumed = m.escConsumed = m.tabConsumed = false;
     m.focusSeen = m.activeSeen = m.listFocusSeen = false;
     m.tipId = 0; m.tipText.clear(); m.tipShortcut.clear(); m.hintText.clear();
     m.lastId = 0; m.lastOver = false;
