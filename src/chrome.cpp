@@ -1027,12 +1027,10 @@ void Game::drawFileDialog() {
 std::vector<std::string> Game::cheatLines() const {
     std::vector<std::string> out;
     static const char* fixedRows[] = {
-        "## Mouse", "LMB|draw, select, drag", "RMB|cancel the tool, or the context menu", "Middle drag|pan", "Wheel|zoom about the pointer",
-        "Shift+wheel|brush size or pipe diameter", "Click again|cycle through stacked bodies", "Hold 0.4 s|select other (list)",
-        "Shift+click|add to the selection", "Ctrl+click|pick one part of a group", "Drag empty|box select: left to right enclosed, right to left crossing",
-        "## Keys with a fixed meaning", "Esc|cancel, clear the selection, close panels", "Enter|commit the drag at the typed values", "Tab|next value in the dimension field",
-        "Arrows|nudge 1 cell (Shift 10, Ctrl 0.25); drive motors while running", "A D / Up W|drive motors / fire rockets while running", "Z (hold)|fire the spark plugs",
-        "[ ]|brush size", "Home End PgUp PgDn|pan", "Shift (drag)|keep proportions, 15 degree steps", "Ctrl (drag)|resize about the centre, invert snapping",
+        "## Mouse", "LMB|draw, select, drag", "RMB|cancel, or the menu", "Middle drag|pan", "Wheel|zoom at the pointer", "Shift+wheel|brush or pipe size",
+        "Click again|cycle stacked bodies", "Hold 0.4 s|select other", "Shift+click|add to the selection", "Ctrl+click|pick a group part", "Drag empty|box select",
+        "## Keys with a fixed meaning", "Esc|cancel, deselect, close", "Enter|commit the drag", "Tab|next value", "Arrows|nudge (Shift 10, Ctrl 0.25)",
+        "A D / Up W|motors / rockets", "Z (hold)|spark plugs", "[ ]|brush size", "Home End PgUp PgDn|pan", "Shift (drag)|proportions, 15 deg", "Ctrl (drag)|centre, invert snap",
     };
     for (const char* r : fixedRows) out.push_back(r);
     std::vector<std::string> cats;
@@ -1063,7 +1061,13 @@ void Game::drawCheatSheet() {
             if (l.rfind("## ", 0) == 0) { ui.space(ui::theme().gap); ui.label(l.substr(3), ui::TextStyle::Section); continue; }
             size_t bar = l.find('|');
             std::string key = l.substr(0, bar), what = bar == std::string::npos ? "" : l.substr(bar + 1);
-            ui.keyValue(what, key.empty() ? "-" : key);
+            if (key.empty()) key = "-";
+            SDL_Rect row = ui.next(fontH() + 4);   // the name takes what the shortcut leaves, cut with an ellipsis
+            int kw = ui.textWidth(key);
+            ui.text(key, row.x + row.w - kw, row.y + 2, ui::TextStyle::Dim);
+            int maxW = row.w - kw - 2 * ui::theme().gap;
+            if (ui.textWidth(what) > maxW) { while (!what.empty() && ui.textWidth(what + "...") > maxW) what.pop_back(); what += "..."; }
+            ui.text(what, row.x, row.y + 2, ui::TextStyle::Normal);
         }
         ui.endPanel();
         ui.popId();
