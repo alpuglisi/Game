@@ -345,6 +345,7 @@ void Context::Impl::exec(const Cmd& c, const std::string* s) {
     switch (c.op) {
         case Op::Clip: SDL_RenderSetClipRect(ren, &c.r); break;
         case Op::Fill: {
+            if (c.r.w <= 0 || c.r.h <= 0) break;   // a popup frame fitted to no content; SDL draws a pixel for a zero-size rect
             SDL_Rect rs[2 * kMaxRadius + 1];
             int n = roundedFill(c.r, c.radius, rs);
             SDL_SetRenderDrawColor(ren, uint8_t(c.rgb >> 16), uint8_t(c.rgb >> 8), uint8_t(c.rgb), c.a);
@@ -352,6 +353,7 @@ void Context::Impl::exec(const Cmd& c, const std::string* s) {
             break;
         }
         case Op::Stroke: {
+            if (c.r.w <= 0 || c.r.h <= 0) break;
             SDL_Rect rs[4 * kMaxRadius + 4];
             int n = roundedOutline(c.r, c.radius, rs);
             SDL_SetRenderDrawColor(ren, uint8_t(c.rgb >> 16), uint8_t(c.rgb >> 8), uint8_t(c.rgb), c.a);
@@ -462,8 +464,10 @@ void Context::Impl::endPanelImpl() {
 bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int contentH, int& scrollY) {
     int maxScroll = contentH - viewH;
     if (maxScroll <= 0 || lane.h <= 0 || lane.w <= 0) return false;
-    int thumbH = clampi(lane.h * viewH / contentH, std::min(24, lane.h), lane.h), track = lane.h - thumbH;
-    int thumbY = lane.y + (track > 0 ? track * scrollY / maxScroll : 0);
+    // 64-bit products: a long list times a tall lane overflows int
+    int thumbH = clampi((int)((int64_t)lane.h * viewH / contentH), std::min(24, lane.h), lane.h), track = lane.h - thumbH;
+    auto thumbAt = [&](int sy) { return lane.y + (track > 0 ? (int)((int64_t)track * sy / maxScroll) : 0); };
+    int thumbY = thumbAt(scrollY);
     Hit h = hit(id, lane, true);
     WState& s = st[id];
     bool changed = false;
@@ -472,8 +476,8 @@ bool Context::Impl::scrollbar(uint64_t id, SDL_Rect lane, int viewH, int content
         s.dragOff = contains({lane.x, thumbY, lane.w, thumbH}, in.mx, in.my) ? in.my - thumbY : thumbH / 2;
     }
     if (s.drag && active == id && in.lDown && track > 0) {
-        int ns = clampi((in.my - s.dragOff - lane.y) * maxScroll / track, 0, maxScroll);
-        if (ns != scrollY) { scrollY = ns; changed = true; thumbY = lane.y + track * scrollY / maxScroll; }
+        int ns = (int)clampd((double)(in.my - s.dragOff - lane.y) * maxScroll / track, 0, maxScroll);
+        if (ns != scrollY) { scrollY = ns; changed = true; thumbY = thumbAt(scrollY); }
     }
     if (active != id) s.drag = false;
     int tw = (h.hover || s.drag) ? lane.w - 2 : std::max(4, lane.w / 2);
@@ -692,7 +696,7 @@ bool Context::Impl::valueField(const char* idStr, const std::string& label, doub
 
     // ---- draw
     if (visible(r)) {
-        if (lab.w > 0) txt(label, lab.x, textY(lab), enabled ? th.textDim : th.textDisabled, lab.w - th.gap);
+        if (lab.w > 0) txt(label, lab.x, textY(lab), enabled ? th.textDim : th.textDisabled, std::max(0, lab.w - th.gap));
         bool scrubbing = active == wid && num.moved;
         uint32_t bg = !enabled ? th.surface : scrubbing ? th.accentDim : hv.hover || typing ? th.hover : th.surface2;
         fill(ctl, bg, 255, th.radius);
@@ -740,7 +744,7 @@ SDL_Rect Context::Impl::placePopup(uint64_t pid, SDL_Rect anchor, int w, int& ma
     SDL_Rect r{anchor.x, anchor.y + anchor.h + 2, w, h};
     int roomBelow = winH - th.gap - r.y, roomAbove = anchor.y - 2 - th.gap;
     above = h > roomBelow && roomAbove > roomBelow;
-    if (above) { maxH = roomAbove; r.h = std::min(h, maxH); r.y = anchor.y - 2 - r.h; }
+    if (above) { maxH = std::max(roomAbove, th.rowH); r.h = std::min(h, maxH); r.y = anchor.y - 2 - r.h; }
     else { maxH = std::max(roomBelow, 3 * th.rowH); r.h = std::min(h, maxH); }
     r.x = clampi(r.x, th.gap, std::max(th.gap, winW - w - th.gap));
     r.y = clampi(r.y, th.gap, std::max(th.gap, winH - r.h - th.gap));
@@ -929,19 +933,33 @@ void Context::popId() { if (!impl_->ids.empty()) impl_->ids.pop_back(); }
 void Context::beginPanel(const char* id, SDL_Rect r, bool scroll, bool background, int pad) {
     impl_->beginPanelImpl(impl_->id(id), r, scroll, background, pad);
 }
-void Context::endPanel() { if (impl_->panels.size() > 1) impl_->endPanelImpl(); }
+void Context::endPanel() {   // never pops the root or an overlay's own panel: a stray endPanel must not unbalance the stack
+    Impl& m = *impl_;
+    if (m.panels.size() > (m.ovStack.empty() ? 1 : m.ovStack.back().panelDepth + 1)) m.endPanelImpl();
+}
 SDL_Rect Context::panelRect() const { return impl_->panels.back().inner; }
 int Context::contentHeight() const { return impl_->contentH(); }
 
+// A row begun while the previous one still has empty columns closes that one first, so rows never overlap.
+static void startRow(Panel& p, int columns, int height, const Theme& th) {
+    if (p.rowCols > 0 && p.rowIdx > 0) p.y = p.rowY + p.rowH + th.gap;
+    p.sameLine = false;
+    p.rowCols = clampi(columns, 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? th.rowH : height;
+}
 void Context::row(int columns, int height) {
     Panel& p = impl_->cur();
-    p.rowCols = clampi(columns, 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? impl_->th.rowH : height; p.weightSum = (float)p.rowCols;
+    startRow(p, columns, height, impl_->th);
+    p.weightSum = (float)p.rowCols;
     for (int i = 0; i < 8; ++i) p.weights[i] = 1;
 }
 void Context::row(const std::vector<float>& weights, int height) {
     Panel& p = impl_->cur();
-    p.rowCols = clampi((int)weights.size(), 1, 8); p.rowIdx = 0; p.rowH = height < 0 ? impl_->th.rowH : height; p.weightSum = 0;
-    for (int i = 0; i < p.rowCols; ++i) { p.weights[i] = std::max(0.f, weights[(size_t)i]); p.weightSum += p.weights[i]; }
+    startRow(p, (int)weights.size(), height, impl_->th);   // an empty list gives one column
+    p.weightSum = 0;
+    for (int i = 0; i < p.rowCols; ++i) {
+        p.weights[i] = i < (int)weights.size() ? std::max(0.f, weights[(size_t)i]) : 1;
+        p.weightSum += p.weights[i];
+    }
 }
 void Context::space(int px) { impl_->cur().y += px; }
 void Context::separator() {
@@ -1031,7 +1049,7 @@ bool Context::toolButton(const char* id, icons::Id icon, const std::string& labe
         int lh = font::height(m.th.face, small), top = r.y + std::max(2, (r.h - 16 - 2 - lh) / 2);
         m.ico(icon, r.x + (r.w - 16) / 2, top, c);
         int tw = m.textW(label, small);   // 1 px margins: a seven-letter label (41 px at 1x) fits the 44 px button
-        m.txt(label, r.x + std::max(1, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 2 ? r.w - 2 : -1, 255, false, small);
+        m.txt(label, r.x + std::max(1, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 2 ? std::max(0, r.w - 2) : -1, 255, false, small);
         if (shortcut && std::strlen(shortcut) <= 2) {
             int sw = font::width(shortcut, font::Face::Small, 1);
             m.txt(shortcut, r.x + r.w - sw - 3, r.y + 2, c, -1, active ? 200 : 140, false, 1, font::Face::Small);
@@ -1156,7 +1174,7 @@ bool Context::slider(const char* id, const std::string& label, float& v, float l
     v = (float)clampd(v, std::min(lo, hi), std::max(lo, hi));
     bool changed = v != before;
     if (m.visible(r)) {
-        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, lab.w - m.th.gap);
+        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, std::max(0, lab.w - m.th.gap));
         int cy = track.y + track.h / 2, th_ = 4;
         float t = hi != lo ? (v - lo) / (hi - lo) : 0;
         int kx = track.x + (int)std::lround(t * std::max(0, track.w - 1));
@@ -1195,7 +1213,7 @@ bool Context::dropdown(const char* id, const std::string& label, const std::vect
     if (h.clicked) { s.open = !s.open; s.hl = current; }
     bool open = s.open && enabled;
     if (m.visible(r)) {
-        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, lab.w - m.th.gap);
+        if (lab.w > 0) m.txt(label, lab.x, m.textY(lab), enabled ? m.th.textDim : m.th.textDisabled, std::max(0, lab.w - m.th.gap));
         m.fill(ctl, !enabled ? m.th.surface : (h.hover || open) ? m.th.hover : m.th.surface2, 255, m.th.radius);
         if (open) m.ring(ctl, m.th.focus); else m.stroke(ctl, h.hover ? m.th.borderLight : m.th.border, 255, m.th.radius);
         uint32_t c = enabled ? m.th.text : m.th.textDisabled;
@@ -1283,8 +1301,9 @@ int Context::tabs(const char* id, const std::vector<std::string>& names, int cur
         if (sel) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.selection, 255, m.th.radius);
         else if (h.hover) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.hover, 255, m.th.radius);
         if (sel) m.fill({t.x + 2, t.y + t.h - 2, t.w - 4, 2}, m.th.accent);
-        int tw = std::min(m.textW(names[(size_t)i], scale), t.w - 2 * m.th.gap);
-        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, t.y + (t.h - th) / 2, sel ? m.th.text : h.hover ? m.th.text : m.th.textDim, tw, 255, false, scale);
+        int tw = std::min(m.textW(names[(size_t)i], scale), std::max(0, t.w - 2 * m.th.gap));
+        uint32_t tc = sel || h.hover ? m.th.text : m.th.textDim;
+        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, t.y + (t.h - th) / 2, tc, tw, 255, false, scale);
     }
     return result;
 }
@@ -1294,6 +1313,7 @@ int Context::swatchGrid(const char* id, const std::vector<SwatchItem>& items, in
     uint64_t wid = m.id(id);
     int n = (int)items.size();
     Panel& p = m.cur();
+    cell = std::max(1, cell);
     int availW = p.rowCols > 0 ? p.inner.w / p.rowCols : p.inner.w;
     int cols = std::max(1, (availW + m.th.gap) / (cell + m.th.gap)), rows = (n + cols - 1) / cols;
     int cellH = cell + (showNames ? m.lineH() : 0);
