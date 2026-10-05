@@ -402,6 +402,21 @@ void editorTest(Game& g) {
     const bool up = g.phys.gravity.y < 0 && g.undoStack.size() == undoN + 1;
     d.key(SDLK_z, KMOD_CTRL);
     std::printf("flipping gravity pushes one undo entry (%s) and ctrl+z flips it back: %s\n", yn(up), yn(up && g.phys.gravity.y > 0));
+    // ---- the drawing only changes through edits: a Step followed by Stop in one frame runs no step on it, and a paint stroke
+    //      begun while running ends when Stop restores the drawing
+    g.pickTool(T_MAT); g.mat = M_SAND; g.brush = 3;
+    d.drag(60, 100, 120, 100);                        // some sand to settle if a step ever ran
+    std::vector<uint8_t> drawn0; g.captureState(drawn0);
+    g.runCommand("sim.step"); g.runCommand("sim.stop"); d.frames(2);
+    std::vector<uint8_t> drawn1; g.captureState(drawn1);
+    const bool noStep = drawn1 == drawn0 && !g.playing;
+    g.play(); d.frames(1);
+    d.down(60, 140); d.mouseTo(90, 140); g.update();  // a stroke begun while running
+    g.runCommand("sim.stop"); d.frames(1);
+    d.mouseTo(120, 140); g.update(); d.up(120, 140);  // the pointer goes on after Stop
+    std::vector<uint8_t> drawn2; g.captureState(drawn2);
+    std::printf("step then stop in one frame leaves the drawing untouched (%s); a stroke begun while running does not paint the restored drawing (%s): %s\n",
+                yn(noStep), yn(drawn2 == drawn0), yn(noStep && drawn2 == drawn0 && !g.lmb));
     g.setTool(T_SELECT);
     d.click(body().pos.x, body().pos.y);
 }
@@ -609,6 +624,7 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         if (g.playing) { g.stopPlay(); step(); }
         if (g.playing) bad("stop did not restore the snapshot");
         if (g.lmb) bad("a drag survived the button release");
+        g.lastUndoKey.clear();   // a pause in the editing: the next nudge or scrub starts its own undo entry rather than merging across the checkpoint
     };
     g.frame();
     const Uint64 start = SDL_GetPerformanceCounter();

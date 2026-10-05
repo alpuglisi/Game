@@ -167,7 +167,12 @@ void Game::screenshot(const char* path) {
     SDL_FreeSurface(s);
 }
 void Game::notify(const std::string& s) { note = s; ui.toast(s); }
-void Game::selectMaterial(uint8_t m) { tool = T_MAT; mat = m; if (m != M_EMPTY) lastPaintMat = m; rememberMaterial(m); }
+void Game::selectMaterial(uint8_t m) {   // picking a paint material picks the Paint tool, which ends any drag in progress like a tool change
+    if (tool != T_MAT) setTool(T_MAT);
+    mat = m;
+    if (m != M_EMPTY) lastPaintMat = m;
+    rememberMaterial(m);
+}
 void Game::pickTool(Tool t) {   // a digit key or the Paint button: painting needs a material, not the eraser
     if (t == T_MAT && mat == M_EMPTY) mat = lastPaintMat == M_EMPTY ? (uint8_t)M_SAND : lastPaintMat;
     setTool(t);
@@ -335,8 +340,9 @@ void Game::clearBodies() {
 // back to the drawing, so the undo entry it pushes holds what the user drew and nothing is lost.
 void Game::leavePlay() {
     if (!playing) return;
+    if (lmb) cancelDrag();
     restoreState(snapshot);
-    playing = false; paused = false;
+    playing = false; paused = false; stepOnce = false;
 }
 void Game::resetWorld() {
     leavePlay();
@@ -537,8 +543,11 @@ bool Game::restoreState(const std::vector<uint8_t>& buf) {
     pruneSelection();
     return true;
 }
+// A change of mode ends the drag in progress: a stroke begun in one world must not carry on in the other (a paint stroke that
+// started while running and went on after Stop would paint the restored drawing with no undo entry).
 void Game::startPlay() {
     if (playing) return;
+    if (lmb) cancelDrag();
     captureState(snapshot);
     playing = true;
     paused = false;
@@ -549,9 +558,11 @@ void Game::play() {
 }
 void Game::stopPlay() {
     if (!playing) { notify("Already stopped (edit mode)"); return; }
+    if (lmb) cancelDrag();
     if (!restoreState(snapshot)) { notify("Could not restore the snapshot"); return; }
     playing = false;
     paused = false;
+    stepOnce = false;   // a Step asked for in the same frame must not run on the restored drawing
     notify("Stopped: back to the drawn state");
 }
 void Game::togglePause() {
@@ -1537,7 +1548,7 @@ void Game::update() {
             fanPhase += 1.f;
             stepAcc -= 1.f;
         }
-    } else if (stepOnce) {
+    } else if (stepOnce && playing) {   // never a step in edit mode: the drawing only changes through edits
         phys.step(1.f / 60.f);
         world.step();
         fanPhase += 1.f;

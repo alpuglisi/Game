@@ -135,7 +135,7 @@ void Game::canvasInput() {
         }
         if (dim.active && lmb) dimType(in.typed);
     }
-    if (popups) { if (lmb && !in.lDown) { lmb = false; dimEnd(); } return; }
+    if (popups) { if (lmb && !in.lDown) cancelDrag(); return; }   // a drag the popup interrupted ends as a cancel: nothing half-made, no grab joint left
     // the wheel zooms about the pointer (Ctrl+wheel too); Shift+wheel sizes the brush or the pipe
     if (overCanvas && in.wheel) {
         if (in.shift) {
