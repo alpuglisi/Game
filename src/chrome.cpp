@@ -34,7 +34,7 @@ Layout computeLayout(int winW, int winH, bool stripCollapsed) {
         L.flyout = L.dockBody;
     } else {
         L.dockTabs = L.dock;
-        L.flyout = SDL_Rect{L.dock.x - 320, L.dock.y, 320, L.dock.h};
+        L.flyout = SDL_Rect{L.dock.x - 320, L.canvas.y, 320, L.canvas.h};   // over the canvas only: the context bar stays whole
         L.dockBody = L.flyout;
     }
     return L;
@@ -72,7 +72,10 @@ void Game::pollEvents() {
             case SDL_KEYUP:
                 if (e.key.keysym.sym == SDLK_SPACE) {   // Space plays / pauses on release, unless it was held to pan; Shift+Space stops
                     spaceHeld = false;
-                    if (!spaceUsed && !ui.wantsKeyboard() && !paletteOpen && !fileOpen) runCommand((SDL_GetModState() & KMOD_SHIFT) ? "sim.stop" : "sim.play");
+                    // not while typing, not mid-drag (the drag would end in a running world) and not under a dialog or menu
+                    const bool blocked = ui.wantsKeyboard() || lmb || paletteOpen || fileOpen || scenesOpen || cheatOpen || newConfirm || ctxOpen || matMenuOpen ||
+                                         selOtherOpen || scaleOpen;
+                    if (!spaceUsed && !blocked) runCommand((SDL_GetModState() & KMOD_SHIFT) ? "sim.stop" : "sim.play");
                 }
                 break;
             case SDL_TEXTINPUT: in.typed += e.text.text; break;
@@ -92,6 +95,7 @@ void Game::frame() {
     L = computeLayout(winW, winH, stripCollapsed);
     in.winW = L.winW; in.winH = L.winH; in.ticks = SDL_GetTicks();
     fieldRects.clear();
+    dockList = SDL_Rect{};   // set again by the Scene or History tab if it is drawn this frame
     ui.begin(ren, in);
     SDL_SetRenderDrawColor(ren, (uint8_t)(ui::theme().bg >> 16), (uint8_t)(ui::theme().bg >> 8), (uint8_t)ui::theme().bg, 255);
     SDL_RenderClear(ren);
@@ -112,9 +116,14 @@ void Game::canvasInput() {
     const bool overCanvas = inCanvasPx(in.mx, in.my) && !overFlyout;
     mouse = toWorld(in.mx, in.my);
     inSim = overCanvas && !popups;
-    // keys go to the dimension field while a shape or handle is dragged, else to the keyboard map
+    // keys go to the dimension field while a shape or handle is dragged, else to the keyboard map. Under a dialog or menu only
+    // Esc and F1 reach the map (the popup owns its own keys); a focused dock list owns the arrows, Home, End and Enter.
+    if (in.lPressed) dockListFocused = dockList.w > 0 && inRect(dockList, in.mx, in.my);
+    auto listKey = [](SDL_Keycode k) { return k == SDLK_UP || k == SDLK_DOWN || k == SDLK_HOME || k == SDLK_END || k == SDLK_RETURN || k == SDLK_KP_ENTER; };
     if (!ui.wantsKeyboard()) {
         for (SDL_Keycode k : in.keys) {
+            if (popups && k != SDLK_ESCAPE && k != SDLK_F1) continue;
+            if (dockListFocused && dockList.w > 0 && listKey(k)) continue;
             if (dim.active && lmb) {
                 if (dimKey(k)) continue;
                 const bool digit = (k >= SDLK_0 && k <= SDLK_9) || (k >= SDLK_KP_1 && k <= SDLK_KP_9) || k == SDLK_KP_0 || k == SDLK_PERIOD || k == SDLK_KP_PERIOD ||
@@ -126,7 +135,7 @@ void Game::canvasInput() {
         }
         if (dim.active && lmb) dimType(in.typed);
     }
-    if (popups) { if (lmb && !in.lDown) { lmb = false; dimEnd(); } return; }
+    if (popups) { if (lmb && !in.lDown) cancelDrag(); return; }   // a drag the popup interrupted ends as a cancel: nothing half-made, no grab joint left
     // the wheel zooms about the pointer (Ctrl+wheel too); Shift+wheel sizes the brush or the pipe
     if (overCanvas && in.wheel) {
         if (in.shift) {
@@ -364,11 +373,11 @@ void Game::drawContextBar() {
     switch (tool) {
         case T_MAT:
             if (mat == M_EMPTY) {
-                s.slot(150, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
+                s.slot(180, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
             } else {
                 s.slot(24, [&] { materialChip("paintchip", mat, true, "The paint material: click for the Materials tab"); });
                 s.slot(std::max(60, ui.textWidth(MATS[mat].name) + 4), [&] { ui.label(MATS[mat].name); });
-                s.slot(150, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
+                s.slot(180, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
                 s.slot(136, [&] { ui.toggle("replace", "Replace", paintReplace, "Paint over cells that are already there"); });
                 if (mat == M_BATT_POS || mat == M_BATT_NEG)
                     s.slot(150, [&] { if (ui.button("batt", fmt(world.battV) + "V " + fmt(world.battA) + "A", icons::Electric, "The volts and amps stamped into battery cells you paint: set them in the Inspector (World)")) { dockTab = 0; clearSelection(); } });
@@ -376,22 +385,24 @@ void Game::drawContextBar() {
                     s.slot(190, [&] { if (ui.button("supply", std::string("Emits ") + MATS[payload].name, icons::Emitter, "What fuel supply cells emit, and how dense: set them in the Inspector (World)")) { dockTab = 0; clearSelection(); } });
             }
             break;
-        case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET:
+        case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: {
             chip("The material of new bodies");
             fixedToggle();
-            s.slot(360, [&] { ui.label(tool == T_CIRCLE || tool == T_WHEEL ? "Drag, or type the radius and press Enter" : tool == T_ROCKET ? "Drag to point it" : "Drag, or type W Tab H Tab angle, then Enter", ui::TextStyle::Dim); });
+            const char* hint = tool == T_CIRCLE || tool == T_WHEEL ? "Drag, or type the radius and press Enter" : tool == T_ROCKET ? "Drag to point it" : "Drag, or type W Tab H Tab angle, then Enter";
+            s.slot(ui.textWidth(hint) + 8, [&] { ui.label(hint, ui::TextStyle::Dim); });   // sized to the text: a hint that is always cut is no hint
             break;
+        }
         case T_PIPE: case T_HOSE:
             chip("The material of new pipes");
             fixedToggle();
-            s.slot(200, [&] { if (ui.dragFloat("pipeD", "Diameter", pipeD, 1.f, 3.f, 60.f, "", 1, "Outer diameter in cells (Shift+wheel too)")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
-            s.slot(130, [&] { if (ui.dragFloat("pipeWall", "Wall", pipeWall, 0.5f, 0.5f, 30.f, "", 1, "Wall thickness in cells")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
-            if (tool == T_HOSE) s.slot(170, [&] { ui.dragInt("segs", "Segments", hoseSegs, 1, 0, 60, "", "Hinged segments (0 = automatic)"); });
+            s.slot(250, [&] { if (ui.dragFloat("pipeD", "Diameter", pipeD, 1.f, 3.f, 60.f, "", 1, "Outer diameter in cells (Shift+wheel too)")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
+            s.slot(170, [&] { if (ui.dragFloat("pipeWall", "Wall", pipeWall, 0.5f, 0.5f, 30.f, "", 1, "Wall thickness in cells")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
+            if (tool == T_HOSE) s.slot(200, [&] { ui.dragInt("segs", "Segments", hoseSegs, 1, 0, 60, "", "Hinged segments (0 = automatic)"); });
             break;
         case T_FAN:
             chip("The material of new fans");
             fixedToggle();
-            s.slot(180, [&] { ui.dragFloat("fanS", "Strength", lastFan, 5.f, 5.f, 300.f, "/s", 0, "Airflow of new fans in cells per second"); });
+            s.slot(240, [&] { ui.dragFloat("fanS", "Strength", lastFan, 5.f, 5.f, 300.f, "/s", 0, "Airflow of new fans in cells per second"); });
             s.slot(150, [&] { int m = ui.segmented("fanmode", {"Blow", "Vacuum"}, fanVacuumDefault ? 1 : 0, "Blow draws ambient air in; vacuum only pulls the gas that is there"); fanVacuumDefault = m == 1; });
             break;
         case T_EMITTER: {
@@ -402,22 +413,22 @@ void Game::drawContextBar() {
                 for (size_t i = 0; i < EMIT_MATS.size(); ++i) { names.push_back(MATS[EMIT_MATS[i]].name); if (EMIT_MATS[i] == payload) cur = (int)i; }
                 if (ui.dropdown("emits", "Emits", names, cur, "What new emitters produce")) payload = EMIT_MATS[cur];
             });
-            s.slot(130, [&] { ui.dragFloat("rate", "Rate", lastRate, 5.f, 5.f, 1000.f, "/s", 0, "Cells per second"); });
+            s.slot(170, [&] { ui.dragFloat("rate", "Rate", lastRate, 5.f, 5.f, 1000.f, "/s", 0, "Cells per second"); });
             s.slot(190, [&] { emitFace = (uint8_t)ui.segmented("face", {"All", "+X", "-X", "+Y", "-Y"}, emitFace, "The outlet side, in the emitter's own frame"); });
             break;
         }
         case T_SPRING:
-            s.slot(190, [&] { ui.dragFloat("springF", "Stiffness", springFreq, 0.5f, 0.2f, 60.f, "/s", 1, "Bounces per second of new springs: higher is stiffer"); });
-            s.slot(170, [&] { ui.dragFloat("springD", "Damping", springDamp, 0.05f, 0.f, 2.f, "", 2, "0 bouncy, 1 dead"); });
+            s.slot(250, [&] { ui.dragFloat("springF", "Stiffness", springFreq, 0.5f, 0.2f, 60.f, "/s", 1, "Bounces per second of new springs: higher is stiffer"); });
+            s.slot(230, [&] { ui.dragFloat("springD", "Damping", springDamp, 0.05f, 0.f, 2.f, "", 2, "0 bouncy, 1 dead"); });
             break;
         case T_BOND:
-            s.slot(190, [&] {
+            s.slot(240, [&] {
                 std::vector<std::string> names(BOND_NAMES, BOND_NAMES + 4);
                 int bt = bondType;
                 if (ui.dropdown("bondpreset", "Preset", names, bt, "Paraffin melts at 55 C, solder 190, epoxy 260; a shear pin never melts but snaps")) { bondType = bt; bondT = BOND_TEMP[bt]; bondG = BOND_G[bt]; }
             });
-            s.slot(180, [&] { ui.dragFloat("bondT", "Melts at", bondT, 5.f, -50.f, 5000.f, "C", 0, "Temperature at which the bond gives way"); });
-            s.slot(150, [&] { ui.dragFloat("bondG", "Holds", bondG, 1.f, 1.f, 1000.f, "x", 0, "How many times the weight it carries the bond can hold"); });
+            s.slot(240, [&] { ui.dragFloat("bondT", "Melts at", bondT, 5.f, -50.f, 5000.f, "C", 0, "Temperature at which the bond gives way"); });
+            s.slot(200, [&] { ui.dragFloat("bondG", "Holds", bondG, 1.f, 1.f, 1000.f, "x", 0, "How many times the weight it carries the bond can hold"); });
             break;
         case T_CUT:
             s.slot(150, [&] { cutCircle = ui.segmented("cutshape", {"Box", "Circle"}, cutCircle ? 1 : 0, "The shape cut out of the bodies it covers") == 1; });
@@ -439,7 +450,8 @@ void Game::drawContextBar() {
         case T_MEASURE: {
             Vec2 d = measB - measA;
             float deg = length(d) > 1e-4f ? std::atan2(d.y, d.x) * 180.f / PI : 0.f;
-            s.slot(460, [&] { ui.label(measOn ? "Length " + fmt(length(d)) + "   dx " + fmt(d.x) + "   dy " + fmt(d.y) + "   angle " + fmt(deg) + " deg" : "Drag between two points to measure", measOn ? ui::TextStyle::Normal : ui::TextStyle::Dim); });
+            std::string reading = measOn ? "Length " + fmt(length(d)) + "   dx " + fmt(d.x) + "   dy " + fmt(d.y) + "   angle " + fmt(deg) + " deg" : "Drag between two points to measure";
+            s.slot(ui.textWidth(reading) + 8, [&] { ui.label(reading, measOn ? ui::TextStyle::Normal : ui::TextStyle::Dim); });
             break;
         }
         default:
@@ -578,7 +590,7 @@ void Game::drawInspector() {
             if ((grav == 0) != (phys.gravity.y > 0)) runCommand("sim.gravity");
             std::vector<std::string> sparks = {"Off", "Every 120 frames", "Every 60", "Every 40", "Every 30", "Every 20", "Every 12"};
             int si = sparkIdx;
-            if (ui.dropdown("spark", "Spark plugs", sparks, si, "How often spark plugs fire (hold Z to fire them now)")) { sparkIdx = si; world.sparkPeriod = SPARK_RATES[si]; }
+            if (ui.dropdown("spark", "Spark plugs", sparks, si, "How often spark plugs fire (hold Z to fire them now)")) { pushUndo("spark", "Spark period"); sparkIdx = si; world.sparkPeriod = SPARK_RATES[si]; }
             fieldF("battV", "Volts", world.battV, 1.f, 1.f, 70000.f, "V", 0, "Stamped into battery cells you paint next", [&](float v) { world.battV = v; }, "battV", "Battery volts");
             fieldF("battA", "Amps", world.battA, 1.f, 0.001f, 400.f, "A", 2, "The current limit stamped into battery cells you paint next", [&](float v) { world.battA = v; }, "battA", "Battery amps");
             std::vector<std::string> names; int cur = 0;
@@ -767,7 +779,10 @@ void Game::drawSceneTab() {
     }
     const int nJoints = (int)std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); });
     ui.label(std::to_string(phys.bodyCount()) + " bodies, " + std::to_string(nJoints) + " joints", ui::TextStyle::Dim);
+    fieldRectBegin("scenelist");
     int hit = ui.listView("scenelist", names, selected, std::max(6, (ui.panelRect().h - 5 * ui::theme().rowH) / ui::theme().rowH), &details);
+    fieldRectEnd("scenelist");
+    dockList = fieldRects["scenelist"];
     if (hit >= 0) {
         if (rows[hit].joint) selectJoint(rows[hit].id); else selectBody(rows[hit].id, in.shift, in.ctrl);
         if (ui.listActivated() && !rows[hit].joint) zoomToBody(rows[hit].id);
@@ -782,7 +797,10 @@ void Game::drawHistory() {
     std::vector<std::string> rows = undoLabels;
     rows.push_back("Now");
     for (int i = (int)redoLabels.size() - 1; i >= 0; --i) rows.push_back(redoLabels[i]);
+    fieldRectBegin("history");
     int hit = ui.listView("history", rows, (int)undoLabels.size(), std::max(6, (ui.panelRect().h - 3 * ui::theme().rowH) / ui::theme().rowH));
+    fieldRectEnd("history");
+    dockList = fieldRects["history"];
     if (hit >= 0 && !playing) jumpHistory(hit);
     ui.label(playing ? "Stop the simulation to undo" : std::to_string(undoLabels.size()) + " to undo, " + std::to_string(redoLabels.size()) + " to redo", ui::TextStyle::Dim);
 }
@@ -799,8 +817,8 @@ void Game::drawStatusBar() {
         return s + "...";
     };
     std::string right = selectionText();
-    if (!right.empty()) right += "  ·  ";
-    right += fmt(zoom) + "x  ·  " + std::to_string((int)std::lround(fps)) + " FPS";
+    if (!right.empty()) right += "  |  ";
+    right += fmt(zoom) + "x  |  " + std::to_string((int)std::lround(fps)) + " FPS";
     int rightW = ui.textWidth(right);
     std::string centre;
     if (inSim) {
@@ -812,14 +830,14 @@ void Game::drawStatusBar() {
     std::string left = guide.on ? "Snap: " + guide.name : ui.hoveredTip();
     if (left.empty()) left = toolBindings();
     const int pad = th.pad;
-    // the centre read-out gets its natural width (at most two fifths), the left text what is left
+    // the centre read-out (what is under the pointer) gets its natural width up to half the room, the bindings hint what is left
     const int room = r.w - rightW - 5 * pad;
-    const int centreW = std::min(ui.textWidth(centre), room * 2 / 5);
+    const int centreW = std::min(ui.textWidth(centre), room / 2);
     const int leftMax = std::max(60, room - centreW);
     int leftW = std::min(ui.textWidth(left), leftMax);
     ui.text(fit(left, leftMax), r.x + pad, ty, ui::TextStyle::Dim);
     int cx = r.x + pad + leftW + 2 * pad;
-    int centreMax = r.x + r.w - rightW - 2 * pad - cx;
+    int centreMax = r.x + r.w - rightW - 3 * pad - cx;
     if (centreMax > 40) ui.text(fit(centre, centreMax), cx, ty, ui::TextStyle::Normal);
     ui.text(right, r.x + r.w - pad - rightW, ty, ui::TextStyle::Dim);
     ui.endPanel();
@@ -907,6 +925,7 @@ void Game::openContextMenu(int px, int py) {
 // Right click on a body or joint, or on empty canvas. The slots never move between invocations; items that do not apply are dimmed.
 void Game::drawContextMenu() {
     if (!ctxOpen && !matMenuOpen) return;
+    pruneSelection();   // a key command may have deleted part of the selection since the menu opened
     if (ctxOpen) {
         std::vector<ui::MenuItem> items;
         const bool joint = jointValid(selJoint) && sel.empty();
@@ -996,12 +1015,15 @@ void Game::drawSelectOther() {
 void Game::drawScenesDialog() {
     if (!scenesOpen) return;
     const auto& scenes = sceneList();
-    if (!ui.beginModal("scenes", "Scenes", std::min(L.winW - 80, 640), std::min(L.winH - 80, 560), scenesOpen)) return;
+    // tall enough for every scene without scrolling where the window allows, and the whole tip of the highlighted one under the list
+    const int rows = std::clamp((std::min(L.winH - 80, 600) - 190) / ui::theme().rowH, 6, (int)scenes.size());
+    if (!ui.beginModal("scenes", "Scenes", std::min(L.winW - 80, 820), rows * ui::theme().rowH + 190, scenesOpen)) return;
     ui.labelWrapped("Ready-made machines and tests. Loading one replaces the drawing (Ctrl+Z brings it back).", ui::TextStyle::Dim);
     std::vector<std::string> names, tips;
     for (auto& s : scenes) { names.push_back(s.name); tips.push_back(s.tip); }
-    int hit = ui.listView("scenelist", names, sceneSel, 10, &tips);
+    int hit = ui.listView("scenelist", names, sceneSel, rows, &tips);
     if (hit >= 0) { sceneSel = hit; if (ui.listActivated()) { loadScene(hit); ui.endModal(); return; } }
+    ui.label(sceneSel >= 0 && sceneSel < (int)scenes.size() ? scenes[sceneSel].tip : "Pick a scene", ui::TextStyle::Dim);
     ui.row(2);
     if (ui.button("sceneload", "Load", icons::Open, "Load the highlighted scene", sceneSel >= 0)) { loadScene(sceneSel); ui.endModal(); return; }
     if (ui.button("scenecancel", "Cancel", icons::Close, "Keep the drawing")) scenesOpen = false;
@@ -1011,7 +1033,7 @@ void Game::drawScenesDialog() {
 // The file dialog: a name and the saved files (newest first); Enter, the button or a double click accepts.
 void Game::drawFileDialog() {
     if (!fileOpen) return;
-    if (!ui.beginModal("filedlg", fileSave ? "Save as" : "Open", std::min(L.winW - 80, 520), std::min(L.winH - 80, 480), fileOpen)) return;
+    if (!ui.beginModal("filedlg", fileSave ? "Save as" : "Open", std::min(L.winW - 80, 520), std::min(L.winH - 80, 400), fileOpen)) return;
     bool submitted = false;
     ui.textField("filename", fileName, "File name (saves/NAME.sbot)", &submitted, nullptr, 24);
     int hit = ui.listView("files", fileList, fileSel, 8);
@@ -1046,13 +1068,23 @@ void Game::drawCheatSheet() {
     if (!cheatOpen) return;
     if (!ui.beginModal("cheat", "Cheat sheet", std::min(L.winW - 60, 1280), std::min(L.winH - 60, 760), cheatOpen)) return;
     std::vector<std::string> lines = cheatLines();
-    // three columns of roughly equal length (two in a narrow window), each a scrolling panel, sections kept whole
+    // three columns (two in a narrow window), each a scrolling panel; sections stay whole and a column takes the next one
+    // only while that brings it closer to an equal share of what is left
     SDL_Rect area = ui.next(ui.panelRect().h - ui::theme().rowH - 2 * ui::theme().gap);
     const int cols = area.w >= 1100 ? 3 : 2, colW = (area.w - (cols - 1) * ui::theme().gap) / cols;
     std::vector<std::vector<std::string>> colLines(cols);
-    size_t per = (lines.size() + cols - 1) / cols, i = 0;
-    for (int c = 0; c < cols && i < lines.size(); ++c) {
-        while (i < lines.size() && (colLines[c].size() < per || c == cols - 1 || lines[i].rfind("## ", 0) != 0)) colLines[c].push_back(lines[i++]);
+    const int total = (int)lines.size();
+    int i = 0;
+    for (int c = 0; c < cols && i < total; ++c) {
+        const int per = (total - i + cols - c - 1) / (cols - c);
+        while (i < total) {
+            int j = i + 1;
+            while (j < total && lines[(size_t)j].rfind("## ", 0) != 0) ++j;   // the section that starts at i ends at j
+            const int have = (int)colLines[c].size(), len = j - i;
+            if (c < cols - 1 && have > 0 && have + len > per && (have + len - per) > (per - have)) break;
+            colLines[c].insert(colLines[c].end(), lines.begin() + i, lines.begin() + j);
+            i = j;
+        }
     }
     for (int c = 0; c < cols; ++c) {
         SDL_Rect r{area.x + c * (colW + ui::theme().gap), area.y, colW, area.h};

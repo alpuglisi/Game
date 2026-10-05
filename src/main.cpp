@@ -104,6 +104,7 @@ void editorTest(Game& g) {
     g.clearSelection();
     g.setTool(T_BOX);
     d.drag(200, 60, 260, 90);                         // a fresh box to cut: x 200..260, y 60..90
+    const int beforeCut = d.alive();
     g.cutCircle = true;
     g.setTool(T_CUT);
     d.drag(230, 75, 230, 67);                         // cut a radius-8 circle out of its middle
@@ -112,7 +113,9 @@ void editorTest(Game& g) {
     std::printf("cut tool: the box became %d welded pieces, the circle's centre is empty and just outside it is solid: %s\n", cutPieces,
                 yn(cutPieces > 1 && !covered(230, 75) && covered(230, 63) && covered(242, 75)));
     d.key(SDLK_z, KMOD_CTRL);
-    std::printf("ctrl+z restores the box: %s\n", yn(covered(230, 75)));
+    bool solidAgain = false;   // the body back at the centre must be the box itself, not the cutter left behind as a body
+    for (auto& b : g.phys.bodies) if (b.alive && b.contains(Vec2(230, 75)) && b.shape == SHAPE_BOX && !b.isStatic) solidAgain = true;
+    std::printf("ctrl+z restores the box and nothing else (%d bodies, as before the cut): %s\n", d.alive(), yn(solidAgain && d.alive() == beforeCut));
     d.key(SDLK_y, KMOD_CTRL);
     std::printf("ctrl+y cuts it again: %s\n", yn(!covered(230, 75)));
     // ---- subtract with two selected bodies (the circle laid on a box), cutter removed by default
@@ -352,6 +355,69 @@ void editorTest(Game& g) {
     d.key(SDLK_SPACE, KMOD_SHIFT);
     std::printf("transport keys: Space plays (%s), Space pauses (%s), Shift+Space stops (%s): %s\n", yn(running), yn(pausedNow), yn(!g.playing), yn(running && pausedNow && !g.playing));
     g.setCam(0, 0);
+    // ---- cancelling a second paint stroke (merged into the first stroke's undo entry) keeps the first stroke
+    g.pickTool(T_MAT); g.mat = M_SAND; g.brush = 2;
+    auto cellsOf = [&](uint8_t m) { int n = 0; for (auto& c : g.world.cells) n += c.t == m; return n; };
+    undoN = g.undoStack.size();
+    d.drag(20, 20, 60, 20);
+    const int sand1 = cellsOf(M_SAND);
+    d.down(20, 60); d.mouseTo(60, 60); g.update();
+    const bool painting2 = cellsOf(M_SAND) > sand1 && g.undoStack.size() == undoN + 1;
+    d.key(SDLK_ESCAPE); d.up(60, 60);
+    std::printf("esc on a second paint stroke within the merge window (%s) keeps the first stroke's %d cells (%d now) and its undo entry (%zu): %s\n", yn(painting2), sand1, cellsOf(M_SAND),
+                g.undoStack.size(), yn(painting2 && cellsOf(M_SAND) == sand1 && g.undoStack.size() == undoN + 1));
+    // ---- ctrl+z mid-drag cancels the drag instead of changing the world under it
+    g.setTool(T_SELECT); g.snapOn = false; g.smartSnap = false;
+    g.selectBody(hb, false, false);
+    Vec2 m0 = body().pos; undoN = g.undoStack.size();
+    d.down(m0.x, m0.y); d.mouseTo(m0.x + 20, m0.y); g.update();
+    const bool midMove = near(body().pos.x, m0.x + 20);
+    d.key(SDLK_z, KMOD_CTRL);
+    d.up(m0.x + 20, m0.y);
+    std::printf("ctrl+z during a move drag (%s mid-way) puts the body back at x=%.0f and leaves the undo stack at %zu: %s\n", midMove ? "was" : "was NOT", body().pos.x, g.undoStack.size(),
+                yn(midMove && nearV(body().pos, m0) && g.undoStack.size() == undoN));
+    // ---- loading a scene while paused keeps the drawing: one undo brings it back
+    const int drawn = d.alive();
+    g.play(); g.togglePause();
+    g.runCommand("scene.0");
+    const bool replaced = !g.playing && d.alive() != drawn;
+    d.key(SDLK_z, KMOD_CTRL);
+    std::printf("a scene loaded while paused replaces the drawing (%s) and ctrl+z brings the %d bodies back (%d): %s\n", yn(replaced), drawn, d.alive(), yn(replaced && d.alive() == drawn));
+    // ---- a typed width is clamped to what the inspector accepts
+    g.setTool(T_BOX); g.clearSelection();
+    d.down(100, 40); d.mouseTo(130, 60); g.update();
+    d.type("99999"); d.key(SDLK_TAB); d.type("30"); d.key(SDLK_RETURN); d.up(130, 60);
+    float wTyped = g.primary >= 0 ? g.phys.bodies[g.primary].half.x * 2 : 0.f;
+    std::printf("dimension field: a typed width of 99999 makes a box %.0f wide (clamped to 600): %s\n", wTyped, yn(near(wTyped, 600)));
+    d.key(SDLK_z, KMOD_CTRL);
+    // ---- space released while a shape is being dragged does not start the simulation
+    d.down(200, 40); d.mouseTo(240, 60); g.update();
+    d.key(SDLK_SPACE);
+    const bool stillEditing = !g.playing && g.lmb;
+    d.key(SDLK_ESCAPE); d.up(240, 60);
+    std::printf("space released mid-drag leaves the simulation stopped and the drag alive: %s\n", yn(stillEditing && !g.playing));
+    // ---- a gravity flip is an undo step like any other edit
+    undoN = g.undoStack.size();
+    g.runCommand("sim.gravity");
+    const bool up = g.phys.gravity.y < 0 && g.undoStack.size() == undoN + 1;
+    d.key(SDLK_z, KMOD_CTRL);
+    std::printf("flipping gravity pushes one undo entry (%s) and ctrl+z flips it back: %s\n", yn(up), yn(up && g.phys.gravity.y > 0));
+    // ---- the drawing only changes through edits: a Step followed by Stop in one frame runs no step on it, and a paint stroke
+    //      begun while running ends when Stop restores the drawing
+    g.pickTool(T_MAT); g.mat = M_SAND; g.brush = 3;
+    d.drag(60, 100, 120, 100);                        // some sand to settle if a step ever ran
+    std::vector<uint8_t> drawn0; g.captureState(drawn0);
+    g.runCommand("sim.step"); g.runCommand("sim.stop"); d.frames(2);
+    std::vector<uint8_t> drawn1; g.captureState(drawn1);
+    const bool noStep = drawn1 == drawn0 && !g.playing;
+    g.play(); d.frames(1);
+    d.down(60, 140); d.mouseTo(90, 140); g.update();  // a stroke begun while running
+    g.runCommand("sim.stop"); d.frames(1);
+    d.mouseTo(120, 140); g.update(); d.up(120, 140);  // the pointer goes on after Stop
+    std::vector<uint8_t> drawn2; g.captureState(drawn2);
+    std::printf("step then stop in one frame leaves the drawing untouched (%s); a stroke begun while running does not paint the restored drawing (%s): %s\n",
+                yn(noStep), yn(drawn2 == drawn0), yn(noStep && drawn2 == drawn0 && !g.lmb));
+    g.setTool(T_SELECT);
     d.click(body().pos.x, body().pos.y);
 }
 
@@ -426,6 +492,328 @@ void gallery(Game& g, const char* out) {
     std::printf("gallery: %zu states, %d x %d, written to %s\n", states.size(), w, h * (int)states.size(), out);
 }
 
+// --ui-fuzz SEED FRAMES: drives the whole application with pseudo-random SDL events (the pointer over every zone and off the
+// window, every button with every modifier, double clicks, the wheel, every key in the map, typed text, real window resizes,
+// the transport, scene loads, undo storms, mass drawing and selection) and checks the invariants after every frame: finite
+// and positive body sizes, materials in range, joints to live bodies, selection ids in range, the layout tiling the window,
+// the undo stack consistent, and every 300 frames that undoing back to a checkpoint restores the state byte for byte and
+// redoing restores it again. The events are a deterministic function of the seed; prints one line per violation.
+int fuzz(Game& g, uint32_t seed, int frames) {
+    struct Rng {
+        uint64_t s;
+        uint32_t next() { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return (uint32_t)(s >> 11); }
+        int below(int n) { return n <= 0 ? 0 : (int)(next() % (uint32_t)n); }
+        bool chance(int pct) { return below(100) < pct; }
+        int range(int a, int b) { return a + below(b - a + 1); }
+    } rng{0x9E3779B97F4A7C15ull ^ ((uint64_t)seed + 1) * 0xD1B54A32D192ED03ull};
+    int frame = 0, violations = 0, events = 0, worstMs = 0;
+    auto bad = [&](const std::string& what) { if (violations < 60) std::printf("fuzz VIOLATION at frame %d: %s\n", frame, what.c_str()); ++violations; };
+    auto push = [&](SDL_Event e) { SDL_PushEvent(&e); ++events; };
+    bool held[3] = {false, false, false};   // left, right, middle
+    const Uint8 buttons[3] = {SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT, SDL_BUTTON_MIDDLE};
+    int mx = g.L.canvas.x + 100, my = g.L.canvas.y + 100, spaceUp = -1;
+    std::vector<SDL_Keycode> keys = {SDLK_ESCAPE, SDLK_RETURN, SDLK_KP_ENTER, SDLK_TAB, SDLK_BACKSPACE, SDLK_DELETE, SDLK_SPACE, SDLK_LEFT, SDLK_RIGHT, SDLK_UP, SDLK_DOWN,
+                                     SDLK_HOME, SDLK_END, SDLK_PAGEUP, SDLK_PAGEDOWN, SDLK_LEFTBRACKET, SDLK_RIGHTBRACKET, SDLK_BACKQUOTE, SDLK_MINUS, SDLK_EQUALS, SDLK_F1,
+                                     SDLK_F2, SDLK_KP_PLUS, SDLK_KP_MINUS, SDLK_KP_0, SDLK_PERIOD, SDLK_COMMA, SDLK_SLASH, SDLK_BACKSLASH};
+    for (int c = 'a'; c <= 'z'; ++c) keys.push_back((SDL_Keycode)c);
+    for (int c = '0'; c <= '9'; ++c) keys.push_back((SDL_Keycode)c);
+    static const char* queries[] = {"heat", "zoom", "scene", "paint water", "body material", "wipe", "new", "open", "save as", "undo", "select", "fan"};
+    static const char* names[] = {"../x", "a/b.c", "", "my-engine", "0123456789012345678901234567890123", "  ", "x.sbot", "UPPER"};
+    auto motion = [&](int x, int y) { mx = x; my = y; SDL_Event e{}; e.type = SDL_MOUSEMOTION; e.motion.x = x; e.motion.y = y; push(e); };
+    auto button = [&](int i, bool down, int clicks = 1) {
+        SDL_Event e{}; e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+        e.button.button = buttons[i]; e.button.clicks = (Uint8)clicks; e.button.x = mx; e.button.y = my;
+        push(e); held[i] = down;
+    };
+    auto key = [&](SDL_Keycode k, bool up = true) {
+        SDL_Event e{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = k; e.key.keysym.mod = (Uint16)SDL_GetModState(); push(e);
+        if (up) { e.type = SDL_KEYUP; push(e); }
+    };
+    auto type = [&](const std::string& s) { for (char c : s) { SDL_Event e{}; e.type = SDL_TEXTINPUT; e.text.text[0] = c; e.text.text[1] = 0; push(e); } };
+    auto inRect = [&](const SDL_Rect& r) { motion(r.x + rng.below(std::max(1, r.w)), r.y + rng.below(std::max(1, r.h))); };
+    auto step = [&] {
+        const Uint64 f = SDL_GetPerformanceFrequency(), t0 = SDL_GetPerformanceCounter();
+        g.pollEvents(); g.update();
+        const Uint64 t1 = SDL_GetPerformanceCounter();
+        g.frame();
+        const Uint64 t2 = SDL_GetPerformanceCounter();
+        int ms = (int)((t2 - t0) * 1000 / f);
+        worstMs = std::max(worstMs, ms);
+        if (ms > 1000) {   // what the slow frame was doing, and whether the simulation step or the drawing took the time
+            int cells = 0, gas = 0; for (auto& c : g.world.cells) { cells += c.t != M_EMPTY; gas += MATS[c.t].kind == K_GAS; }
+            int joints = 0; for (auto& j : g.phys.joints) joints += j.alive;
+            std::printf("fuzz frame %d took %d ms (update %d, frame %d): %s speed %.1f, %d bodies, %d joints, %d cells (%d gas), tool %s, %zu selected, zoom %.1f, %dx%d\n",
+                        frame, ms, (int)((t1 - t0) * 1000 / f), (int)((t2 - t1) * 1000 / f), g.playing ? (g.paused ? "paused," : "running,") : "editing,", g.speed,
+                        g.phys.bodyCount(), joints, cells, gas, toolInfo(g.tool).name, g.sel.size(), g.zoom, g.L.winW, g.L.winH);
+        }
+        if (ms > 8000) bad("a frame took " + std::to_string(ms) + " ms");
+    };
+    auto finite = [](std::initializer_list<float> xs) { for (float x : xs) if (!std::isfinite(x)) return false; return true; };
+    auto check = [&] {
+        const Layout& L = g.L;
+        SDL_Rect zones[] = {L.top, L.strip, L.ctx, L.canvas, L.dock, L.status};
+        for (int i = 0; i < 6; ++i) {
+            const SDL_Rect& z = zones[i];
+            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH)
+                bad("layout zone " + std::to_string(i) + " outside the window or empty");
+            for (int j = i + 1; j < 6; ++j)
+                if (overlaps(zones[i], zones[j])) bad("layout zones " + std::to_string(i) + " and " + std::to_string(j) + " overlap");
+        }
+        const int nb = (int)g.phys.bodies.size();
+        for (auto& b : g.phys.bodies) {
+            if (!b.alive) continue;
+            if (!finite({b.pos.x, b.pos.y, b.angle, b.half.x, b.half.y, b.radius, b.mass})) bad("body " + std::to_string(b.id) + " has a NaN or infinite value");
+            if (b.shape == SHAPE_BOX ? (b.half.x < 0.25f || b.half.y < 0.25f) : b.radius < 0.25f) bad("body " + std::to_string(b.id) + " has no size");
+            if (b.mat >= M_COUNT || b.src.mat >= M_COUNT) bad("body " + std::to_string(b.id) + " has a material out of range");
+        }
+        for (auto& j : g.phys.joints) {
+            if (!j.alive) continue;
+            auto ok = [&](int id) { return id == -1 || (id >= 0 && id < nb && g.phys.bodies[id].alive); };
+            if (!ok(j.a) || !ok(j.b)) bad("joint " + std::to_string(j.id) + " refers to a dead or missing body");
+        }
+        for (int id : g.sel) if (id < 0 || id >= nb) bad("selection holds the out-of-range id " + std::to_string(id));
+        if (g.primary >= nb) bad("primary out of range");
+        if (g.selJoint >= (int)g.phys.joints.size()) bad("selected joint out of range");
+        if (g.handle >= 0 && (g.handleId < 0 || g.handleId >= nb || !g.phys.bodies[g.handleId].alive || !g.lmb))
+            bad("a handle is being dragged on a dead body or with no button down");
+        if (g.dim.active && !g.lmb) bad("the dimension field is active with no drag in progress");
+        if (g.speed < 0.1f || g.speed > 2.f || g.brush < 1 || g.brush > 24 || g.selFilter < 0 || g.selFilter > 2 || g.emitFace > 4 || g.dockTab < 0 || g.dockTab > 3 ||
+            g.bondType < 0 || g.bondType > 3 || g.sparkIdx < 0 || g.sparkIdx > 6 || g.mat >= M_COUNT || g.bodyMat >= M_COUNT || g.payload >= M_COUNT)
+            bad("a setting is out of range");
+        if (!finite({g.camXf, g.camYf, g.zoom}) || g.zoom < 1.f || g.zoom > 8.f) bad("camera out of range");
+        if (g.undoStack.size() != g.undoLabels.size() || g.redoStack.size() != g.redoLabels.size() || g.undoStack.size() > 60) bad("undo stack and labels disagree");
+        size_t bytes = 0; for (auto& u : g.undoStack) bytes += u.size();
+        if (bytes != g.undoBytes) bad("undo byte count is stale");
+    };
+    // a canonical digest of the drawing in four parts: the cells, the live bodies with gravity, the live joints, the labels. Dead
+    // slots in the body and joint vectors are allocator noise and the body-material default is a preference, so neither counts.
+    using Parts = std::vector<std::vector<uint8_t>>;
+    auto digest = [&](Parts& parts) {
+        parts.assign(4, {});
+        { Writer w{parts[0]}; g.world.save(w); }
+        { Writer w{parts[1]}; w.pod(g.phys.gravity);
+          for (auto& b : g.phys.bodies) {
+              if (!b.alive) continue;
+              w.pod(b.id); w.pod(b.pos); w.pod(b.angle); w.pod(b.half); w.pod(b.radius); w.pod(b.mat); w.pod(b.isStatic); w.pod(b.isWheel); w.pod(b.isRocket);
+              w.pod(b.group); w.pod(b.fan.strength); w.pod(b.fan.vacuum); w.pod(b.src.on); w.pod(b.src.mat); w.pod(b.src.rate); w.pod(b.src.face); w.pod(b.temp);
+          } }
+        { Writer w{parts[2]};
+          for (auto& j : g.phys.joints) {
+              if (!j.alive || j.type == J_MOUSE) continue;
+              w.pod(j.id); w.pod(j.type); w.pod(j.a); w.pod(j.b); w.pod(j.la); w.pod(j.lb); w.pod(j.length); w.pod(j.freq); w.pod(j.damping);
+              w.pod(j.speed); w.pod(j.power); w.pod(j.keyed); w.pod(j.group); w.pod(j.bondId); w.pod(j.breakT); w.pod(j.loadG);
+          } }
+        { Writer w{parts[3]}; w.pod((uint32_t)g.labels.size()); for (auto& l : g.labels) { w.pod(l.p); w.str(l.s); } }
+    };
+    auto differs = [](const Parts& a, const Parts& b) {
+        static const char* names[] = {"cells", "bodies", "joints", "labels"};
+        std::string s;
+        for (int i = 0; i < 4; ++i) if (a[i] != b[i]) s += std::string(s.empty() ? "" : ", ") + names[i];
+        return s;
+    };
+    // the checkpoint also fingerprints the undo entries beneath it: if the stack was trimmed by its cap (a mass draw pushes more
+    // than 60 entries) or the history branched (undo, then a new edit), undoing to that depth lands elsewhere and the check is skipped
+    auto hashEntry = [](const std::vector<uint8_t>& v) {
+        uint64_t h = 1469598103934665603ull;
+        for (uint8_t b : v) { h ^= b; h *= 1099511628211ull; }
+        return h ^ (v.size() * 31);
+    };
+    auto stackHashes = [&](size_t n) {
+        std::vector<uint64_t> hs;
+        for (size_t i = 0; i < n && i < g.undoStack.size(); ++i) hs.push_back(hashEntry(g.undoStack[i]));
+        return hs;
+    };
+    // ... and the entry just above the checkpoint must hold the checkpoint state itself: an undo and a new edit right after the
+    // checkpoint branch the history on an entry that is byte-identical to the one they replaced, which the hashes below cannot see
+    struct { Parts state; size_t depth = 0; std::vector<uint64_t> hashes; uint64_t self = 0; bool valid = false; std::vector<std::string> lines; } cp;
+    // a readable line per live body and joint, so a mismatch can say what came back that was not there, and the reverse
+    auto summary = [&] {
+        std::vector<std::string> out;
+        char b[160];
+        for (auto& bd : g.phys.bodies) {
+            if (!bd.alive) continue;
+            std::snprintf(b, sizeof b, "body %d %s %.2fx%.2f r%.2f at (%.2f, %.2f) a%.3f %s%s g%d", bd.id, bd.shape == SHAPE_BOX ? "box" : "circle",
+                          bd.half.x * 2, bd.half.y * 2, bd.radius, bd.pos.x, bd.pos.y, bd.angle, MATS[bd.mat].name, bd.isStatic ? " fixed" : "", bd.group);
+            out.push_back(b);
+        }
+        for (auto& j : g.phys.joints) {
+            if (!j.alive || j.type == J_MOUSE) continue;
+            std::snprintf(b, sizeof b, "joint %d type %d %d-%d la (%.2f, %.2f) lb (%.2f, %.2f) len %.2f g%d bond %d", j.id, (int)j.type, j.a, j.b,
+                          j.la.x, j.la.y, j.lb.x, j.lb.y, j.length, j.group, j.bondId);
+            out.push_back(b);
+        }
+        return out;
+    };
+    auto printDiff = [&](const std::vector<std::string>& was, const std::vector<std::string>& now) {
+        int shown = 0;
+        for (auto& l : now) if (std::find(was.begin(), was.end(), l) == was.end() && shown++ < 12) std::printf("    came back but was not at the checkpoint: %s\n", l.c_str());
+        for (auto& l : was)
+            if (std::find(now.begin(), now.end(), l) == now.end() && shown++ < 24) std::printf("    was at the checkpoint but did not come back: %s\n", l.c_str());
+    };
+    struct FrameLog { int frame; size_t depth; bool playing, lmb; std::string acts; };
+    std::vector<FrameLog> flog;
+    auto settle = [&] {   // release everything and stop, so the state can be compared and undone
+        for (int i = 0; i < 3; ++i) if (held[i]) button(i, false);
+        SDL_SetModState(KMOD_NONE);
+        g.cheatOpen = g.scenesOpen = g.fileOpen = g.paletteOpen = g.ctxOpen = g.matMenuOpen = g.selOtherOpen = g.newConfirm = g.scaleOpen = false;
+        step();
+        if (g.playing) { g.stopPlay(); step(); }
+        if (g.playing) bad("stop did not restore the snapshot");
+        if (g.lmb) bad("a drag survived the button release");
+        g.lastUndoKey.clear();   // a pause in the editing: the next nudge or scrub starts its own undo entry rather than merging across the checkpoint
+    };
+    // between frames in edit mode with no button down, the drawing may only change together with the undo stack: a change with the
+    // same depth, redo depth and merge tick is an edit that nobody can undo, and the frame's actions are named
+    struct { Parts parts; size_t depth = 0, redo = 0; Uint32 tick = 0; bool valid = false; } prev;
+    std::string acts;
+    g.frame();
+    const Uint64 start = SDL_GetPerformanceCounter();
+    for (frame = 0; frame < frames; ++frame) {
+        acts.clear();
+        if (frame % 300 == 0) {
+            settle();
+            const bool anchored = cp.valid && g.undoStack.size() >= cp.depth && stackHashes(cp.depth) == cp.hashes &&
+                                  (g.undoStack.size() == cp.depth || hashEntry(g.undoStack[cp.depth]) == cp.self);
+            if (anchored) {
+                const size_t n = g.undoStack.size() - cp.depth;
+                Parts now, back, again;
+                digest(now);
+                std::string labels;
+                for (size_t i = 0; i < n; ++i) {
+                    labels += (labels.empty() ? "" : ", ") + g.undoLabels.back();
+                    g.undo();
+                    if (g.note.find("failed") != std::string::npos) bad("undo reported: " + g.note);
+                }
+                if (g.undoStack.size() != cp.depth) bad("undo did not step back to the checkpoint depth");
+                digest(back);
+                std::string d = differs(back, cp.state);
+                if (!d.empty()) {
+                    bad("undoing " + std::to_string(n) + " steps (" + labels + ") to the checkpoint did not restore the drawing: " + d + " differ");
+                    printDiff(cp.lines, summary());
+                    for (size_t i = 1; i < flog.size(); ++i)   // the frames since the checkpoint where the stack or the mode changed
+                        if (flog[i].depth != flog[i - 1].depth || flog[i].playing != flog[i - 1].playing)
+                            std::printf("    frame %d: depth %zu%s%s: %s\n", flog[i].frame, flog[i].depth, flog[i].playing ? " playing" : "",
+                                        flog[i].lmb ? " button down" : "", flog[i].acts.c_str());
+                }
+                for (size_t i = 0; i < n; ++i) { g.redo(); if (g.note.find("failed") != std::string::npos) bad("redo reported: " + g.note); }
+                digest(again);
+                d = differs(again, now);
+                if (!d.empty()) bad("redoing " + std::to_string(n) + " steps did not restore the drawing: " + d + " differ");
+            }
+            digest(cp.state); cp.depth = g.undoStack.size(); cp.hashes = stackHashes(cp.depth); cp.valid = true; cp.lines = summary();
+            { std::vector<uint8_t> raw; g.captureState(raw); cp.self = hashEntry(Game::packState(raw)); }
+            flog.clear(); flog.push_back({frame, cp.depth, g.playing, g.lmb, "checkpoint"});
+        }
+        const int mods[] = {KMOD_NONE, KMOD_NONE, KMOD_NONE, KMOD_CTRL, KMOD_SHIFT, KMOD_CTRL | KMOD_SHIFT};
+        if (rng.chance(30)) SDL_SetModState((SDL_Keymod)mods[rng.below(6)]);
+        const int nActs = rng.range(1, 3);
+        for (int a = 0; a < nActs; ++a) {
+            int r = rng.below(1000);
+            static const char* tags[] = {"move", "button", "wheel", "key", "type", "resize", "transport", "scene", "undo storm", "mass draw", "palette", "file dialog",
+                                         "field", "select all", "select other", "move"};
+            acts += std::string(acts.empty() ? "" : ", ") + tags[r < 330 ? 0 : r < 560 ? 1 : r < 610 ? 2 : r < 780 ? 3 : r < 860 ? 4 : r < 872 ? 5 : r < 892 ? 6 : r < 897 ? 7
+                                                                 : r < 912 ? 8 : r < 916 ? 9 : r < 930 ? 10 : r < 940 ? 11 : r < 960 ? 12 : r < 975 ? 13 : r < 985 ? 14 : 15];
+            if (r < 330) {   // the pointer: mostly over the canvas, sometimes every other zone, the window edge, or off the window
+                int z = rng.below(100);
+                if (z < 50) inRect(g.L.canvas);
+                else if (z < 60) inRect(g.L.strip);
+                else if (z < 70) inRect(g.L.dock);
+                else if (z < 78) inRect(g.L.top);
+                else if (z < 85) inRect(g.L.ctx);
+                else if (z < 88) inRect(g.L.status);
+                else if (z < 93) motion(rng.range(-60, g.L.winW + 60), rng.range(-60, g.L.winH + 60));
+                else if (!g.fieldRects.empty()) {   // the number half of some inspector field
+                    auto it = g.fieldRects.begin(); std::advance(it, rng.below((int)g.fieldRects.size()));
+                    inRect(SDL_Rect{it->second.x + it->second.w / 2, it->second.y, it->second.w / 2, it->second.h});
+                } else inRect(g.L.canvas);
+            } else if (r < 560) {   // a button goes down or up (left most often), sometimes as a double click
+                int i = rng.below(100) < 60 ? 0 : rng.below(100) < 60 ? 1 : 2;
+                button(i, !held[i], !held[i] && rng.chance(10) ? 2 : 1);
+            } else if (r < 610) { SDL_Event e{}; e.type = SDL_MOUSEWHEEL; e.wheel.y = rng.range(-3, 3); push(e); }
+            else if (r < 780) {   // a key from the map, with the frame's modifiers; Space is sometimes held for a few frames
+                SDL_Keycode k = keys[(size_t)rng.below((int)keys.size())];
+                if (k == SDLK_SPACE && spaceUp < 0 && rng.chance(50)) { key(k, false); spaceUp = frame + rng.range(1, 6); }
+                else key(k);
+            } else if (r < 860) {   // typed text, as a keyboard sends it
+                static const char chars[] = "0123456789.+-*/()ab Z";
+                std::string s; int n = rng.range(1, 4);
+                for (int i = 0; i < n; ++i) s += chars[rng.below((int)sizeof(chars) - 1)];
+                type(s);
+            } else if (r < 872) {   // a real window resize
+                int w = rng.chance(10) ? rng.range(0, 100) : rng.range(1024, 2560), h = rng.chance(10) ? rng.range(0, 100) : rng.range(640, 1440);
+                SDL_SetWindowSize(g.win, w, h);
+            } else if (r < 892) g.runCommand(rng.chance(40) ? "sim.play" : rng.chance(50) ? "sim.step" : "sim.stop");
+            else if (r < 897) g.runCommand(("scene." + std::to_string(rng.below((int)Game::sceneList().size()))).c_str());
+            else if (r < 912) {   // an undo / redo storm
+                int n = rng.range(5, 40);
+                for (int i = 0; i < n; ++i) { SDL_SetModState(KMOD_CTRL); key(rng.chance(60) ? SDLK_z : SDLK_y); }
+                SDL_SetModState(KMOD_NONE);
+            }
+            else if (r < 916 && g.phys.bodyCount() < 2500) {   // mass drawing, then select everything
+                if (held[0]) button(0, false);
+                step();
+                g.setTool(T_BOX);
+                int n = rng.range(40, 120), cols = 20;
+                for (int i = 0; i < n; ++i) {
+                    float x = g.camXf + 20.f + (float)(i % cols) * 14.f, y = g.camYf + 20.f + (float)(i / cols) * 10.f;
+                    motion(g.scrX(x), g.scrY(y)); button(0, true); step(); motion(g.scrX(x + 8.f), g.scrY(y + 5.f)); step(); button(0, false); step();
+                }
+                SDL_SetModState(KMOD_CTRL); key(SDLK_a); SDL_SetModState(KMOD_NONE);
+            } else if (r < 930) {   // the palette: open, type, run
+                SDL_SetModState(KMOD_CTRL); key(SDLK_k); SDL_SetModState(KMOD_NONE); step();
+                type(queries[rng.below(12)]); step(); key(SDLK_RETURN);
+            } else if (r < 940) {   // the file dialog with awkward names
+                SDL_SetModState((SDL_Keymod)(KMOD_CTRL | KMOD_SHIFT)); key(SDLK_s); SDL_SetModState(KMOD_NONE); step();
+                type(names[rng.below(8)]); step(); key(rng.chance(70) ? SDLK_RETURN : SDLK_ESCAPE);
+            } else if (r < 960 && !g.fieldRects.empty()) {   // a field in the dock: click the number, type an expression, commit
+                auto it = g.fieldRects.begin(); std::advance(it, rng.below((int)g.fieldRects.size()));
+                if (held[0]) button(0, false);
+                motion(it->second.x + it->second.w * 3 / 4, it->second.y + it->second.h / 2); button(0, true); button(0, false); step();
+                static const char* exprs[] = {"", "-", "1/0", "99999999999", "-50", "0", "10+5*2", "(3", "2.5", "abc", "1e9", "600*600"};
+                type(exprs[rng.below(12)]); step(); key(rng.chance(80) ? SDLK_RETURN : SDLK_TAB);
+            } else if (r < 975) { SDL_SetModState(KMOD_CTRL); key(SDLK_a); SDL_SetModState(KMOD_NONE); }   // select everything
+            else if (r < 985 && g.inSim) g.openSelectOther(mx, my);
+            else inRect(g.L.canvas);
+        }
+        if (spaceUp >= 0 && frame >= spaceUp) { SDL_Event e{}; e.type = SDL_KEYUP; e.key.keysym.sym = SDLK_SPACE; push(e); spaceUp = -1; }
+        step();
+        check();
+        flog.push_back({frame, g.undoStack.size(), g.playing, g.lmb, acts});
+        if (!g.playing && !g.lmb) {
+            Parts now;
+            digest(now);
+            if (prev.valid && g.undoStack.size() == prev.depth && g.redoStack.size() == prev.redo && g.lastUndoTick == prev.tick) {
+                // the cells are left out here: stamping relocates fluid buried under bodies for a few frames after an edit (simulation
+                // behaviour, not an edit), so only the bodies, joints and labels must stand still between edits
+                Parts a = now;
+                a[0] = prev.parts[0];
+                std::string d = differs(a, prev.parts);
+                if (!d.empty()) bad(d + " changed with no undo entry during: " + acts);
+            }
+            prev.parts = std::move(now); prev.depth = g.undoStack.size(); prev.redo = g.redoStack.size(); prev.tick = g.lastUndoTick; prev.valid = true;
+        } else prev.valid = false;
+        if (frame % 2000 == 0 && frame)
+            std::printf("fuzz frame %d: %d bodies, %zu undo, %d events, %d violations, %.0f s\n", frame, g.phys.bodyCount(), g.undoStack.size(), events, violations,
+                        (double)(SDL_GetPerformanceCounter() - start) / (double)SDL_GetPerformanceFrequency());
+    }
+    settle();
+    check();
+    // degenerate window sizes go through the layout alone (SDL clamps the real window to the minimum)
+    for (int w : {0, 1, 100, 1023, 1024, 1200, 5000}) for (int h : {0, 1, 100, 639, 640, 5000}) {
+        Layout L = computeLayout(w, h, w % 2 == 0);
+        SDL_Rect zones[] = {L.top, L.strip, L.ctx, L.canvas, L.dock, L.status};
+        for (int i = 0; i < 6; ++i) {
+            const SDL_Rect& z = zones[i];
+            if (z.w <= 0 || z.h <= 0 || z.x < 0 || z.y < 0 || z.x + z.w > L.winW || z.y + z.h > L.winH)
+                bad("degenerate layout " + std::to_string(w) + "x" + std::to_string(h) + ": zone " + std::to_string(i) + " bad");
+            for (int j = i + 1; j < 6; ++j) if (overlaps(zones[i], zones[j])) bad("degenerate layout: zones overlap");
+        }
+    }
+    std::printf("fuzz: seed %u, %d frames, %d events, %d bodies at the end, worst frame %d ms, %d violations: %s\n", seed, frames, events, g.phys.bodyCount(),
+                worstMs, violations, violations ? "FAIL" : "clean");
+    return violations ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -433,7 +821,8 @@ int main(int argc, char** argv) {
     // Headless runs: sandbots --shot out.bmp [frames] [--scene N] [--win WxH] [--heat] [--trace] [--no-air] [--no-momentum] ...
     const char* shot = nullptr;
     const char* galleryOut = nullptr;
-    int shotFrames = 300, scene = 0, winW = 1600, winH = 900;
+    int shotFrames = 300, scene = 0, winW = 1600, winH = 900, fuzzFrames = -1;
+    uint32_t fuzzSeed = 0;
     bool heat = false, trace = false, g0 = false, elecFlag = false, helpFlag = false, pressureFlag = false, noAir = false, noMomentum = false;
     int camFlag = -1;
     bool scenesFlag = false; bool timeFlag = false; float zoomFlag = 1.f, camYFlag = 0.f;
@@ -443,6 +832,7 @@ int main(int argc, char** argv) {
             shot = argv[++i];
             if (i + 1 < argc && argv[i + 1][0] != '-') shotFrames = std::atoi(argv[++i]);
         } else if (!std::strcmp(argv[i], "--ui-gallery") && i + 1 < argc) galleryOut = argv[++i];
+        else if (!std::strcmp(argv[i], "--ui-fuzz") && i + 2 < argc) { fuzzSeed = (uint32_t)std::strtoul(argv[i + 1], nullptr, 10); fuzzFrames = std::atoi(argv[i + 2]); i += 2; }
         else if (!std::strcmp(argv[i], "--win") && i + 1 < argc) { if (std::sscanf(argv[++i], "%dx%d", &winW, &winH) != 2) { std::fprintf(stderr, "--win WxH\n"); return 2; } }
         else if (!std::strcmp(argv[i], "--scene") && i + 1 < argc) scene = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--heat")) heat = true;
@@ -476,7 +866,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--no-air")) noAir = true;
         else if (!std::strcmp(argv[i], "--no-momentum")) noMomentum = true;
     }
-    const bool headless = shot || galleryOut;
+    const bool headless = shot || galleryOut || fuzzFrames >= 0;
     if (headless) SDL_setenv("SDL_VIDEODRIVER", "dummy", 1);
 
     Game g;
@@ -484,6 +874,11 @@ int main(int argc, char** argv) {
     g.world.needAir = !noAir;              // --no-air: the old model, fuel burns without oxygen
     g.world.gasMomentum = !noMomentum;   // --no-momentum: the diffusion-only gas model, for comparing scenes
 
+    if (fuzzFrames >= 0) {
+        int rc = fuzz(g, fuzzSeed, fuzzFrames);
+        g.shutdown();
+        return rc;
+    }
     if (galleryOut) {
         gallery(g, galleryOut);
         g.shutdown();
