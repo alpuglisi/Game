@@ -613,8 +613,16 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     };
     // the checkpoint also fingerprints the undo entries beneath it: if the stack was trimmed by its cap (a mass draw pushes more
     // than 60 entries) or the history branched (undo, then a new edit), undoing to that depth lands elsewhere and the check is skipped
-    auto hashEntry = [](const std::vector<uint8_t>& v) { uint64_t h = 1469598103934665603ull; for (uint8_t b : v) { h ^= b; h *= 1099511628211ull; } return h ^ (v.size() * 31); };
-    auto stackHashes = [&](size_t n) { std::vector<uint64_t> hs; for (size_t i = 0; i < n && i < g.undoStack.size(); ++i) hs.push_back(hashEntry(g.undoStack[i])); return hs; };
+    auto hashEntry = [](const std::vector<uint8_t>& v) {
+        uint64_t h = 1469598103934665603ull;
+        for (uint8_t b : v) { h ^= b; h *= 1099511628211ull; }
+        return h ^ (v.size() * 31);
+    };
+    auto stackHashes = [&](size_t n) {
+        std::vector<uint64_t> hs;
+        for (size_t i = 0; i < n && i < g.undoStack.size(); ++i) hs.push_back(hashEntry(g.undoStack[i]));
+        return hs;
+    };
     // ... and the entry just above the checkpoint must hold the checkpoint state itself: an undo and a new edit right after the
     // checkpoint branch the history on an entry that is byte-identical to the one they replaced, which the hashes below cannot see
     struct { Parts state; size_t depth = 0; std::vector<uint64_t> hashes; uint64_t self = 0; bool valid = false; std::vector<std::string> lines; } cp;
@@ -624,13 +632,14 @@ int fuzz(Game& g, uint32_t seed, int frames) {
         char b[160];
         for (auto& bd : g.phys.bodies) {
             if (!bd.alive) continue;
-            std::snprintf(b, sizeof b, "body %d %s %.2fx%.2f r%.2f at (%.2f, %.2f) a%.3f %s%s g%d", bd.id, bd.shape == SHAPE_BOX ? "box" : "circle", bd.half.x * 2, bd.half.y * 2,
-                          bd.radius, bd.pos.x, bd.pos.y, bd.angle, MATS[bd.mat].name, bd.isStatic ? " fixed" : "", bd.group);
+            std::snprintf(b, sizeof b, "body %d %s %.2fx%.2f r%.2f at (%.2f, %.2f) a%.3f %s%s g%d", bd.id, bd.shape == SHAPE_BOX ? "box" : "circle",
+                          bd.half.x * 2, bd.half.y * 2, bd.radius, bd.pos.x, bd.pos.y, bd.angle, MATS[bd.mat].name, bd.isStatic ? " fixed" : "", bd.group);
             out.push_back(b);
         }
         for (auto& j : g.phys.joints) {
             if (!j.alive || j.type == J_MOUSE) continue;
-            std::snprintf(b, sizeof b, "joint %d type %d %d-%d la (%.2f, %.2f) lb (%.2f, %.2f) len %.2f g%d bond %d", j.id, (int)j.type, j.a, j.b, j.la.x, j.la.y, j.lb.x, j.lb.y, j.length, j.group, j.bondId);
+            std::snprintf(b, sizeof b, "joint %d type %d %d-%d la (%.2f, %.2f) lb (%.2f, %.2f) len %.2f g%d bond %d", j.id, (int)j.type, j.a, j.b,
+                          j.la.x, j.la.y, j.lb.x, j.lb.y, j.length, j.group, j.bondId);
             out.push_back(b);
         }
         return out;
@@ -638,7 +647,8 @@ int fuzz(Game& g, uint32_t seed, int frames) {
     auto printDiff = [&](const std::vector<std::string>& was, const std::vector<std::string>& now) {
         int shown = 0;
         for (auto& l : now) if (std::find(was.begin(), was.end(), l) == was.end() && shown++ < 12) std::printf("    came back but was not at the checkpoint: %s\n", l.c_str());
-        for (auto& l : was) if (std::find(now.begin(), now.end(), l) == now.end() && shown++ < 24) std::printf("    was at the checkpoint but did not come back: %s\n", l.c_str());
+        for (auto& l : was)
+            if (std::find(now.begin(), now.end(), l) == now.end() && shown++ < 24) std::printf("    was at the checkpoint but did not come back: %s\n", l.c_str());
     };
     struct FrameLog { int frame; size_t depth; bool playing, lmb; std::string acts; };
     std::vector<FrameLog> flog;
@@ -682,7 +692,8 @@ int fuzz(Game& g, uint32_t seed, int frames) {
                     printDiff(cp.lines, summary());
                     for (size_t i = 1; i < flog.size(); ++i)   // the frames since the checkpoint where the stack or the mode changed
                         if (flog[i].depth != flog[i - 1].depth || flog[i].playing != flog[i - 1].playing)
-                            std::printf("    frame %d: depth %zu%s%s: %s\n", flog[i].frame, flog[i].depth, flog[i].playing ? " playing" : "", flog[i].lmb ? " button down" : "", flog[i].acts.c_str());
+                            std::printf("    frame %d: depth %zu%s%s: %s\n", flog[i].frame, flog[i].depth, flog[i].playing ? " playing" : "",
+                                        flog[i].lmb ? " button down" : "", flog[i].acts.c_str());
                 }
                 for (size_t i = 0; i < n; ++i) { g.redo(); if (g.note.find("failed") != std::string::npos) bad("redo reported: " + g.note); }
                 digest(again);
