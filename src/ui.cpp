@@ -1008,8 +1008,8 @@ bool Context::toolButton(const char* id, icons::Id icon, const std::string& labe
         m.pushClip(inset(r, 1));
         int lh = font::height(m.th.face, small), top = r.y + std::max(2, (r.h - 16 - 2 - lh) / 2);
         m.ico(icon, r.x + (r.w - 16) / 2, top, c);
-        int tw = m.textW(label, small);
-        m.txt(label, r.x + std::max(2, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 4 ? r.w - 4 : -1, 255, false, small);
+        int tw = m.textW(label, small);   // 1 px margins: a seven-letter label (41 px at 1x) fits the 44 px button
+        m.txt(label, r.x + std::max(1, (r.w - tw) / 2), top + 16 + 2, c, tw > r.w - 2 ? r.w - 2 : -1, 255, false, small);
         if (shortcut && std::strlen(shortcut) <= 2) {
             int sw = font::width(shortcut, font::Face::Small, 1);
             m.txt(shortcut, r.x + r.w - sw - 3, r.y + 2, c, -1, active ? 200 : 140, false, 1, font::Face::Small);
@@ -1247,6 +1247,11 @@ int Context::tabs(const char* id, const std::vector<std::string>& names, int cur
     SDL_Rect r = m.alloc(m.th.buttonH);
     int result = current;
     if (m.visible(r)) m.fill({r.x, r.y + r.h - 1, r.w, 1}, m.th.border);
+    // names that would be cut at the interface scale are all drawn one step smaller instead, so no tab name ends in an ellipsis
+    int scale = m.th.fontScale;
+    for (const std::string& nm : names)
+        if (m.textW(nm) > r.w / n - 2 * m.th.gap) { scale = std::max(1, m.th.fontScale - 1); break; }
+    const int th = font::height(m.th.face, scale);
     for (int i = 0; i < n; ++i) {
         SDL_Rect t{r.x + r.w * i / n, r.y, r.w * (i + 1) / n - r.w * i / n, r.h};
         Hit h = m.hit(hashInt(wid, i), t, true);
@@ -1256,8 +1261,8 @@ int Context::tabs(const char* id, const std::vector<std::string>& names, int cur
         if (sel) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.selection, 255, m.th.radius);
         else if (h.hover) m.fill({t.x, t.y, t.w, t.h - 1}, m.th.hover, 255, m.th.radius);
         if (sel) m.fill({t.x + 2, t.y + t.h - 2, t.w - 4, 2}, m.th.accent);
-        int tw = std::min(m.textW(names[(size_t)i]), t.w - 2 * m.th.gap);
-        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, m.textY(t), sel ? m.th.text : h.hover ? m.th.text : m.th.textDim, tw);
+        int tw = std::min(m.textW(names[(size_t)i], scale), t.w - 2 * m.th.gap);
+        m.txt(names[(size_t)i], t.x + (t.w - tw) / 2, t.y + (t.h - th) / 2, sel ? m.th.text : h.hover ? m.th.text : m.th.textDim, tw, 255, false, scale);
     }
     return result;
 }
