@@ -74,7 +74,7 @@ void Game::buildCommands() {
     add("sim.stop", "Stop and restore", "Simulation", "Shift+Space", "Stop and put the drawing back exactly as it was before Play", icons::Stop, [this] { stopPlay(); },
         [this] { return playing; });
     add("sim.gravity", "Flip gravity", "Simulation", "", "Gravity pulls the other way", icons::Gravity,
-        [this] { phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; notify(phys.gravity.y > 0 ? "Gravity down" : "Gravity up"); });
+        [this] { pushUndo(nullptr, "Flip gravity"); phys.gravity.y = phys.gravity.y > 0 ? -260.f : 260.f; notify(phys.gravity.y > 0 ? "Gravity down" : "Gravity up"); });
     // files
     add("file.new", "New", "File", "Ctrl+N", "Clear everything (asks first)", icons::New, [this] { newConfirm = true; }, editing);
     add("file.open", "Open", "File", "Ctrl+O", "Open a saved file from saves/", icons::Open, [this] { openFileDialog(false); }, editing);
@@ -99,9 +99,9 @@ void Game::buildCommands() {
     add("edit.subtract", "Subtract", "Edit", "", "Cut the last-clicked (red) body out of the other selected bodies", icons::Subtract, [this] { cutSelection(); },
         [this] { return sel.size() >= 2; });
     add("edit.wipecells", "Wipe cells", "Edit", "", "Remove every sand, liquid, gas and solid cell", icons::Eraser,
-        [this] { pushUndo(nullptr, "Wipe cells"); world.clear(); phys.stampBodies(); notify("All cells removed"); }, editing);
+        [this] { pushUndo(nullptr, "Wipe cells"); world.clear(); phys.stampBodies(); notify("All cells removed"); }, [this] { return !playing; });
     add("edit.wipebodies", "Wipe bodies", "Edit", "", "Remove every rigid body and joint", icons::Delete,
-        [this] { pushUndo(nullptr, "Wipe bodies"); clearBodies(); clearSelection(); phys.stampBodies(); notify("All bodies removed"); }, editing);
+        [this] { pushUndo(nullptr, "Wipe bodies"); clearBodies(); clearSelection(); phys.stampBodies(); notify("All bodies removed"); }, [this] { return !playing; });
     add("edit.selectother", "Select other", "Edit", "`", "List everything under the pointer, front to back, to pick from", icons::Layers,
         [this] { if (inSim) openSelectOther(in.mx, in.my); });
     add("edit.properties", "Properties", "Edit", "", "Show the selection in the Inspector", icons::Settings, [this] { dockTab = 0; if (L.dockCollapsed) dockFlyout = true; });
@@ -190,6 +190,7 @@ bool Game::handleKey(SDL_Keycode k, bool ctrl, bool shift) {
     if (k == SDLK_KP_MINUS || (ctrl && k == SDLK_MINUS)) { zoomCentre(-1); return true; }
     if (ctrl && k == SDLK_KP_0) { zoomReset(); return true; }
     if (k == SDLK_SPACE) return true;   // Space is handled on release (it also pans while held), see pollEvents
+    if (k == SDLK_w && !ctrl && !shift && playing && !paused) return true;   // W fires rockets while the simulation runs; it picks the Wheel tool otherwise
     for (auto& c : commands)
         if (shortcutHit(c.shortcut, k, ctrl, shift)) {
             if (c.enabled && !c.enabled()) { notify(c.name + " is not available now"); return true; }
@@ -202,6 +203,6 @@ bool Game::handleKey(SDL_Keycode k, bool ctrl, bool shift) {
 // the active tool's mouse and key bindings, for the status bar
 std::string Game::toolBindings() const {
     std::string s = toolInfo(tool).bindings;
-    if (tool == T_MAT && mat == M_EMPTY) s = "LMB erase · [ ] size · RMB cancel";
+    if (tool == T_MAT && mat == M_EMPTY) s = "LMB erase | [ ] size | RMB cancel";
     return s;
 }

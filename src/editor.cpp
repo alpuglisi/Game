@@ -6,27 +6,27 @@
 // ---------------------------------------------------------------- tables
 const ToolInfo& toolInfo(Tool t) {
     static const ToolInfo T[T_COUNT] = {
-        {"Paint", icons::Paint, "P", "Paint cells of the chosen material with a round brush", "LMB paint · Shift erase · [ ] size · RMB cancel"},
-        {"Box", icons::Box, "B", "Drag a rectangle; type width Tab height Tab angle for exact sizes", "LMB drag · type size · Enter commit · Esc cancel"},
-        {"Circle", icons::Circle, "C", "Drag from the centre out to set the radius", "LMB drag · type radius · Enter commit · Esc cancel"},
-        {"Wheel", icons::Wheel, "W", "A high-friction circle; dropped on a body it is pinned there with a keyed motor", "LMB drag · type radius · Enter commit · Esc cancel"},
-        {"Rocket", icons::Rocket, "R", "Drag to set the thrust direction; Up or W fires it while running", "LMB drag · Enter commit · Esc cancel"},
+        {"Paint", icons::Paint, "P", "Paint cells of the chosen material with a round brush", "LMB paint | Shift erase | [ ] size | RMB cancel"},
+        {"Box", icons::Box, "B", "Drag a rectangle; type width Tab height Tab angle for exact sizes", "LMB drag | type size | Enter commit | Esc cancel"},
+        {"Circle", icons::Circle, "C", "Drag from the centre out to set the radius", "LMB drag | type radius | Enter commit | Esc cancel"},
+        {"Wheel", icons::Wheel, "W", "A high-friction circle; dropped on a body it is pinned there with a keyed motor", "LMB drag | type radius | Enter commit | Esc cancel"},
+        {"Rocket", icons::Rocket, "R", "Drag to set the thrust direction; Up or W fires it while running", "LMB drag | Enter commit | Esc cancel"},
         {"Pin", icons::Pin, "J", "Click where two bodies overlap or touch to hinge them (one body: pinned to the world)", "LMB click on a seam"},
         {"Motor", icons::Motor, "O", "A pin driven by the arrow keys (A / D) while running", "LMB click on a seam"},
         {"Spinner", icons::Spinner, "", "A motor that spins all the time", "LMB click on a seam"},
-        {"Rod", icons::Rod, "L", "Drag from one body or point to another: a rigid link of fixed length", "LMB drag · Esc cancel"},
-        {"Spring", icons::Spring, "S", "Drag from one body or point to another: a soft link (stiffness and damping in the bar)", "LMB drag · Esc cancel"},
+        {"Rod", icons::Rod, "L", "Drag from one body or point to another: a rigid link of fixed length", "LMB drag | Esc cancel"},
+        {"Spring", icons::Spring, "S", "Drag from one body or point to another: a soft link (stiffness and damping in the bar)", "LMB drag | Esc cancel"},
         {"Grab", icons::Grab, "G", "Drag bodies about with a soft spring, even while the simulation runs", "LMB drag"},
         {"Delete tool", icons::Delete, "", "Click a body or joint to remove it", "LMB click"},
-        {"Slider", icons::Slider, "", "Press on the sliding body and drag along its line; end on the body it slides in, or on empty space", "LMB drag · Esc cancel"},
-        {"Select", icons::Select, "Q", "Click selects, click again cycles, Shift adds, Ctrl picks a part; drag moves or box-selects", "LMB select · Shift add · Ctrl part · drag move or box · hold or ` select other"},
-        {"Pipe", icons::Pipe, "", "Drag along the pipe: two welded walls (diameter and wall in the bar)", "LMB drag · type length Tab diameter · Enter commit · Esc cancel"},
-        {"Hose", icons::Hose, "", "Drag along the hose: a chain of hinged pipe segments", "LMB drag · type length Tab diameter · Enter commit · Esc cancel"},
-        {"Emitter", icons::Emitter, "", "Drag a block that endlessly produces a material out of one side", "LMB drag · type size · Enter commit · Esc cancel"},
+        {"Slider", icons::Slider, "", "Press on the sliding body and drag along its line; end on the body it slides in, or on empty space", "LMB drag | Esc cancel"},
+        {"Select", icons::Select, "Q", "Click selects, click again cycles, Shift adds, Ctrl picks a part; drag moves or box-selects", "LMB select | Shift add | Ctrl part | drag move or box | hold or ` select other"},
+        {"Pipe", icons::Pipe, "", "Drag along the pipe: two welded walls (diameter and wall in the bar)", "LMB drag | type length Tab diameter | Enter commit | Esc cancel"},
+        {"Hose", icons::Hose, "", "Drag along the hose: a chain of hinged pipe segments", "LMB drag | type length Tab diameter | Enter commit | Esc cancel"},
+        {"Emitter", icons::Emitter, "", "Drag a block that endlessly produces a material out of one side", "LMB drag | type size | Enter commit | Esc cancel"},
         {"Bond", icons::Bond, "", "Click where two bodies meet: a weld that lets go when too hot or overloaded", "LMB click on a seam"},
-        {"Fan", icons::Fan, "", "Drag a fan; the long side is the blade span and the arrow shows the airflow", "LMB drag · type size · Enter commit · Esc cancel"},
-        {"Cut", icons::Cut, "K", "Drag a box or circle over bodies: the area under it is cut out of every body it touches", "LMB drag · Enter commit · Esc cancel"},
-        {"Measure", icons::Measure, "M", "Drag between two points to read length, dx, dy and angle", "LMB drag · snap applies"},
+        {"Fan", icons::Fan, "", "Drag a fan; the long side is the blade span and the arrow shows the airflow", "LMB drag | type size | Enter commit | Esc cancel"},
+        {"Cut", icons::Cut, "K", "Drag a box or circle over bodies: the area under it is cut out of every body it touches", "LMB drag | Enter commit | Esc cancel"},
+        {"Measure", icons::Measure, "M", "Drag between two points to read length, dx, dy and angle", "LMB drag | snap applies"},
     };
     return T[t];
 }
@@ -72,6 +72,9 @@ std::string fmt(float v) {
 }
 std::string matTip(uint8_t m) {
     if (m == M_EMPTY) return "Eraser: removes cells";
+    if (m >= M_COUNT) return "";
+    static std::string cache[M_COUNT];   // the table is constant and the Materials tab asks for every chip every frame
+    if (!cache[m].empty()) return cache[m];
     const MatInfo& mi = MATS[m];
     char d[32];
     std::snprintf(d, sizeof d, "%.3g", mi.density);
@@ -82,6 +85,7 @@ std::string matTip(uint8_t m) {
     if (mi.ignT > 0.f) s += ", ignites " + fmt(mi.ignT) + " C";
     if (mi.blastR > 0.f) s += ", explosive";
     if (mi.elec > 0.f) s += ", conducts";
+    cache[m] = s;
     return s;
 }
 // a small recursive-descent evaluator: numbers, + - * /, parentheses, unary minus
@@ -327,7 +331,15 @@ void Game::clearBodies() {
     grabJoint = -1;
     dragBody = -1;
 }
+// A paused run is a live state on top of the drawing: anything that replaces the whole world (a scene, a file, New) first goes
+// back to the drawing, so the undo entry it pushes holds what the user drew and nothing is lost.
+void Game::leavePlay() {
+    if (!playing) return;
+    restoreState(snapshot);
+    playing = false; paused = false;
+}
 void Game::resetWorld() {
+    leavePlay();
     pushUndo(nullptr, "New scene");
     clearBodies();
     world.clear();
@@ -389,7 +401,7 @@ void Game::removeSelectedJoint() {
 }
 void Game::clearSelection() { sel.clear(); primary = -1; partMode = false; selJoint = -1; }
 void Game::selectBody(int id, bool add, bool part) {
-    if (id < 0) { if (!add) clearSelection(); return; }
+    if (id < 0 || id >= (int)phys.bodies.size() || !phys.bodies[id].alive) { if (!add) clearSelection(); return; }
     selJoint = -1;
     std::vector<int> add_;
     const Body& b = phys.bodies[id];
@@ -491,7 +503,11 @@ void Game::captureState(std::vector<uint8_t>& out) {
     w.pod((uint32_t)World::W); w.pod((uint32_t)World::H);
     w.pod((uint32_t)M_COUNT);   // the material table: adding or reordering materials changes what every saved cell means
     world.save(w);
+    // the grab tool's mouse joint belongs to the pointer, not to the drawing: a snapshot taken mid-grab must not keep it
+    const bool hideGrab = grabJoint >= 0 && grabJoint < (int)phys.joints.size() && phys.joints[grabJoint].alive;
+    if (hideGrab) phys.joints[grabJoint].alive = false;
     phys.save(w);
+    if (hideGrab) phys.joints[grabJoint].alive = true;
     w.pod((uint32_t)labels.size());
     for (auto& l : labels) { w.pod(l.p); w.str(l.s); }
     w.pod(bodyMat);
@@ -516,7 +532,7 @@ bool Game::restoreState(const std::vector<uint8_t>& buf) {
     uint8_t bm = r.pod<uint8_t>();
     if (!r.ok) return false;
     labels = ls;
-    bodyMat = bm;
+    if (std::count(BODY_MATS.begin(), BODY_MATS.end(), bm)) bodyMat = bm;   // a damaged file must not name a material the table lacks
     dragBody = -1; grabJoint = -1;
     pruneSelection();
     return true;
@@ -585,7 +601,7 @@ bool Game::readFile(const std::string& name) {
     std::ifstream f(saveDir() + "/" + name + ".sbot", std::ios::binary);
     if (!f) return false;
     std::vector<uint8_t> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    playing = false; paused = false;
+    leavePlay();
     pushUndo(nullptr, ("Open " + name).c_str());
     if (!restoreState(buf)) return false;
     clearSelection();
@@ -656,10 +672,10 @@ std::vector<uint8_t> Game::unpackState(const std::vector<uint8_t>& in) {
 }
 // Remember the drawing as it is NOW, just before an edit changes it. A burst of the same kind of edit (scrubbing a field,
 // painting strokes) shares one undo step. The label names the edit for the History tab.
-void Game::pushUndo(const char* key, const char* label) {
-    if (playing) return;
+bool Game::pushUndo(const char* key, const char* label) {
+    if (playing) return false;
     Uint32 now = SDL_GetTicks();
-    if (key && lastUndoKey == key && now - lastUndoTick < 1500) { lastUndoTick = now; return; }
+    if (key && lastUndoKey == key && now - lastUndoTick < 1500) { lastUndoTick = now; return false; }
     std::vector<uint8_t> raw;
     captureState(raw);
     undoStack.push_back(packState(raw));
@@ -674,6 +690,21 @@ void Game::pushUndo(const char* key, const char* label) {
     redoLabels.clear();
     lastUndoKey = key ? key : "";
     lastUndoTick = now;
+    return true;
+}
+// The press of a drag remembers the state the way pushUndo does; when nothing was pushed (the stroke merged into the previous
+// one, or the simulation is paused) a private copy is kept instead, so Esc can still put the world back without touching an
+// entry that belongs to an earlier edit.
+void Game::beginDragUndo(const char* key, const char* label) {
+    dragBackup.clear();
+    dragPushed = pushUndo(key, label);
+    dragUndoDepth = undoStack.size();
+    if (!dragPushed) captureState(dragBackup);
+}
+void Game::cancelDragUndo() {
+    if (dragPushed && undoStack.size() == dragUndoDepth) popUndo();   // nothing else was pushed since the press
+    else if (!dragBackup.empty()) restoreState(dragBackup);
+    dragPushed = false; dragBackup.clear();
 }
 void Game::popUndo() {
     if (undoStack.empty()) return;
@@ -685,6 +716,7 @@ void Game::popUndo() {
     lastUndoKey.clear();
 }
 void Game::undo() {
+    if (lmb) { cancelDrag(); return; }   // mid-drag, undo means: abandon the drag (the stack must not change under it)
     if (playing) { notify("Undo works in edit mode: press Stop first (Stop restores the drawing)"); return; }
     if (undoStack.empty()) { notify("Nothing to undo"); return; }
     std::vector<uint8_t> raw;
@@ -700,6 +732,7 @@ void Game::undo() {
     notify("Undo: " + redoLabels.back() + " (Ctrl+Y redoes)");
 }
 void Game::redo() {
+    if (lmb) { cancelDrag(); return; }
     if (playing) { notify("Redo works in edit mode"); return; }
     if (redoStack.empty()) { notify("Nothing to redo"); return; }
     std::vector<uint8_t> raw;
@@ -716,6 +749,7 @@ void Game::redo() {
 }
 // The History tab lists every undo step, then "Now", then the redo steps; clicking a row undoes or redoes up to it.
 void Game::jumpHistory(int row) {
+    if (lmb) cancelDrag();
     int now = (int)undoStack.size();
     if (row < now) { for (int i = 0; i < now - row; ++i) undo(); }
     else if (row > now) { for (int i = 0; i < row - now; ++i) redo(); }
@@ -1166,13 +1200,13 @@ void Game::updateHandleDrag() {
     const int sx = HSX[handle], sy = HSY[handle];
     if (s.shape == SHAPE_CIRCLE) {
         float r = std::max(0.5f, sx ? sx * l.x : sy * l.y);
-        r = std::max(0.5f, dimValue(0, r));
+        r = std::clamp(dimValue(0, r), 0.5f, 300.f);
         phys.reshape(handleId, s.pos, s.half, r, s.angle, s.mat, s.isStatic);
         return;
     }
-    // a typed width or height places the dragged edge where that size would put it
-    if (sx && dimTyped(0)) l.x = ctrl ? sx * dimValue(0, 0) * 0.5f : -sx * e.x + sx * dimValue(0, 0);
-    if (sy && dimTyped(sx ? 1 : 0)) { float h = dimValue(sx ? 1 : 0, 0); l.y = ctrl ? sy * h * 0.5f : -sy * e.y + sy * h; }
+    // a typed width or height (clamped to the inspector's range) places the dragged edge where that size would put it
+    if (sx && dimTyped(0)) { float w = std::clamp(dimValue(0, 0), 1.f, 600.f); l.x = ctrl ? sx * w * 0.5f : -sx * e.x + sx * w; }
+    if (sy && dimTyped(sx ? 1 : 0)) { float h = std::clamp(dimValue(sx ? 1 : 0, 0), 1.f, 600.f); l.y = ctrl ? sy * h * 0.5f : -sy * e.y + sy * h; }
     Vec2 half = e, c;   // the new half extents, and the new centre in the frame of the body as it was
     auto axis = [&](int sgn, float lp, float ext, float& h, float& cc) {
         if (!sgn) return;
@@ -1205,13 +1239,15 @@ void Game::updateMoveDrag() {
     Vec2 total = mouse - dragStart;
     if (!moving) {
         if (length(total) < 2.5f) return;
+        if (moveHit < 0 || moveHit >= (int)phys.bodies.size() || !phys.bodies[moveHit].alive) { moveArmed = false; return; }   // gone since the press
         const bool add = (SDL_GetModState() & KMOD_SHIFT) != 0;
         if (std::find(sel.begin(), sel.end(), moveHit) == sel.end()) selectBody(moveHit, add, false);
-        if (sel.empty()) return;
-        pushUndo(nullptr, "Move");
+        pruneSelection();
+        if (sel.empty()) { moveArmed = false; return; }
+        beginDragUndo(nullptr, "Move");
         moving = true;
         moveApplied = Vec2();
-        moveStart = phys.bodies[primary >= 0 && primary < (int)phys.bodies.size() && phys.bodies[primary].alive ? primary : moveHit].pos;
+        moveStart = phys.bodies[primary >= 0 ? primary : moveHit].pos;
         dimBegin(2, "X", "Y");
     }
     Vec2 target = snapActive() ? snap(moveStart + total) - moveStart : total;
@@ -1236,23 +1272,27 @@ void Game::smartSnapMove(Vec2& target) {
     const float reach = 6.f / sc();
     const float myX[3] = {lo.x, (lo.x + hi.x) * 0.5f, hi.x}, myY[3] = {lo.y, (lo.y + hi.y) * 0.5f, hi.y};
     static const char* nx[3] = {"left", "centre", "right"}, *ny[3] = {"top", "middle", "bottom"};
-    struct Cand { float dist = 1e9f, delta = 0.f; Guide g; } bx, by;   // the nearest line on each axis
+    struct Cand { float dist = 1e9f, delta = 0.f; Guide g; int who = -1; const char* line = ""; } bx, by;   // the nearest line on each axis
     for (auto& o : phys.bodies) {
         if (!o.alive || std::find(sel.begin(), sel.end(), o.id) != sel.end()) continue;
         Vec2 olo(1e9f, 1e9f), ohi(-1e9f, -1e9f);
         for (Vec2 p : bodyOutline(o)) { olo.x = std::min(olo.x, p.x); olo.y = std::min(olo.y, p.y); ohi.x = std::max(ohi.x, p.x); ohi.y = std::max(ohi.y, p.y); }
         const float ox[3] = {olo.x, (olo.x + ohi.x) * 0.5f, ohi.x}, oy[3] = {olo.y, (olo.y + ohi.y) * 0.5f, ohi.y};
-        std::string who = bodyName(o) + " " + std::to_string(o.id);
         for (int i = 0; i < 3; ++i)
             for (int k = 0; k < 3; ++k) {
                 float dx = ox[k] - myX[i], dy = oy[k] - myY[i];
-                if (std::fabs(dx) < bx.dist) bx = Cand{std::fabs(dx), dx, Guide{true, true, ox[k], std::min(olo.y, lo.y), std::max(ohi.y, hi.y), std::string(nx[k]) + " of " + who}};
-                if (std::fabs(dy) < by.dist) by = Cand{std::fabs(dy), dy, Guide{true, false, oy[k], std::min(olo.x, lo.x), std::max(ohi.x, hi.x), std::string(ny[k]) + " of " + who}};
+                if (std::fabs(dx) < bx.dist) bx = Cand{std::fabs(dx), dx, Guide{true, true, ox[k], std::min(olo.y, lo.y), std::max(ohi.y, hi.y), ""}, o.id, nx[k]};
+                if (std::fabs(dy) < by.dist) by = Cand{std::fabs(dy), dy, Guide{true, false, oy[k], std::min(olo.x, lo.x), std::max(ohi.x, hi.x), ""}, o.id, ny[k]};
             }
     }
     const bool snapX = bx.dist < reach, snapY = by.dist < reach;
-    if (snapX) { target.x += bx.delta; guide = bx.g; }
-    if (snapY) { target.y += by.delta; if (!snapX || by.dist < bx.dist) guide = by.g; }
+    Cand* use = snapX && (!snapY || bx.dist <= by.dist) ? &bx : snapY ? &by : nullptr;
+    if (snapX) target.x += bx.delta;
+    if (snapY) target.y += by.delta;
+    if (use) {   // the guide is named only for the line that won: no string per body per frame
+        guide = use->g;
+        guide.name = std::string(use->line) + " of " + bodyName(phys.bodies[use->who]) + " " + std::to_string(use->who);
+    }
 }
 
 // ---------------------------------------------------------------- the tool contract: press, drag, release / Enter, Esc
@@ -1261,8 +1301,9 @@ void Game::handleSimDown() {
     dragStart = smouse();
     moving = false; moveArmed = false;
     guide.on = false;
+    dragPushed = false; dragBackup.clear();
     switch (tool) {
-        case T_MAT: pushUndo("paint", mat == M_EMPTY ? "Erase" : ("Paint " + std::string(MATS[mat].name)).c_str()); break;
+        case T_MAT: beginDragUndo("paint", mat == M_EMPTY ? "Erase" : ("Paint " + std::string(MATS[mat].name)).c_str()); break;
         case T_BOND: clickBond(mouse); break;
         case T_PIN: case T_MOTOR: case T_AUTOMOTOR: clickJoint(mouse); break;
         case T_ROD: case T_SPRING: case T_SLIDER: {
@@ -1280,7 +1321,7 @@ void Game::handleSimDown() {
             int h = handleAt(mouse);
             if (h >= 0) {   // a press on a handle resizes or rotates; it never starts a move or a box-select
                 handle = h; handleId = handleBody(); handleStart = phys.bodies[handleId]; handlePress = mouse;
-                pushUndo(nullptr, h == H_ROT ? "Rotate" : "Resize");
+                beginDragUndo(nullptr, h == H_ROT ? "Rotate" : "Resize");
                 if (h == H_ROT) dimBegin(1, "Angle");
                 else if (handleStart.shape == SHAPE_CIRCLE) dimBegin(1, "R");
                 else if (HSX[h] && HSY[h]) dimBegin(2, "W", "H");
@@ -1310,20 +1351,23 @@ void Game::handleSimDown() {
 void Game::handleSimUp() {
     if (!lmb) return;
     Vec2 m = smouse();
+    auto live = [&](int id) { return id >= 0 && id < (int)phys.bodies.size() && phys.bodies[id].alive; };
+    if (!live(dragBody)) dragBody = -1;   // the body pressed on may have gone (deleted, or the world replaced) during the drag
     switch (tool) {
         case T_BOX: case T_FAN: case T_EMITTER: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: {
             Vec2 d = m - dragStart;
             float ang = 0.f;
+            // typed sizes are clamped to what the inspector accepts, so a stray digit cannot make a world-sized body
             if (tool == T_BOX || tool == T_FAN || tool == T_EMITTER) {
-                float w = dimValue(0, std::fabs(d.x)), h = dimValue(1, std::fabs(d.y));
+                float w = std::clamp(std::fabs(dimValue(0, std::fabs(d.x))), 0.f, 600.f), h = std::clamp(std::fabs(dimValue(1, std::fabs(d.y))), 0.f, 600.f);
                 ang = dimValue(2, 0.f);
                 m = dragStart + Vec2(d.x < 0 ? -w : w, d.y < 0 ? -h : h);
             } else if (tool == T_CIRCLE || tool == T_WHEEL) {
-                float r = dimValue(0, length(d));
+                float r = std::clamp(std::fabs(dimValue(0, length(d))), 0.f, 300.f);
                 Vec2 dir = length(d) > 1e-3f ? normalize(d) : Vec2(1, 0);
                 m = dragStart + dir * r;
             } else if (tool == T_PIPE || tool == T_HOSE) {
-                float len = dimValue(0, length(d));
+                float len = std::clamp(std::fabs(dimValue(0, length(d))), 0.f, (float)World::W);
                 if (dimTyped(1)) { pipeD = std::clamp(dimValue(1, pipeD), 3.f, 60.f); pipeWall = std::min(pipeWall, pipeD * 0.5f); }
                 Vec2 dir = length(d) > 1e-3f ? normalize(d) : Vec2(1, 0);
                 m = dragStart + dir * len;
@@ -1414,18 +1458,20 @@ void Game::commitDrag() { if (lmb) handleSimUp(); }
 bool Game::cancelDrag() {
     if (!lmb) return false;
     if (tool == T_SELECT && handle >= 0) {
-        if (handleResizes()) phys.reshape(handleId, handleStart.pos, handleStart.half, handleStart.radius, handleStart.angle, handleStart.mat, handleStart.isStatic);
-        else phys.transformGroup(handleId, handleStart.pos, handleStart.angle);
+        if (handleId >= 0 && handleId < (int)phys.bodies.size() && phys.bodies[handleId].alive) {
+            if (handleResizes()) phys.reshape(handleId, handleStart.pos, handleStart.half, handleStart.radius, handleStart.angle, handleStart.mat, handleStart.isStatic);
+            else phys.transformGroup(handleId, handleStart.pos, handleStart.angle);
+        }
         handle = -1; handleId = -1;
-        popUndo();
+        cancelDragUndo();
         phys.stampBodies();
     } else if (tool == T_SELECT && moving) {
         moveSelectionBy(-moveApplied);
         moving = false; moveArmed = false; guide.on = false;
-        popUndo();
+        cancelDragUndo();
         phys.stampBodies();
     } else if (tool == T_MAT) {
-        popUndo();
+        cancelDragUndo();
         phys.stampBodies();
     } else if (tool == T_GRAB) {
         if (grabJoint >= 0) phys.removeJoint(grabJoint);

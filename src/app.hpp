@@ -115,6 +115,11 @@ struct Game {
     size_t undoBytes = 0;
     std::string lastUndoKey;
     Uint32 lastUndoTick = 0;
+    // what the press of the drag in progress did to the undo stack, so a cancel can take exactly that back: whether it pushed an
+    // entry (and the depth after it), or, when the entry was merged into the previous one or the simulation runs, a private copy
+    bool dragPushed = false;
+    size_t dragUndoDepth = 0;
+    std::vector<uint8_t> dragBackup;
     struct Clip { std::vector<Body> bodies; std::vector<Joint> joints; Vec2 center; } clip;
     bool moving = false, moveArmed = false;
     Vec2 moveApplied;
@@ -318,6 +323,7 @@ struct Game {
     void startPlay();
     void play();
     void stopPlay();
+    void leavePlay();          // back to the drawing without a notification, before the world is replaced wholesale
     void togglePause();
     void stepFrame();
     void newFile();
@@ -333,8 +339,10 @@ struct Game {
     // ---------------------------------------------------------------- undo / redo
     static std::vector<uint8_t> packState(const std::vector<uint8_t>& in);
     static std::vector<uint8_t> unpackState(const std::vector<uint8_t>& in);
-    void pushUndo(const char* key = nullptr, const char* label = nullptr);
+    bool pushUndo(const char* key = nullptr, const char* label = nullptr);   // true when an entry was pushed (not merged, not while playing)
     void popUndo();            // a cancelled edit: put the last snapshot back and drop it from the stack
+    void beginDragUndo(const char* key, const char* label);   // the press of a drag: push, or keep a private copy for a cancel
+    void cancelDragUndo();     // a cancelled drag: take back what beginDragUndo did
     void undo();
     void redo();
     void jumpHistory(int row);
