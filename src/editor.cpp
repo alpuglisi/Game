@@ -162,7 +162,7 @@ void Game::screenshot(const char* path) {
     SDL_SaveBMP(s, path);
     SDL_FreeSurface(s);
 }
-void Game::notify(const std::string& s) { note = s; toastText = s; toastUntil = SDL_GetTicks() + 3500; ui.toast(s); }
+void Game::notify(const std::string& s) { note = s; ui.toast(s); }
 void Game::selectMaterial(uint8_t m) { tool = T_MAT; mat = m; if (m != M_EMPTY) lastPaintMat = m; rememberMaterial(m); }
 void Game::pickTool(Tool t) {   // a digit key or the Paint button: painting needs a material, not the eraser
     if (t == T_MAT && mat == M_EMPTY) mat = lastPaintMat == M_EMPTY ? (uint8_t)M_SAND : lastPaintMat;
@@ -1205,8 +1205,7 @@ void Game::updateMoveDrag() {
     Vec2 total = mouse - dragStart;
     if (!moving) {
         if (length(total) < 2.5f) return;
-        const Uint8* ks = SDL_GetKeyboardState(nullptr);
-        bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
+        const bool add = (SDL_GetModState() & KMOD_SHIFT) != 0;
         if (std::find(sel.begin(), sel.end(), moveHit) == sel.end()) selectBody(moveHit, add, false);
         if (sel.empty()) return;
         pushUndo(nullptr, "Move");
@@ -1235,27 +1234,25 @@ void Game::smartSnapMove(Vec2& target) {
     Vec2 shift = target - moveApplied;
     lo += shift; hi += shift;
     const float reach = 6.f / sc();
-    float myX[3] = {lo.x, (lo.x + hi.x) * 0.5f, hi.x}, myY[3] = {lo.y, (lo.y + hi.y) * 0.5f, hi.y};
+    const float myX[3] = {lo.x, (lo.x + hi.x) * 0.5f, hi.x}, myY[3] = {lo.y, (lo.y + hi.y) * 0.5f, hi.y};
     static const char* nx[3] = {"left", "centre", "right"}, *ny[3] = {"top", "middle", "bottom"};
-    float bestDX = reach, bestDY = reach;
-    bool gotX = false, gotY = false;
-    Guide gx, gy;
+    struct Cand { float dist = 1e9f, delta = 0.f; Guide g; } bx, by;   // the nearest line on each axis
     for (auto& o : phys.bodies) {
         if (!o.alive || std::find(sel.begin(), sel.end(), o.id) != sel.end()) continue;
         Vec2 olo(1e9f, 1e9f), ohi(-1e9f, -1e9f);
         for (Vec2 p : bodyOutline(o)) { olo.x = std::min(olo.x, p.x); olo.y = std::min(olo.y, p.y); ohi.x = std::max(ohi.x, p.x); ohi.y = std::max(ohi.y, p.y); }
-        float ox[3] = {olo.x, (olo.x + ohi.x) * 0.5f, ohi.x}, oy[3] = {olo.y, (olo.y + ohi.y) * 0.5f, ohi.y};
+        const float ox[3] = {olo.x, (olo.x + ohi.x) * 0.5f, ohi.x}, oy[3] = {olo.y, (olo.y + ohi.y) * 0.5f, ohi.y};
         std::string who = bodyName(o) + " " + std::to_string(o.id);
         for (int i = 0; i < 3; ++i)
             for (int k = 0; k < 3; ++k) {
-                float dx = std::fabs(ox[k] - myX[i]);
-                if (dx < bestDX) { bestDX = dx; gotX = true; gx = Guide{true, true, ox[k], std::min(olo.y, lo.y), std::max(ohi.y, hi.y), std::string(nx[k]) + " of " + who}; target.x += ox[k] - myX[i]; for (float& v : myX) v += ox[k] - myX[i]; }
-                float dy = std::fabs(oy[k] - myY[i]);
-                if (dy < bestDY) { bestDY = dy; gotY = true; gy = Guide{true, false, oy[k], std::min(olo.x, lo.x), std::max(ohi.x, hi.x), std::string(ny[k]) + " of " + who}; target.y += oy[k] - myY[i]; for (float& v : myY) v += oy[k] - myY[i]; }
+                float dx = ox[k] - myX[i], dy = oy[k] - myY[i];
+                if (std::fabs(dx) < bx.dist) bx = Cand{std::fabs(dx), dx, Guide{true, true, ox[k], std::min(olo.y, lo.y), std::max(ohi.y, hi.y), std::string(nx[k]) + " of " + who}};
+                if (std::fabs(dy) < by.dist) by = Cand{std::fabs(dy), dy, Guide{true, false, oy[k], std::min(olo.x, lo.x), std::max(ohi.x, hi.x), std::string(ny[k]) + " of " + who}};
             }
     }
-    if (gotX) guide = gx;
-    if (gotY && (!gotX || bestDY < bestDX)) guide = gy;
+    const bool snapX = bx.dist < reach, snapY = by.dist < reach;
+    if (snapX) { target.x += bx.delta; guide = bx.g; }
+    if (snapY) { target.y += by.delta; if (!snapX || by.dist < bx.dist) guide = by.g; }
 }
 
 // ---------------------------------------------------------------- the tool contract: press, drag, release / Enter, Esc
@@ -1337,9 +1334,8 @@ void Game::handleSimUp() {
         }
         case T_CUT: applyCutShape(dragStart, m); break;
         case T_SELECT: {
-            const Uint8* ks = SDL_GetKeyboardState(nullptr);
-            bool add = ks[SDL_SCANCODE_LSHIFT] || ks[SDL_SCANCODE_RSHIFT];
-            bool part = ks[SDL_SCANCODE_LCTRL] || ks[SDL_SCANCODE_RCTRL];
+            const Uint16 mod = SDL_GetModState();
+            const bool add = (mod & KMOD_SHIFT) != 0, part = (mod & KMOD_CTRL) != 0;
             if (handle >= 0) {   // end of a resize or rotation: the cover cells catch up
                 updateHandleDrag();
                 handle = -1; handleId = -1;

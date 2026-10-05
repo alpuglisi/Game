@@ -8,6 +8,7 @@ const char* TAB_NAMES[4] = {"Inspector", "Materials", "Scene", "History"};
 const icons::Id TAB_ICONS[4] = {icons::Settings, icons::Layers, icons::Scenes, icons::Undo};
 std::string lower(std::string s) { for (char& c : s) c = (char)std::tolower((unsigned char)c); return s; }
 bool matches(const std::string& query, const std::string& text) { return query.empty() || ui::fuzzyScore(query, text) > 0; }
+int fontH() { return font::height(ui::theme().face, ui::theme().fontScale); }   // the interface text height, for centring
 }  // namespace
 
 // ---------------------------------------------------------------- layout
@@ -15,7 +16,10 @@ Layout computeLayout(int winW, int winH, bool stripCollapsed) {
     Layout L;
     L.winW = std::max(1024, winW); L.winH = std::max(640, winH);
     const int topH = 40, ctxH = 32, statusH = 28, tabsH = 28;
-    const int stripW = stripCollapsed ? 44 : 96;
+    // the strip is 96 px: two 44 px buttons; when the window is too short for every tool it scrolls, and the scrollbar lane is added
+    const int stripNeeds = 5 * ui::theme().sectionH + 14 * (40 + ui::theme().gap) + 5 * ui::theme().gap + 8;
+    const bool stripScrolls = L.winH - topH - statusH < stripNeeds;
+    const int stripW = stripCollapsed ? 44 : (stripScrolls ? 96 + ui::theme().scrollbarW : 96);
     L.dockCollapsed = L.winW < 1200;
     const int dockW = L.dockCollapsed ? 36 : 320;
     L.top = SDL_Rect{0, 0, L.winW, topH};
@@ -191,85 +195,110 @@ void Game::drawChrome() {
 #define CMD_TOGGLE(id, icon, on) \
     do { const ui::Command* c_ = cmd(id); if (c_ && ui.iconButton(id, icon, c_->description.c_str(), true, on, c_->shortcut.empty() ? nullptr : c_->shortcut.c_str())) runCommand(id); } while (0)
 
+// A bar laid out as fixed-width slots from the left (and a group aligned to the right end): each slot is a small panel
+// holding one widget, so a bar may hold any number of controls and a slot's width is exactly what it asks for.
+struct Slots {
+    ui::Context& ui;
+    SDL_Rect r;
+    int x, h, n = 0;
+    Slots(ui::Context& u, SDL_Rect rect, int height) : ui(u), r(rect), x(rect.x), h(height) {}
+    void gap(int w) { x += w; }
+    template <class F> void slot(int w, F f) {
+        SDL_Rect s{x - 1, r.y + (r.h - h) / 2 - 1, w + 2, h + 2};
+        ui.pushId(n++);
+        ui.beginPanel("slot", s, false, false, 1);
+        ui.row(1, h);
+        f();
+        ui.endPanel();
+        ui.popId();
+        x += w + ui::theme().gap;
+    }
+    void from(int startX) { x = startX; }
+};
+
 void Game::drawTopBar() {
     const ui::Theme& th = ui::theme();
-    const int b = th.iconButton, g = th.gap;
+    const int b = th.iconButton, g = th.gap, sep = 8;
     ui.beginPanel("top", L.top, false, true, 6);
-    const int leftW = 7 * b + 6 * g + 2 * 12, centreW = 4 * b + 3 * g + 96 + 100 + 2 * 8, rightW = 10 * b + 9 * g + 56 + 4 * 12;
     SDL_Rect inner = ui.panelRect();
-    SDL_Rect left{inner.x, inner.y, leftW, inner.h};
-    SDL_Rect centre{L.winW / 2 - centreW / 2, inner.y, centreW, inner.h};
-    SDL_Rect right{inner.x + inner.w - rightW, inner.y, rightW, inner.h};
-    // files and undo
-    ui.beginPanel("topL", left, false, false, 0);
-    ui.row({(float)b, (float)b, (float)b, (float)b, 12.f, (float)b, (float)b, 12.f, (float)b}, b);
-    CMD_BUTTON("file.new", icons::New); CMD_BUTTON("file.open", icons::Open); CMD_BUTTON("file.save", icons::Save); CMD_BUTTON("file.saveas", icons::SaveAs);
-    ui.label("");
-    CMD_BUTTON("edit.undo", icons::Undo); CMD_BUTTON("edit.redo", icons::Redo);
-    ui.label("");
-    if (ui.iconButton("view.strip", stripCollapsed ? icons::ArrowRight : icons::ArrowLeft, stripCollapsed ? "Show the tool labels" : "Collapse the tool strip to icons", true, false)) stripCollapsed = !stripCollapsed;
-    ui.endPanel();
-    // transport, dead centre, with the speed and the mode badge
-    ui.beginPanel("topC", centre, false, false, 0);
-    ui.row({(float)b, (float)b, (float)b, (float)b, 8.f, 96.f, 8.f, 100.f}, b);
-    if (ui.iconButton("sim.play", icons::Play, "Run the simulation (the drawing is snapshot first)", true, playing && !paused, "Space")) play();
-    if (ui.iconButton("sim.pause", icons::Pause, "Freeze / resume while playing", playing, playing && paused, "Space")) togglePause();
-    CMD_BUTTON("sim.step", icons::Step);
-    CMD_BUTTON("sim.stop", icons::Stop);
-    ui.label("");
-    if (ui.dragFloat("speed", "", speed, 0.1f, 0.1f, 2.f, "x", 1, "Simulation speed, 0.1x to 2x")) speed = std::clamp(speed, 0.1f, 2.f);
-    ui.label("");
-    {
+    Slots s(ui, inner, b);
+    // files and undo, from the left
+    s.slot(b, [&] { CMD_BUTTON("file.new", icons::New); });
+    s.slot(b, [&] { CMD_BUTTON("file.open", icons::Open); });
+    s.slot(b, [&] { CMD_BUTTON("file.save", icons::Save); });
+    s.slot(b, [&] { CMD_BUTTON("file.saveas", icons::SaveAs); });
+    s.gap(sep);
+    s.slot(b, [&] { CMD_BUTTON("edit.undo", icons::Undo); });
+    s.slot(b, [&] { CMD_BUTTON("edit.redo", icons::Redo); });
+    s.gap(sep);
+    s.slot(b, [&] {
+        if (ui.iconButton("view.strip", stripCollapsed ? icons::ArrowRight : icons::ArrowLeft, stripCollapsed ? "Show the tool labels" : "Collapse the tool strip to icons", true, false))
+            stripCollapsed = !stripCollapsed;
+    });
+    const int leftEnd = s.x;
+    // views, zoom, focus, scenes, search and help, from the right
+    const int zoomW = 52, rightW = 10 * b + 9 * g + zoomW + 3 * sep;
+    const int rightStart = inner.x + inner.w - rightW;
+    // the transport dead centre, with the speed field and the mode badge; shifted only when the window is too narrow
+    const int speedW = 80, badgeW = 104, centreW = 4 * b + 3 * g + 2 * sep + speedW + badgeW + 2 * g;
+    int cx = L.winW / 2 - centreW / 2;
+    cx = std::min(cx, rightStart - centreW - sep);
+    cx = std::max(cx, leftEnd + sep);
+    s.from(cx);
+    s.slot(b, [&] { if (ui.iconButton("sim.play", icons::Play, "Run the simulation (the drawing is snapshot first)", true, playing && !paused, "Space")) play(); });
+    s.slot(b, [&] { if (ui.iconButton("sim.pause", icons::Pause, "Freeze / resume while playing", playing, playing && paused, "Space")) togglePause(); });
+    s.slot(b, [&] { CMD_BUTTON("sim.step", icons::Step); });
+    s.slot(b, [&] { CMD_BUTTON("sim.stop", icons::Stop); });
+    s.gap(sep);
+    s.slot(speedW, [&] { if (ui.dragFloat("speed", "", speed, 0.1f, 0.1f, 2.f, "x", 1, "Simulation speed, 0.1x to 2x")) speed = std::clamp(speed, 0.1f, 2.f); });
+    s.gap(sep);
+    s.slot(badgeW, [&] {
         SDL_Rect r = ui.next(b);
         uint32_t col = playing ? (paused ? th.warning : th.success) : th.border;
         const char* txt = playing ? (paused ? "PAUSED" : "RUNNING") : "EDITING";
         ui.fillRect(r, th.surface2, 255, th.radius);
         ui.strokeRect(r, col, 255, th.radius);
-        SDL_Rect dot{r.x + 8, r.y + r.h / 2 - 4, 8, 8};
-        ui.fillRect(dot, col, 255, 4);
-        ui.text(txt, r.x + 22, r.y + (r.h - ui.lineHeight()) / 2, playing ? (paused ? ui::TextStyle::Warning : ui::TextStyle::Accent) : ui::TextStyle::Dim);
-    }
-    ui.endPanel();
-    // views, zoom, focus, scenes, search, help
-    ui.beginPanel("topR", right, false, false, 0);
-    ui.row({(float)b, (float)b, (float)b, (float)b, 12.f, (float)b, 56.f, (float)b, 12.f, (float)b, 12.f, (float)b, (float)b, 12.f, (float)b}, b);
-    CMD_TOGGLE("view.heat", icons::Heat, heatView); CMD_TOGGLE("view.pressure", icons::Pressure, pressureView);
-    CMD_TOGGLE("view.electric", icons::Electric, elecView); CMD_TOGGLE("view.grid", icons::Grid, gridOn);
-    ui.label("");
-    CMD_BUTTON("view.zoomout", icons::ZoomOut);
-    if (ui.button("zoomlabel", fmt(zoom) + "x", icons::None, "The zoom. Click to reset to 1x", true, zoom > 1.01f, "Ctrl+0")) zoomReset();
-    CMD_BUTTON("view.zoomin", icons::ZoomIn);
-    ui.label("");
-    CMD_TOGGLE("view.focus", icons::Focus, focusBody >= 0);
-    ui.label("");
-    CMD_TOGGLE("file.scenes", icons::Scenes, scenesOpen);
-    CMD_BUTTON("view.palette", icons::Search);
-    ui.label("");
-    CMD_TOGGLE("view.help", icons::Help, cheatOpen);
-    ui.endPanel();
+        ui.fillRect(SDL_Rect{r.x + 8, r.y + r.h / 2 - 4, 8, 8}, col, 255, 4);
+        ui.text(txt, r.x + 22, r.y + (r.h - fontH()) / 2, playing ? (paused ? ui::TextStyle::Warning : ui::TextStyle::Accent) : ui::TextStyle::Dim);
+    });
+    s.from(rightStart);
+    s.slot(b, [&] { CMD_TOGGLE("view.heat", icons::Heat, heatView); });
+    s.slot(b, [&] { CMD_TOGGLE("view.pressure", icons::Pressure, pressureView); });
+    s.slot(b, [&] { CMD_TOGGLE("view.electric", icons::Electric, elecView); });
+    s.slot(b, [&] { CMD_TOGGLE("view.grid", icons::Grid, gridOn); });
+    s.gap(sep);
+    s.slot(b, [&] { CMD_BUTTON("view.zoomout", icons::ZoomOut); });
+    s.slot(zoomW, [&] { if (ui.button("zoomlabel", fmt(zoom) + "x", icons::None, "The zoom. Click to reset to 1x", true, zoom > 1.01f, "Ctrl+0")) zoomReset(); });
+    s.slot(b, [&] { CMD_BUTTON("view.zoomin", icons::ZoomIn); });
+    s.gap(sep);
+    s.slot(b, [&] { CMD_TOGGLE("view.focus", icons::Focus, focusBody >= 0); });
+    s.gap(sep);
+    s.slot(b, [&] { CMD_TOGGLE("file.scenes", icons::Scenes, scenesOpen); });
+    s.slot(b, [&] { CMD_BUTTON("view.palette", icons::Search); });
+    s.slot(b, [&] { CMD_TOGGLE("view.help", icons::Help, cheatOpen); });
     ui.endPanel();
 }
 
 // The tool strip: two columns of icon + label buttons under small group headers; collapsed, one column of icons.
 void Game::drawToolStrip() {
-    struct Item { const char* id; Tool tool; const char* action; };   // a tool, or an action command when tool < 0
+    struct Item { const char* id; Tool tool; const char* label; bool erase; };   // a tool (tool < T_COUNT) or an action command
     struct Group { const char* name; std::vector<Item> items; };
     static const std::vector<Group> groups = {
-        {"TOOLS", {{"tool.Select", T_SELECT, nullptr}, {"tool.Grab", T_GRAB, nullptr}, {"tool.Measure", T_MEASURE, nullptr}}},
-        {"CELLS", {{"tool.Paint", T_MAT, nullptr}, {"tool.Erase", T_MAT, "erase"}}},
-        {"PARTS", {{"tool.Box", T_BOX, nullptr}, {"tool.Circle", T_CIRCLE, nullptr}, {"tool.Wheel", T_WHEEL, nullptr}, {"tool.Rocket", T_ROCKET, nullptr},
-                   {"tool.Pipe", T_PIPE, nullptr}, {"tool.Hose", T_HOSE, nullptr}, {"tool.Fan", T_FAN, nullptr}, {"tool.Emitter", T_EMITTER, nullptr}}},
-        {"JOINTS", {{"tool.Pin", T_PIN, nullptr}, {"tool.Motor", T_MOTOR, nullptr}, {"tool.Spinner", T_AUTOMOTOR, nullptr}, {"tool.Rod", T_ROD, nullptr},
-                    {"tool.Spring", T_SPRING, nullptr}, {"tool.Slider", T_SLIDER, nullptr}, {"tool.Bond", T_BOND, nullptr}}},
-        {"MODIFY", {{"tool.Cut", T_CUT, nullptr}, {"edit.scale", T_COUNT, "act"}, {"edit.group", T_COUNT, "act"}, {"edit.ungroup", T_COUNT, "act"},
-                    {"edit.fliph", T_COUNT, "act"}, {"edit.flipv", T_COUNT, "act"}, {"edit.duplicate", T_COUNT, "act"}, {"edit.delete", T_COUNT, "act"}}},
+        {"TOOLS", {{"tool.Select", T_SELECT, "Select", false}, {"tool.Grab", T_GRAB, "Grab", false}, {"tool.Measure", T_MEASURE, "Measure", false}}},
+        {"CELLS", {{"tool.Paint", T_MAT, "Paint", false}, {"tool.Erase", T_MAT, "Erase", true}}},
+        {"PARTS", {{"tool.Box", T_BOX, "Box", false}, {"tool.Circle", T_CIRCLE, "Circle", false}, {"tool.Wheel", T_WHEEL, "Wheel", false}, {"tool.Rocket", T_ROCKET, "Rocket", false},
+                   {"tool.Pipe", T_PIPE, "Pipe", false}, {"tool.Hose", T_HOSE, "Hose", false}, {"tool.Fan", T_FAN, "Fan", false}, {"tool.Emitter", T_EMITTER, "Emitter", false}}},
+        {"JOINTS", {{"tool.Pin", T_PIN, "Pin", false}, {"tool.Motor", T_MOTOR, "Motor", false}, {"tool.Spinner", T_AUTOMOTOR, "Spinner", false}, {"tool.Rod", T_ROD, "Rod", false},
+                    {"tool.Spring", T_SPRING, "Spring", false}, {"tool.Slider", T_SLIDER, "Slider", false}, {"tool.Bond", T_BOND, "Bond", false}}},
+        {"MODIFY", {{"tool.Cut", T_CUT, "Cut", false}, {"edit.scale", T_COUNT, "Scale", false}, {"edit.group", T_COUNT, "Group", false}, {"edit.ungroup", T_COUNT, "Ungroup", false},
+                    {"edit.fliph", T_COUNT, "Flip H", false}, {"edit.flipv", T_COUNT, "Flip V", false}, {"edit.duplicate", T_COUNT, "Dupl.", false}, {"edit.delete", T_COUNT, "Delete", false}}},
     };
     const ui::Theme& th = ui::theme();
     ui.beginPanel("strip", L.strip, true, true, 2);
     for (auto& grp : groups) {
         if (!stripCollapsed) {
             SDL_Rect r = ui.next(th.sectionH);
-            ui.text(grp.name, r.x + 4, r.y + (r.h - ui.lineHeight()) / 2, ui::TextStyle::Section);
+            ui.text(grp.name, r.x + 4, r.y + (r.h - fontH()) / 2, ui::TextStyle::Section);
         } else ui.separator();
         const int per = stripCollapsed ? 1 : 2;
         for (size_t i = 0; i < grp.items.size(); i += per) {
@@ -279,12 +308,11 @@ void Game::drawToolStrip() {
                 const Item& it = grp.items[i + k];
                 const ui::Command* c = cmd(it.id);
                 if (!c) { ui.label(""); continue; }
-                const bool isErase = it.action && !std::strcmp(it.action, "erase");
-                const bool active = it.tool < T_COUNT && tool == it.tool && (it.tool != T_MAT || (isErase == (mat == M_EMPTY)));
+                const bool active = it.tool < T_COUNT && tool == it.tool && (it.tool != T_MAT || (it.erase == (mat == M_EMPTY)));
                 const bool enabled = !c->enabled || c->enabled();
                 const char* sc = c->shortcut.empty() ? nullptr : c->shortcut.c_str();
                 bool hit = stripCollapsed ? ui.iconButton(it.id, c->icon, c->description.c_str(), enabled, active, sc)
-                                          : ui.toolButton(it.id, c->icon, c->name == "Delete tool" ? "Delete" : c->name, active, c->description.c_str(), sc);
+                                          : ui.toolButton(it.id, c->icon, it.label, active, c->description.c_str(), sc);
                 if (hit) runCommand(it.id);
             }
         }
@@ -292,13 +320,13 @@ void Game::drawToolStrip() {
     ui.endPanel();
 }
 
-// a material chip: the swatch and the name; clicking it opens the Materials tab
+// a material chip: the swatch; clicking it opens the Materials tab
 void Game::materialChip(const char* id, uint8_t m, bool paint, const char* tip) {
-    std::vector<ui::SwatchItem> one = {{m == M_EMPTY ? 0xff5050u : MATS[m].color, m == M_EMPTY ? "Eraser" : MATS[m].name, matTip(m)}};
+    std::vector<ui::SwatchItem> one = {{m == M_EMPTY ? 0xff5050u : MATS[m].color, m == M_EMPTY ? "Eraser" : MATS[m].name, tip ? tip : matTip(m)}};
     ui.pushId(id);
     if (ui.swatchGrid("chip", one, 0, 24) >= 0) { dockTab = 1; if (L.dockCollapsed) dockFlyout = true; matSearch.clear(); }
     ui.popId();
-    (void)paint; (void)tip;
+    (void)paint;
 }
 // a body-material picker: a search field over the body materials and the matching swatches
 void Game::bodyMaterialPicker(const char* id, std::string& search, uint8_t current, const std::function<void(uint8_t)>& pick) {
@@ -315,7 +343,7 @@ void Game::bodyMaterialPicker(const char* id, std::string& search, uint8_t curre
     }
     int hit = ui.swatchGrid("grid", items, cur, 26, false);
     if (hit >= 0) pick(ids[hit]);
-    ui.keyValue("Material", std::string(MATS[current].name) + ", density " + fmt(MATS[current].density));
+    ui.keyValue("Material", MATS[current].name);
     ui.popId();
 }
 void Game::rememberMaterial(uint8_t m) {
@@ -324,146 +352,116 @@ void Game::rememberMaterial(uint8_t m) {
     if (recentMats.size() > 8) recentMats.resize(8);
 }
 
-// The context bar: the options of the active tool, the snap controls at the right end.
+// The context bar: the options of the active tool from the left, the snap controls at the right end.
 void Game::drawContextBar() {
     const ui::Theme& th = ui::theme();
-    const float B = (float)th.iconButton;
+    const int B = th.iconButton, h = th.rowH;
     ui.beginPanel("ctx", L.ctx, false, true, 2);
-    const int innerW = ui.panelRect().w;
-    const std::vector<float> snapCols = {96.f, 150.f, 100.f};   // snap toggle, the step, the Ctrl hint
-    float snapW = 0; for (float w : snapCols) snapW += w + th.gap;
-    auto rowFor = [&](std::vector<float> cols) {
-        float used = 0; for (float w : cols) used += w + th.gap;
-        cols.push_back(std::max(8.f, (float)innerW - used - snapW));   // the spacer
-        cols.insert(cols.end(), snapCols.begin(), snapCols.end());
-        ui.row(cols, th.rowH);
-    };
-    auto snapControls = [&] {
-        ui.label("");
-        if (ui.toggle("snap", "Snap", snapOn, "Grid snap: drawn shapes, dropped bodies and dragged edges land on the grid")) {}
-        int stepIdx = 0; for (int i = 0; i < 4; ++i) if (SNAP_STEPS[i] == snapStep) stepIdx = i;
-        int ns = ui.segmented("snapstep", {"1", "2", "5", "10"}, stepIdx, "The grid step in cells");
-        if (ns != stepIdx) { snapStep = SNAP_STEPS[ns]; snapOn = true; }
-        ui.label("Ctrl inverts", ui::TextStyle::Dim);
-    };
+    SDL_Rect inner = ui.panelRect();
+    Slots s(ui, inner, h);
+    auto chip = [&](const char* tip) { s.slot(24, [&] { materialChip("chip", bodyMat, false, tip); }); s.slot(std::max(60, ui.textWidth(MATS[bodyMat].name) + 4), [&] { ui.label(MATS[bodyMat].name); }); };
+    auto fixedToggle = [&] { s.slot(108, [&] { ui.toggle("fixed", "Fixed", anchored, "New bodies stay where they are (T)"); }); };
     switch (tool) {
         case T_MAT:
             if (mat == M_EMPTY) {
-                rowFor({150.f});
-                if (ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])")) {}
+                s.slot(150, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
             } else {
-                rowFor({30.f, 120.f, 150.f, 110.f, 120.f});
-                materialChip("paintchip", mat, true, "The paint material: click for the Materials tab");
-                ui.label(MATS[mat].name);
-                if (ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])")) {}
-                ui.toggle("replace", "Replace", paintReplace, "Paint over cells that are already there");
-                if (mat == M_BATT_POS || mat == M_BATT_NEG) {
-                    if (ui.button("batt", fmt(world.battV) + "V " + fmt(world.battA) + "A", icons::Electric, "The volts and amps stamped into battery cells: set them in the Inspector")) { dockTab = 0; clearSelection(); }
-                } else if (mat == M_SOURCE) {
-                    if (ui.button("supply", std::string("Emits ") + MATS[payload].name, icons::Emitter, "What fuel supply cells emit, and how dense: set them in the Inspector")) { dockTab = 0; clearSelection(); }
-                } else ui.label("");
+                s.slot(24, [&] { materialChip("paintchip", mat, true, "The paint material: click for the Materials tab"); });
+                s.slot(std::max(60, ui.textWidth(MATS[mat].name) + 4), [&] { ui.label(MATS[mat].name); });
+                s.slot(150, [&] { ui.dragInt("brush", "Brush", brush, 1, 1, 24, "", "Brush radius in cells ([ and ])"); });
+                s.slot(136, [&] { ui.toggle("replace", "Replace", paintReplace, "Paint over cells that are already there"); });
+                if (mat == M_BATT_POS || mat == M_BATT_NEG)
+                    s.slot(150, [&] { if (ui.button("batt", fmt(world.battV) + "V " + fmt(world.battA) + "A", icons::Electric, "The volts and amps stamped into battery cells you paint: set them in the Inspector (World)")) { dockTab = 0; clearSelection(); } });
+                else if (mat == M_SOURCE)
+                    s.slot(190, [&] { if (ui.button("supply", std::string("Emits ") + MATS[payload].name, icons::Emitter, "What fuel supply cells emit, and how dense: set them in the Inspector (World)")) { dockTab = 0; clearSelection(); } });
             }
-            snapControls();
             break;
-        case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET: case T_PIPE: case T_HOSE: {
-            const bool pipe = tool == T_PIPE || tool == T_HOSE;
-            if (pipe) {
-                rowFor({30.f, 110.f, 90.f, 150.f, 130.f, 130.f});
-                materialChip("bodychip", bodyMat, false, "The material of new bodies");
-                ui.label(MATS[bodyMat].name);
-                ui.toggle("fixed", "Fixed", anchored, "New bodies stay where they are (T)");
-                if (ui.dragFloat("pipeD", "Diameter", pipeD, 1.f, 3.f, 60.f, "", 1, "Outer diameter in cells (Shift+wheel too)")) pipeWall = std::min(pipeWall, pipeD * 0.5f);
-                if (ui.dragFloat("pipeWall", "Wall", pipeWall, 0.5f, 0.5f, 30.f, "", 1, "Wall thickness in cells")) pipeWall = std::min(pipeWall, pipeD * 0.5f);
-                if (tool == T_HOSE) { if (ui.dragInt("segs", "Segments", hoseSegs, 1, 0, 60, "", "Hinged segments (0 = automatic)")) {} }
-                else ui.label("");
-            } else {
-                rowFor({30.f, 110.f, 90.f, 300.f});
-                materialChip("bodychip", bodyMat, false, "The material of new bodies");
-                ui.label(MATS[bodyMat].name);
-                ui.toggle("fixed", "Fixed", anchored, "New bodies stay where they are (T)");
-                ui.label(tool == T_CIRCLE || tool == T_WHEEL ? "Drag, or type the radius, Enter" : tool == T_ROCKET ? "Drag to point it" : "Drag, or type W Tab H Tab angle, Enter", ui::TextStyle::Dim);
-            }
-            snapControls();
+        case T_BOX: case T_CIRCLE: case T_WHEEL: case T_ROCKET:
+            chip("The material of new bodies");
+            fixedToggle();
+            s.slot(360, [&] { ui.label(tool == T_CIRCLE || tool == T_WHEEL ? "Drag, or type the radius and press Enter" : tool == T_ROCKET ? "Drag to point it" : "Drag, or type W Tab H Tab angle, then Enter", ui::TextStyle::Dim); });
             break;
-        }
+        case T_PIPE: case T_HOSE:
+            chip("The material of new pipes");
+            fixedToggle();
+            s.slot(200, [&] { if (ui.dragFloat("pipeD", "Diameter", pipeD, 1.f, 3.f, 60.f, "", 1, "Outer diameter in cells (Shift+wheel too)")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
+            s.slot(130, [&] { if (ui.dragFloat("pipeWall", "Wall", pipeWall, 0.5f, 0.5f, 30.f, "", 1, "Wall thickness in cells")) pipeWall = std::min(pipeWall, pipeD * 0.5f); });
+            if (tool == T_HOSE) s.slot(170, [&] { ui.dragInt("segs", "Segments", hoseSegs, 1, 0, 60, "", "Hinged segments (0 = automatic)"); });
+            break;
         case T_FAN:
-            rowFor({30.f, 110.f, 90.f, 160.f, 150.f});
-            materialChip("bodychip", bodyMat, false, "The material of new fans");
-            ui.label(MATS[bodyMat].name);
-            ui.toggle("fixed", "Fixed", anchored, "New bodies stay where they are (T)");
-            if (ui.dragFloat("fanS", "Strength", lastFan, 5.f, 5.f, 300.f, "/s", 0, "Airflow of new fans in cells per second")) {}
-            { int m = ui.segmented("fanmode", {"Blow", "Vacuum"}, fanVacuumDefault ? 1 : 0, "Blow draws ambient air in; vacuum only pulls the gas that is there"); fanVacuumDefault = m == 1; }
-            snapControls();
+            chip("The material of new fans");
+            fixedToggle();
+            s.slot(180, [&] { ui.dragFloat("fanS", "Strength", lastFan, 5.f, 5.f, 300.f, "/s", 0, "Airflow of new fans in cells per second"); });
+            s.slot(150, [&] { int m = ui.segmented("fanmode", {"Blow", "Vacuum"}, fanVacuumDefault ? 1 : 0, "Blow draws ambient air in; vacuum only pulls the gas that is there"); fanVacuumDefault = m == 1; });
             break;
         case T_EMITTER: {
-            rowFor({30.f, 110.f, 90.f, 180.f, 140.f, 220.f});
-            materialChip("bodychip", bodyMat, false, "The material of the emitter's block");
-            ui.label(MATS[bodyMat].name);
-            ui.toggle("fixed", "Fixed", anchored, "New bodies stay where they are (T)");
-            std::vector<std::string> names; int cur = 0;
-            for (size_t i = 0; i < EMIT_MATS.size(); ++i) { names.push_back(MATS[EMIT_MATS[i]].name); if (EMIT_MATS[i] == payload) cur = (int)i; }
-            if (ui.dropdown("emits", "Emits", names, cur, "What new emitters produce")) payload = EMIT_MATS[cur];
-            if (ui.dragFloat("rate", "Rate", lastRate, 5.f, 5.f, 1000.f, "/s", 0, "Cells per second")) {}
-            int face = ui.segmented("face", {"All", "+X", "-X", "+Y", "-Y"}, emitFace, "The outlet side, in the emitter's own frame");
-            emitFace = (uint8_t)face;
-            snapControls();
+            chip("The material of the emitter's block");
+            fixedToggle();
+            s.slot(190, [&] {
+                std::vector<std::string> names; int cur = 0;
+                for (size_t i = 0; i < EMIT_MATS.size(); ++i) { names.push_back(MATS[EMIT_MATS[i]].name); if (EMIT_MATS[i] == payload) cur = (int)i; }
+                if (ui.dropdown("emits", "Emits", names, cur, "What new emitters produce")) payload = EMIT_MATS[cur];
+            });
+            s.slot(130, [&] { ui.dragFloat("rate", "Rate", lastRate, 5.f, 5.f, 1000.f, "/s", 0, "Cells per second"); });
+            s.slot(190, [&] { emitFace = (uint8_t)ui.segmented("face", {"All", "+X", "-X", "+Y", "-Y"}, emitFace, "The outlet side, in the emitter's own frame"); });
             break;
         }
         case T_SPRING:
-            rowFor({170.f, 170.f});
-            if (ui.dragFloat("springF", "Stiffness", springFreq, 0.5f, 0.2f, 60.f, "/s", 1, "Bounces per second of new springs: higher is stiffer")) {}
-            if (ui.dragFloat("springD", "Damping", springDamp, 0.05f, 0.f, 2.f, "", 2, "0 bouncy, 1 dead")) {}
-            snapControls();
+            s.slot(190, [&] { ui.dragFloat("springF", "Stiffness", springFreq, 0.5f, 0.2f, 60.f, "/s", 1, "Bounces per second of new springs: higher is stiffer"); });
+            s.slot(170, [&] { ui.dragFloat("springD", "Damping", springDamp, 0.05f, 0.f, 2.f, "", 2, "0 bouncy, 1 dead"); });
             break;
-        case T_BOND: {
-            rowFor({180.f, 170.f, 170.f});
-            std::vector<std::string> names(BOND_NAMES, BOND_NAMES + 4);
-            int bt = bondType;
-            if (ui.dropdown("bondpreset", "Preset", names, bt, "Paraffin melts at 55 C, solder 190, epoxy 260; a shear pin never melts but snaps")) { bondType = bt; bondT = BOND_TEMP[bt]; bondG = BOND_G[bt]; }
-            if (ui.dragFloat("bondT", "Melts at", bondT, 5.f, -50.f, 5000.f, "C", 0, "Temperature at which the bond gives way")) {}
-            if (ui.dragFloat("bondG", "Holds", bondG, 1.f, 1.f, 1000.f, "x", 0, "How many times the weight it carries the bond can hold")) {}
-            snapControls();
+        case T_BOND:
+            s.slot(190, [&] {
+                std::vector<std::string> names(BOND_NAMES, BOND_NAMES + 4);
+                int bt = bondType;
+                if (ui.dropdown("bondpreset", "Preset", names, bt, "Paraffin melts at 55 C, solder 190, epoxy 260; a shear pin never melts but snaps")) { bondType = bt; bondT = BOND_TEMP[bt]; bondG = BOND_G[bt]; }
+            });
+            s.slot(180, [&] { ui.dragFloat("bondT", "Melts at", bondT, 5.f, -50.f, 5000.f, "C", 0, "Temperature at which the bond gives way"); });
+            s.slot(150, [&] { ui.dragFloat("bondG", "Holds", bondG, 1.f, 1.f, 1000.f, "x", 0, "How many times the weight it carries the bond can hold"); });
             break;
-        }
-        case T_CUT: {
-            rowFor({150.f, 130.f, 110.f});
-            int shape = ui.segmented("cutshape", {"Box", "Circle"}, cutCircle ? 1 : 0, "The shape cut out of the bodies it covers");
-            cutCircle = shape == 1;
-            ui.toggle("keep", "Keep cutter", keepCutter, "Subtract keeps the red body, for example to scale it into a plug");
-            if (ui.button("subtract", "Subtract", icons::Subtract, tipOf("edit.subtract").c_str(), sel.size() >= 2)) cutSelection();
-            snapControls();
+        case T_CUT:
+            s.slot(150, [&] { cutCircle = ui.segmented("cutshape", {"Box", "Circle"}, cutCircle ? 1 : 0, "The shape cut out of the bodies it covers") == 1; });
+            s.slot(180, [&] { ui.toggle("keep", "Keep cutter", keepCutter, "Subtract keeps the red body, for example to scale it into a plug"); });
+            s.slot(140, [&] { if (ui.button("subtract", "Subtract", icons::Subtract, tipOf("edit.subtract").c_str(), sel.size() >= 2)) cutSelection(); });
             break;
-        }
         case T_SELECT: {
-            rowFor({B, B, B, B, B, B, 12.f, B, B, 12.f, 230.f});
             struct Al { const char* id; icons::Id icon; const char* tip; int how; };
             static const Al als[6] = {{"al0", icons::ArrowLeft, "Align left edges", 0}, {"al1", icons::Dot, "Align centres", 1}, {"al2", icons::ArrowRight, "Align right edges", 2},
                                       {"al3", icons::ArrowUp, "Align top edges", 3}, {"al4", icons::Minus, "Align middles", 4}, {"al5", icons::ArrowDown, "Align bottom edges", 5}};
-            for (auto& a : als) if (ui.iconButton(a.id, a.icon, a.tip, sel.size() >= 2)) alignSelection(a.how);
-            ui.label("");
-            if (ui.iconButton("dh", icons::FlipH, "Distribute evenly left to right", sel.size() >= 3)) distributeSelection(true);
-            if (ui.iconButton("dv", icons::FlipV, "Distribute evenly top to bottom", sel.size() >= 3)) distributeSelection(false);
-            ui.label("");
-            selFilter = ui.segmented("filter", {"All", "Bodies", "Joints"}, selFilter, "What clicks and box-selects pick");
-            snapControls();
+            for (auto& a : als) s.slot(B, [&] { if (ui.iconButton(a.id, a.icon, a.tip, sel.size() >= 2)) alignSelection(a.how); });
+            s.gap(8);
+            s.slot(B, [&] { if (ui.iconButton("dh", icons::FlipH, "Distribute evenly left to right", sel.size() >= 3)) distributeSelection(true); });
+            s.slot(B, [&] { if (ui.iconButton("dv", icons::FlipV, "Distribute evenly top to bottom", sel.size() >= 3)) distributeSelection(false); });
+            s.gap(8);
+            s.slot(270, [&] { selFilter = ui.segmented("filter", {"All", "Bodies", "Joints"}, selFilter, "What clicks and box-selects pick"); });
             break;
         }
         case T_MEASURE: {
-            rowFor({420.f});
             Vec2 d = measB - measA;
             float deg = length(d) > 1e-4f ? std::atan2(d.y, d.x) * 180.f / PI : 0.f;
-            ui.label(measOn ? "Length " + fmt(length(d)) + "  dx " + fmt(d.x) + "  dy " + fmt(d.y) + "  angle " + fmt(deg) + " deg" : "Drag between two points to measure", measOn ? ui::TextStyle::Normal : ui::TextStyle::Dim);
-            snapControls();
+            s.slot(460, [&] { ui.label(measOn ? "Length " + fmt(length(d)) + "   dx " + fmt(d.x) + "   dy " + fmt(d.y) + "   angle " + fmt(deg) + " deg" : "Drag between two points to measure", measOn ? ui::TextStyle::Normal : ui::TextStyle::Dim); });
             break;
         }
         default:
-            rowFor({500.f});
-            ui.label(toolInfo(tool).what, ui::TextStyle::Dim);
-            snapControls();
+            s.slot(std::max(200, inner.w - 420), [&] { ui.label(toolInfo(tool).what, ui::TextStyle::Dim); });
             break;
+    }
+    // the snap controls at the right end
+    const int snapW = 92, stepW = 160, hintW = ui.textWidth("Ctrl inverts") + 4, right = inner.x + inner.w;
+    const bool hint = s.x + snapW + stepW + hintW + 2 * th.gap <= right, step = s.x + snapW + stepW + th.gap <= right;
+    if (s.x + snapW <= right) {
+        s.from(right - snapW - (step ? stepW + th.gap : 0) - (hint ? hintW + th.gap : 0));
+        s.slot(snapW, [&] { ui.toggle("snap", "Snap", snapOn, "Grid snap: drawn shapes, dropped bodies and dragged edges land on the grid (Ctrl inverts it while dragging)"); });
+        if (step) s.slot(stepW, [&] {
+            int stepIdx = 0; for (int i = 0; i < 4; ++i) if (SNAP_STEPS[i] == snapStep) stepIdx = i;
+            int ns = ui.segmented("snapstep", {"1", "2", "5", "10"}, stepIdx, "The grid step in cells");
+            if (ns != stepIdx) { snapStep = SNAP_STEPS[ns]; snapOn = true; }
+        });
+        if (hint) s.slot(hintW, [&] { ui.label("Ctrl inverts", ui::TextStyle::Dim); });
     }
     ui.endPanel();
 }
+
 
 // ---------------------------------------------------------------- the dock
 void Game::drawDock() {
@@ -483,7 +481,7 @@ void Game::drawDock() {
         ui.endPanel();
         if (!dockFlyout) return;
         ui.beginPanel("dock", L.flyout, true, true);
-        ui.row({1.f, 0.f}, ui::theme().rowH);
+        ui.row({9.f, 1.f}, ui::theme().rowH);
         ui.label(TAB_NAMES[dockTab], ui::TextStyle::Heading);
         if (ui.iconButton("closefly", icons::Close, "Close")) dockFlyout = false;
     }
@@ -500,7 +498,8 @@ void Game::fieldRectBegin(const char* name) { fieldRects[name] = SDL_Rect{0, ui.
 void Game::fieldRectEnd(const char* name) {
     SDL_Rect p = ui.panelRect();
     int y0 = fieldRects[name].y, y1 = ui.contentHeight();
-    fieldRects[name] = SDL_Rect{p.x, p.y + y0, p.w, std::max(1, y1 - y0 - ui::theme().gap)};
+    const int gap = y0 > 0 ? ui::theme().gap : 0;   // the layout gap between the previous widget and this one
+    fieldRects[name] = SDL_Rect{p.x, p.y + y0 + gap, p.w, std::max(1, y1 - y0 - gap)};
 }
 
 // The Inspector: the selection's properties as fields that scrub, type and take expressions; one undo entry per edit.
@@ -560,7 +559,7 @@ void Game::drawInspector() {
     }
     if (sel.empty()) {
         ui.label("Nothing selected", ui::TextStyle::Heading);
-        ui.label("Click a body or joint with Select (Q)", ui::TextStyle::Dim);
+        ui.label("Click a body or joint (Q)", ui::TextStyle::Dim);
         if (ui.section("defaults", "Tool defaults", false)) {
             if (ui.dragFloat("dSpringF", "Spring stiffness", springFreq, 0.5f, 0.2f, 60.f, "/s", 1, "Bounces per second of new springs")) {}
             if (ui.dragFloat("dSpringD", "Spring damping", springDamp, 0.05f, 0.f, 2.f, "", 2, "0 bouncy, 1 dead")) {}
@@ -580,12 +579,12 @@ void Game::drawInspector() {
             std::vector<std::string> sparks = {"Off", "Every 120 frames", "Every 60", "Every 40", "Every 30", "Every 20", "Every 12"};
             int si = sparkIdx;
             if (ui.dropdown("spark", "Spark plugs", sparks, si, "How often spark plugs fire (hold Z to fire them now)")) { sparkIdx = si; world.sparkPeriod = SPARK_RATES[si]; }
-            fieldF("battV", "Battery volts", world.battV, 1.f, 1.f, 70000.f, "V", 0, "Stamped into battery cells you paint next", [&](float v) { world.battV = v; }, "battV", "Battery volts");
-            fieldF("battA", "Battery amps", world.battA, 1.f, 0.001f, 400.f, "A", 2, "The current limit stamped into battery cells you paint next", [&](float v) { world.battA = v; }, "battA", "Battery amps");
+            fieldF("battV", "Volts", world.battV, 1.f, 1.f, 70000.f, "V", 0, "Stamped into battery cells you paint next", [&](float v) { world.battV = v; }, "battV", "Battery volts");
+            fieldF("battA", "Amps", world.battA, 1.f, 0.001f, 400.f, "A", 2, "The current limit stamped into battery cells you paint next", [&](float v) { world.battA = v; }, "battA", "Battery amps");
             std::vector<std::string> names; int cur = 0;
             for (size_t i = 0; i < EMIT_MATS.size(); ++i) { names.push_back(MATS[EMIT_MATS[i]].name); if (EMIT_MATS[i] == payload) cur = (int)i; }
-            if (ui.dropdown("supplyMat", "Supply cells emit", names, cur, "What painted fuel supply cells produce")) payload = EMIT_MATS[cur];
-            if (ui.dragFloat("supplyAmt", "Supply density", world.sourceAmt, 0.1f, 0.1f, 4.f, "", 1, "The gas amount a fuel supply cell emits, stamped as it is painted")) {}
+            if (ui.dropdown("supplyMat", "Supply emits", names, cur, "What painted fuel supply cells produce")) payload = EMIT_MATS[cur];
+            if (ui.dragFloat("supplyAmt", "Supply amount", world.sourceAmt, 0.1f, 0.1f, 4.f, "", 1, "The gas amount a fuel supply cell emits, stamped as it is painted")) {}
             ui.keyValue("Bodies", std::to_string(phys.bodyCount()));
         }
         return;
@@ -613,8 +612,8 @@ void Game::drawInspector() {
                 if (ui.iconButton("mal4", icons::Minus, "Align middles")) alignSelection(4);
                 if (ui.iconButton("mal5", icons::ArrowDown, "Align bottom edges")) alignSelection(5);
                 ui.row(2);
-                if (ui.button("mdh", "Distribute H", icons::FlipH, "Equal gaps left to right", sel.size() >= 3)) distributeSelection(true);
-                if (ui.button("mdv", "Distribute V", icons::FlipV, "Equal gaps top to bottom", sel.size() >= 3)) distributeSelection(false);
+                if (ui.button("mdh", "Spread H", icons::FlipH, "Distribute evenly left to right: equal gaps", sel.size() >= 3)) distributeSelection(true);
+                if (ui.button("mdv", "Spread V", icons::FlipV, "Distribute evenly top to bottom: equal gaps", sel.size() >= 3)) distributeSelection(false);
                 ui.row(2);
                 if (ui.button("mgroup", "Group", icons::Group, tipOf("edit.group").c_str(), true, false, "Ctrl+G")) groupSelection();
                 if (ui.button("mungroup", "Ungroup", icons::Ungroup, tipOf("edit.ungroup").c_str(), !groups.empty(), false, "Ctrl+U")) ungroupSelection();
@@ -651,7 +650,7 @@ void Game::drawInspector() {
         if (ui.toggle("bfixed", "Fixed", fixed, "A fixed body stays where it is: walls, cylinder blocks, mounts (T)")) setFixed(fixed);
         const MatInfo& mi = MATS[b.mat];
         ui.keyValue("Density", fmt(mi.density));
-        ui.keyValue("Melting point", mi.hiT < 1e8f ? fmt(mi.hiT) + " C" : "does not melt");
+        ui.keyValue("Melts at", mi.hiT < 1e8f ? fmt(mi.hiT) + " C" : "never");
         if (mi.elec > 0.f) ui.keyValue("Conducts", fmt(mi.elec));
     }
     if (!whole && b.shape == SHAPE_BOX && !b.isRocket && !b.isWheel && ui.section("fan", "Fan", true, b.fan.strength != 0.f ? "on" : nullptr)) {
@@ -662,8 +661,8 @@ void Game::drawInspector() {
             int m = ui.segmented("fanmode", {"Blow", "Vacuum"}, b.fan.vacuum ? 1 : 0, "Blow draws ambient air in; vacuum only pulls the gas that is there");
             if ((m == 1) != (b.fan.vacuum != 0)) setFanVacuum(m == 1);
             ui.row(2);
-            if (ui.button("fanflip", "Flip direction", icons::FlipH, "Reverse the airflow")) flipFan();
-            if (ui.button("fanoff", "Stop being a fan", icons::Close, "Strength 0: an ordinary body again")) { pushUndo(nullptr, "Fan off"); phys.bodies[primary].fan.strength = 0.f; }
+            if (ui.button("fanflip", "Flip", icons::FlipH, "Reverse the airflow")) flipFan();
+            if (ui.button("fanoff", "Not a fan", icons::Close, "Strength 0: an ordinary body again")) { pushUndo(nullptr, "Fan off"); phys.bodies[primary].fan.strength = 0.f; }
         }
     }
     if (!whole && b.shape == SHAPE_BOX && !b.isRocket && ui.section("emitter", "Emitter", true, b.src.on ? "on" : nullptr)) {
@@ -710,7 +709,7 @@ void Game::drawMaterials() {
             ids.push_back(m);
         }
         if (items.empty()) return false;
-        int hit = ui.swatchGrid(id, items, cur, 28, true);
+        int hit = ui.swatchGrid(id, items, cur, 30, false);   // the names and properties are the chips' tooltips
         if (hit >= 0) {
             uint8_t m = ids[hit];
             if (in.shift) {   // Shift+click marks a favourite
@@ -721,14 +720,14 @@ void Game::drawMaterials() {
         }
         return true;
     };
-    ui.label("Shift+click a chip to favourite it. Clicking assigns to the tool or the selection.", ui::TextStyle::Dim);
+    ui.labelWrapped("Hover a chip for its properties. Click assigns it to the tool or the selection; Shift+click marks a favourite.", ui::TextStyle::Dim);
     if (!favourites.empty() && ui.section("fav", "Favourites")) grid("favgrid", favourites, tool == T_MAT ? mat : bodyMat, tool == T_MAT || !std::count(BODY_MATS.begin(), BODY_MATS.end(), tool == T_MAT ? mat : bodyMat));
     if (!recentMats.empty() && ui.section("recent", "Recent", false)) grid("recentgrid", recentMats, tool == T_MAT ? mat : bodyMat, tool == T_MAT);
     if (ui.section("paintmats", "Paint", true, tool == T_MAT && mat != M_EMPTY ? MATS[mat].name : nullptr)) {
         for (auto& g : PAINT_GROUPS) {
             ui.pushId(g.name);
             SDL_Rect r = ui.next(ui::theme().sectionH);
-            ui.text(g.name, r.x, r.y + (r.h - ui.lineHeight()) / 2, ui::TextStyle::Section);
+            ui.text(g.name, r.x, r.y + (r.h - fontH()) / 2, ui::TextStyle::Section);
             if (!grid("grid", g.mats, mat, true)) ui.label("no match", ui::TextStyle::Disabled);
             ui.popId();
         }
@@ -766,7 +765,7 @@ void Game::drawSceneTab() {
         if (!rows[i].joint && rows[i].id == primary) selected = (int)i;
         if (rows[i].joint && rows[i].id == selJoint) selected = (int)i;
     }
-    ui.keyValue("Bodies / joints", std::to_string(phys.bodyCount()) + " / " + std::to_string(std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); })));
+    ui.keyValue("Bodies, joints", std::to_string(phys.bodyCount()) + " / " + std::to_string(std::count_if(phys.joints.begin(), phys.joints.end(), [&](const Joint& j) { return jointValid(j.id); })));
     int hit = ui.listView("scenelist", names, selected, std::max(6, (ui.panelRect().h - 5 * ui::theme().rowH) / ui::theme().rowH), &details);
     if (hit >= 0) {
         if (rows[hit].joint) selectJoint(rows[hit].id); else selectBody(rows[hit].id, in.shift, in.ctrl);
@@ -792,7 +791,7 @@ void Game::drawStatusBar() {
     const ui::Theme& th = ui::theme();
     ui.beginPanel("status", L.status, false, true, 0);
     SDL_Rect r = ui.panelRect();
-    const int ty = r.y + (r.h - ui.lineHeight()) / 2;
+    const int ty = r.y + (r.h - fontH()) / 2;
     auto fit = [&](std::string s, int maxW) {
         if (ui.textWidth(s) <= maxW) return s;
         while (!s.empty() && ui.textWidth(s + "...") > maxW) s.pop_back();
@@ -812,7 +811,10 @@ void Game::drawStatusBar() {
     std::string left = guide.on ? "Snap: " + guide.name : ui.hoveredTip();
     if (left.empty()) left = toolBindings();
     const int pad = th.pad;
-    const int leftMax = std::max(60, (r.w - rightW - 3 * pad) * 5 / 9);
+    // the centre read-out gets its natural width (at most two fifths), the left text what is left
+    const int room = r.w - rightW - 5 * pad;
+    const int centreW = std::min(ui.textWidth(centre), room * 2 / 5);
+    const int leftMax = std::max(60, room - centreW);
     int leftW = std::min(ui.textWidth(left), leftMax);
     ui.text(fit(left, leftMax), r.x + pad, ty, ui::TextStyle::Dim);
     int cx = r.x + pad + leftW + 2 * pad;
@@ -830,7 +832,7 @@ void Game::drawCanvasOverlays() {
     // the dimension field beside the pointer while a shape is drawn or a handle dragged
     if (dim.active && lmb) {
         int x = in.mx + 18, y = in.my + 18;
-        const int fw = 112, fh = ui.lineHeight() + 8;
+        const int fw = 112, fh = fontH() + 8;
         const int w = dim.n * (fw + 4) + 4, h = fh + 8;
         if (x + w > L.canvas.x + L.canvas.w) x = in.mx - w - 8;
         if (y + h > L.canvas.y + L.canvas.h) y = in.my - h - 8;

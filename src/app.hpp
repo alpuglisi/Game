@@ -206,7 +206,6 @@ struct Game {
     struct DimField { bool active = false; int cur = 0, n = 0; std::string text[3]; bool typed[3] = {false, false, false}; const char* names[3] = {"", "", ""}; float shown[3] = {0, 0, 0}; } dim;
     // where the inspector's fields were drawn this frame, by name, so the headless editor test can click them
     std::map<std::string, SDL_Rect> fieldRects;
-    std::string toastText; Uint32 toastUntil = 0;
 
     // ---------------------------------------------------------------- setup (editor.cpp)
     bool init(bool headless, int w, int h);

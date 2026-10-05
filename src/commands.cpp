@@ -169,11 +169,12 @@ std::string Game::tipOf(const char* id) const {
 bool Game::handleKey(SDL_Keycode k, bool ctrl, bool shift) {
     // the tool contract: Enter commits, Esc cancels; then Esc clears the selection, then closes panels
     if (k == SDLK_RETURN || k == SDLK_KP_ENTER) { if (lmb) { commitDrag(); return true; } return false; }
-    if (k == SDLK_ESCAPE) {
+    if (k == SDLK_ESCAPE) {   // the drag in progress, then the topmost popup or dialog, then the selection
         if (cancelDrag()) return true;
         if (selOtherOpen || ctxOpen || matMenuOpen || paletteOpen || scaleOpen) { selOtherOpen = ctxOpen = matMenuOpen = paletteOpen = scaleOpen = false; return true; }
+        if (cheatOpen || scenesOpen || fileOpen || newConfirm) { cheatOpen = scenesOpen = fileOpen = newConfirm = false; return true; }
         if (!sel.empty() || jointValid(selJoint)) { clearSelection(); return true; }
-        if (cheatOpen || scenesOpen || fileOpen || newConfirm || dockFlyout) { cheatOpen = scenesOpen = fileOpen = newConfirm = dockFlyout = false; return true; }
+        if (dockFlyout) { dockFlyout = false; return true; }
         return true;
     }
     if (!ctrl && (k == SDLK_LEFT || k == SDLK_RIGHT || k == SDLK_UP || k == SDLK_DOWN)) { nudgeSelection(k); return true; }

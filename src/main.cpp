@@ -31,10 +31,11 @@ struct Driver {
         e = SDL_Event{}; e.type = SDL_KEYUP; e.key.keysym.sym = k; e.key.keysym.mod = mod; push(e);
         SDL_SetModState(KMOD_NONE);
     }
-    void type(const std::string& s) {   // typed text arrives as key presses and text input, as from a keyboard
+    void type(const std::string& s) {   // typed text arrives as a key press, the text input and the key release, as from a keyboard
         for (char c : s) {
             SDL_Event e{}; e.type = SDL_KEYDOWN; e.key.keysym.sym = (SDL_Keycode)(unsigned char)c; SDL_PushEvent(&e);
-            e = SDL_Event{}; e.type = SDL_TEXTINPUT; e.text.text[0] = c; e.text.text[1] = 0; push(e);
+            e = SDL_Event{}; e.type = SDL_TEXTINPUT; e.text.text[0] = c; e.text.text[1] = 0; SDL_PushEvent(&e);
+            e = SDL_Event{}; e.type = SDL_KEYUP; e.key.keysym.sym = (SDL_Keycode)(unsigned char)c; push(e);
         }
     }
     void frames(int n) { for (int i = 0; i < n; ++i) g.handleEvents(); }
@@ -42,7 +43,8 @@ struct Driver {
 };
 
 const char* yn(bool b) { return b ? "yes" : "NO"; }
-bool near(float a, float b, float tol = 0.05f) { return std::fabs(a - b) <= tol; }
+// positions that come from the mouse are quantised to pixels (about 0.3 cells at the default window), so they get that tolerance
+bool near(float a, float b, float tol = 0.3f) { return std::fabs(a - b) <= tol; }
 bool nearV(Vec2 a, Vec2 b) { return near(a.x, b.x) && near(a.y, b.y); }
 bool overlaps(const SDL_Rect& a, const SDL_Rect& b) { return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h; }
 
@@ -64,9 +66,9 @@ void editorTest(Game& g) {
                 for (auto& z : zones) if (z.x < 0 || z.y < 0 || z.x + z.w > w || z.y + z.h > h) ok = false;
                 if (L.canvas.x + L.canvas.w + L.dock.w != w || L.canvas.y + L.canvas.h != L.status.y) ok = false;
                 if (L.dockCollapsed != (w < 1200)) ok = false;
-                if (L.top.h != 40 || L.ctx.h != 32 || L.status.h != 28 || L.strip.w != 96) ok = false;
+                if (L.top.h != 40 || L.ctx.h != 32 || L.status.h != 28 || (L.strip.w != 96 && L.strip.w != 108)) ok = false;
                 Layout C = computeLayout(w, h, true);
-                if (C.strip.w >= 96 || C.canvas.w <= L.canvas.w) ok = false;
+                if (C.strip.w >= L.strip.w || C.canvas.w <= L.canvas.w) ok = false;
             }
         std::printf("layout from the window size: zones tile the window without overlap at 12 sizes, dock collapses below 1200: %s\n", yn(ok));
     }
@@ -175,7 +177,7 @@ void editorTest(Game& g) {
     std::printf("measure tool: (%.0f, %.0f) -> (%.0f, %.0f) length %.1f, shown, bodies and undo entries unchanged: %s\n",
                 g.measA.x, g.measA.y, g.measB.x, g.measB.y, length(g.measB - g.measA), yn(g.measOn && near(length(g.measB - g.measA), 67.08f, 0.1f) && d.alive() == n1 && g.undoStack.size() == undoN));
     // ---- handles: a fresh 60 x 30 box, its right edge dragged, a corner with Ctrl, the rotation handle plain and with Shift
-    g.clearSelection(); g.snapOn = false;
+    g.clearSelection(); g.snapOn = false; g.smartSnap = false;
     g.setTool(T_BOX);
     d.drag(100, 160, 160, 190);                       // x 100..160, y 160..190, centre (130, 175)
     g.setTool(T_SELECT);
@@ -189,11 +191,11 @@ void editorTest(Game& g) {
     std::printf("right edge handle dragged 10 cells right: width %.2f (expected 70), left edge still at %.2f: %s\n", body().half.x * 2, body().pos.x - body().half.x,
                 yn(near(body().half.x * 2, 70) && near(body().pos.x - body().half.x, 100)));
     Vec2 c0 = body().pos, br = hpos(4);               // the bottom-right corner
-    SDL_SetModState(KMOD_CTRL);
+    SDL_SetModState(KMOD_CTRL);                       // Ctrl resizes about the centre and, with the grid off, turns snapping on
     d.drag(br.x, br.y, br.x + 4, br.y + 6);
     SDL_SetModState(KMOD_NONE);
-    std::printf("ctrl + corner handle dragged (4, 6): %.0f x %.0f (expected 78 x 42), centre kept: %s\n", body().half.x * 2, body().half.y * 2,
-                yn(nearV(body().pos, c0) && near(body().half.x * 2, 78) && near(body().half.y * 2, 42)));
+    std::printf("ctrl + corner handle dragged (4, 6): %.0f x %.0f (expected 80 x 40: about the centre, on the inverted 5-cell grid), centre kept: %s\n",
+                body().half.x * 2, body().half.y * 2, yn(nearV(body().pos, c0) && near(body().half.x * 2, 80) && near(body().half.y * 2, 40)));
     Vec2 rot = hpos(Game::H_ROT);
     float arm = length(rot - body().pos);
     d.drag(rot.x, rot.y, body().pos.x + arm, body().pos.y);   // from straight above the centre to straight right of it
@@ -211,13 +213,14 @@ void editorTest(Game& g) {
     std::printf("three undos restore the box: %.0f x %.0f at (%.0f, %.0f), angle %.0f: %s\n", body().half.x * 2, body().half.y * 2, body().pos.x, body().pos.y, body().angle * 180.f / PI, yn(restored));
     // ---- Esc cancels a handle drag: the body and the undo stack are as before
     undoN = g.undoStack.size();
+    const float w0 = body().half.x * 2;
     rh = hpos(3);
     d.down(rh.x, rh.y); d.mouseTo(rh.x + 12, rh.y); g.update();
-    bool midDrag = near(body().half.x * 2, 72);
+    bool midDrag = near(body().half.x * 2, w0 + 12);
     d.key(SDLK_ESCAPE);
     d.up(rh.x + 12, rh.y);
-    std::printf("esc during a handle drag (width was %s at 72) puts the width back to %.0f and leaves the undo stack at %zu entries: %s\n", midDrag ? "mid-way" : "NOT", body().half.x * 2,
-                g.undoStack.size(), yn(midDrag && near(body().half.x * 2, 60) && g.undoStack.size() == undoN));
+    std::printf("esc during a handle drag (width was %s 12 wider) puts the width back to %.0f and leaves the undo stack at %zu entries: %s\n", midDrag ? "mid-way" : "NOT", body().half.x * 2,
+                g.undoStack.size(), yn(midDrag && near(body().half.x * 2, w0) && g.undoStack.size() == undoN));
     // ---- grid snap: the toggle in the context bar (the same command the button runs), a snapped move and a snapped edge
     g.runCommand("view.snap"); g.snapStep = 5;
     std::printf("snap toggle: grid snap on with a 5-cell step: %s\n", yn(g.snapOn && g.snapStep == 5));
@@ -226,24 +229,27 @@ void editorTest(Game& g) {
     rh = hpos(3);
     d.drag(rh.x, rh.y, rh.x + 7.3f, rh.y);
     std::printf("right edge dragged 7.3 cells with the grid on: edge at %.1f (expected 170): %s\n", body().pos.x + body().half.x, yn(near(body().pos.x + body().half.x, 170)));
+    Vec2 q0 = body().pos;
     SDL_SetModState(KMOD_CTRL);                       // Ctrl inverts the snap for the drag
-    d.drag(135, 180, 138, 181);
+    d.drag(q0.x, q0.y, q0.x + 3, q0.y + 1);
     SDL_SetModState(KMOD_NONE);
-    std::printf("ctrl inverts the snap: a (3, 1) drag with the grid on lands at (%.0f, %.0f) (expected 138, 181): %s\n", body().pos.x, body().pos.y, yn(nearV(body().pos, Vec2(138, 181))));
+    std::printf("ctrl inverts the snap: a (3, 1) drag with the grid on moves the body by (%.1f, %.1f), off the grid: %s\n", body().pos.x - q0.x, body().pos.y - q0.y,
+                yn(near(body().pos.x - q0.x, 3, 0.35f) && near(body().pos.y - q0.y, 1, 0.35f)));
     g.runCommand("view.snap");
     // ---- smart snap: a body dragged near another's left edge sticks to it and names the guide
     g.smartSnap = true;
     g.clearSelection();
-    g.setTool(T_BOX); d.drag(300, 160, 340, 180);    // a target whose left edge is at x = 300
+    g.setTool(T_BOX); d.drag(300, 200, 340, 230);    // a target whose left edge is at x = 300, clear of everything else
     g.setTool(T_SELECT);
-    d.click(138, 181);                                // the handled box: left edge at 103
+    d.click(140, 180);                                // the handled box
     Vec2 lp = body().pos;
-    d.down(lp.x, lp.y); d.mouseTo(lp.x + 196.5f, lp.y + 30); g.update();   // its left edge comes to 299.5, within 6 px of 300
-    bool guided = g.guide.on && g.guide.vertical && near(g.guide.coord, 300) && g.guide.name.find("left") == 0;
+    const float toLeft = 299.5f - (lp.x - body().half.x);
+    d.down(lp.x, lp.y); d.mouseTo(lp.x + toLeft * 0.5f, lp.y); g.update(); d.mouseTo(lp.x + toLeft, lp.y); g.update();   // its left edge comes to 299.5, within 6 px of 300
+    bool guided = g.guide.on && g.guide.vertical && near(g.guide.coord, 300, 0.01f) && g.guide.name.find("left") == 0;
     std::string guideName = g.guide.name;
-    d.up(lp.x + 196.5f, lp.y + 30);
+    d.up(lp.x + toLeft, lp.y);
     std::printf("smart snap: the dragged box's left edge snapped to %.1f (expected 300) with the guide \"%s\": %s\n", body().pos.x - body().half.x, guideName.c_str(),
-                yn(guided && near(body().pos.x - body().half.x, 300)));
+                yn(guided && near(body().pos.x - body().half.x, 300, 0.01f)));
     // ---- zoom to selection and back
     d.key(SDLK_f, KMOD_SHIFT);
     Vec2 centre(g.camXf + g.viewW() * 0.5f, g.camYf + g.viewH() * 0.5f);
@@ -273,7 +279,7 @@ void editorTest(Game& g) {
     SDL_Rect fx = g.fieldRects.count("X") ? g.fieldRects["X"] : SDL_Rect{0, 0, 0, 0};
     undoN = g.undoStack.size();
     float xBefore = body().pos.x;
-    d.clickWin(fx.x + fx.w / 2, fx.y + fx.h / 2);
+    d.clickWin(fx.x + fx.w * 3 / 4, fx.y + fx.h / 2);   // the right part of the row is the number itself
     d.type("250"); d.key(SDLK_RETURN);
     d.frames(1);
     std::printf("inspector: the X field (found: %s) typed 250 moves the body from %.0f to %.0f and adds one undo entry (%zu -> %zu): %s\n", yn(fx.w > 0), xBefore, body().pos.x, undoN,
@@ -311,17 +317,17 @@ void editorTest(Game& g) {
                 yn(onBody), yn(closed), yn(onCanvas), yn(onBody && closed && onCanvas && !g.ctxOpen));
     // ---- select other: click and hold for 400 ms on stacked bodies lists them; the backtick key does the same
     g.clearSelection();
-    g.setTool(T_BOX); d.drag(400, 100, 460, 130);
-    g.setTool(T_CIRCLE); d.drag(430, 115, 430, 125);
+    g.setTool(T_BOX); d.drag(200, 160, 260, 190);
+    g.setTool(T_CIRCLE); d.drag(230, 175, 230, 185);
     g.setTool(T_SELECT); g.clearSelection();
-    d.down(430, 115);
+    d.down(230, 175);
     SDL_Delay(430);
     d.frames(1);
     bool held = g.selOtherOpen && g.selOther.size() == 2;
     size_t listed = g.selOther.size();
-    d.up(430, 115);
+    d.up(230, 175);
     d.key(SDLK_ESCAPE);
-    d.mouseTo(430, 115);
+    d.mouseTo(230, 175);
     d.key(SDLK_BACKQUOTE);
     bool tick = g.selOtherOpen && g.selOther.size() == 2;
     d.key(SDLK_ESCAPE);
@@ -332,9 +338,9 @@ void editorTest(Game& g) {
     bool cleared = g.sel.empty();
     undoN = g.undoStack.size(); nb = d.alive();
     g.setTool(T_BOX);
-    d.down(500, 100); d.mouseTo(540, 120); g.update();
-    d.clickWin(d.px(540), d.py(120), SDL_BUTTON_RIGHT);
-    d.up(540, 120);
+    d.down(300, 120); d.mouseTo(340, 140); g.update();
+    d.clickWin(d.px(340), d.py(140), SDL_BUTTON_RIGHT);
+    d.up(340, 140);
     std::printf("esc clears the selection (%s); right click cancels a box drag: no body made, undo stack unchanged, no menu: %s\n", yn(cleared),
                 yn(d.alive() == nb && g.undoStack.size() == undoN && !g.ctxOpen && !g.lmb));
     // ---- the transport: Space plays, Space pauses, Shift+Space stops and restores
@@ -354,7 +360,7 @@ void gallery(Game& g, const char* out) {
     struct State { std::string name; std::function<void()> setup; };
     auto base = [&] {
         g.cheatOpen = g.scenesOpen = g.fileOpen = g.paletteOpen = g.ctxOpen = g.matMenuOpen = g.selOtherOpen = g.newConfirm = g.scaleOpen = false;
-        g.dockTab = 0; g.dockFlyout = false;
+        g.dockTab = 0; g.dockFlyout = g.L.dockCollapsed;   // a narrow window shows the dock as a flyout
         g.clearSelection();
         g.setTool(T_SELECT);
         g.in.mx = g.L.canvas.x + g.L.canvas.w / 2; g.in.my = g.L.canvas.y + g.L.canvas.h / 2;
@@ -604,7 +610,7 @@ int main(int argc, char** argv) {
                 auto typeField = [&](const char* name, const char* value) {
                     if (!g.fieldRects.count(name)) return false;
                     SDL_Rect r = g.fieldRects[name];
-                    d.clickWin(r.x + r.w / 2, r.y + r.h / 2); d.type(value); d.key(SDLK_RETURN); d.frames(1);
+                    d.clickWin(r.x + r.w * 3 / 4, r.y + r.h / 2); d.type(value); d.key(SDLK_RETURN); d.frames(1);
                     return true;
                 };
                 bool a1 = typeField("jfreq", "4"), a2 = typeField("jlen", "50");
